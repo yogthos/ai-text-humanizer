@@ -11,16 +11,403 @@ from pathlib import Path
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from glm import GLMProvider
 from deepseek import DeepSeekProvider
-from markov import StyleTransferAgent
+from markov import StyleTransferAgent, MetaphorDetector
 
 # Suppress the loss_type warning
 warnings.filterwarnings("ignore", message=".*loss_type.*")
+
+class AlgorithmicSentenceManipulator:
+    """
+    Algorithmically manipulate sentences to evade GPTZero detection.
+    Key insight: AI detection works on HOW text is generated, not just WHAT it says.
+    By doing manipulation algorithmically (not via AI), we avoid introducing AI patterns.
+
+    IMPORTANT: Avoid adding formal transitions like "In fact," "Indeed," "Moreover,"
+    as these are flagged as AI patterns by detectors.
+
+    This class uses LEARNED PATTERNS from the sample text (prompts/sample.txt) to guide
+    transformations. The sample text passes GPTZero, so we mirror its patterns.
+    """
+
+    def __init__(self, learned_patterns=None):
+        # Conjunctions for merging sentences - simple, natural ones only
+        self.merge_conjunctions = ['; ', ', and ', ', but ']
+        # NO TRANSITIONS - GPTZero flags "In fact," "Indeed," "Moreover," etc. as AI patterns
+        # Instead, we rely on sentence merging and clause reordering only
+        self.transitions = []  # Empty - don't add any transitions
+        # Clause reordering markers
+        self.subordinators = ['when', 'while', 'as', 'since', 'because', 'although', 'though', 'if']
+
+        # Learned patterns from sample text
+        self.learned_patterns = learned_patterns or {}
+
+        # Extract specific patterns if available
+        self.target_burstiness = self.learned_patterns.get('burstiness', {'short': 0.2, 'medium': 0.5, 'long': 0.3})
+        self.target_openers = self.learned_patterns.get('sentence_openers', {})
+        self.target_lengths_by_pos = self.learned_patterns.get('sentence_lengths_by_position', [])
+        self.punctuation_patterns = self.learned_patterns.get('punctuation', {})
+
+    def merge_short_sentences(self, paragraph):
+        """
+        Algorithmically merge consecutive short sentences (<12 words) using semicolons and conjunctions.
+        This creates natural burstiness without AI intervention.
+        """
+        sentences = self._split_sentences(paragraph)
+        if len(sentences) < 2:
+            return paragraph
+
+        result = []
+        i = 0
+        merge_idx = 0  # Cycle through different merge styles
+
+        while i < len(sentences):
+            sent = sentences[i].strip()
+            sent_words = len(sent.split())
+
+            # Check if this and next sentence are both short
+            if i + 1 < len(sentences):
+                next_sent = sentences[i + 1].strip()
+                next_words = len(next_sent.split())
+
+                # Merge if both are short (< 12 words) or if creating better variation
+                if sent_words < 12 and next_words < 15:
+                    # Lowercase next sentence start, but preserve "I" (first person pronoun)
+                    if next_sent and next_sent[0] == 'I' and (len(next_sent) == 1 or not next_sent[1].isalpha()):
+                        # Keep "I" uppercase
+                        next_start = next_sent
+                    else:
+                        next_start = next_sent[0].lower() + next_sent[1:] if next_sent else ""
+
+                    # Use semicolon for most merges, conjunction for variety
+                    if merge_idx % 3 == 0:
+                        merged = f"{sent}; {next_start}"
+                    elif merge_idx % 3 == 1:
+                        merged = f"{sent}, and {next_start}"
+                    else:
+                        merged = f"{sent}, {next_start}"
+
+                    result.append(merged)
+                    merge_idx += 1
+                    i += 2
+                    continue
+
+            result.append(sent)
+            i += 1
+
+        return '. '.join(result) + '.'
+
+    def vary_sentence_starters(self, paragraph):
+        """
+        Algorithmically vary sentence starters using LEARNED PATTERNS from sample text.
+
+        1. Uses common sentence openers from the sample (self.target_openers)
+        2. Moves prepositional phrases to the front
+        3. Inverts clause order
+
+        NOTE: We do NOT add formal transition words like "In fact," "Indeed," etc.
+        as these are flagged as AI patterns by detectors.
+        """
+        sentences = self._split_sentences(paragraph)
+        if len(sentences) < 3:
+            return paragraph
+
+        # Get top sentence openers from the sample text (these pass GPTZero)
+        sample_openers = list(self.target_openers.keys()) if self.target_openers else []
+
+        # Track starters to avoid repetition
+        starters_used = []
+        result = []
+
+        for i, sent in enumerate(sentences):
+            sent = sent.strip()
+            if not sent:
+                continue
+
+            words = sent.split()
+            starter = words[0].lower() if words else ''
+
+            # If starter was used in last 2 sentences, try to change it
+            if starter in starters_used[-2:] and len(words) > 5:
+                # Try to move a prepositional phrase to front
+                modified = self._move_phrase_to_front(sent)
+                if modified != sent:
+                    result.append(modified)
+                    starters_used.append(modified.split()[0].lower())
+                    continue
+
+                # Try to invert clause order if there's a comma
+                # BUT: Don't invert if second clause starts with a pronoun (would lose referent)
+                if ',' in sent:
+                    parts = sent.split(',', 1)
+                    second_part = parts[1].strip() if len(parts) > 1 else ''
+                    second_first_word = second_part.split()[0].lower() if second_part.split() else ''
+
+                    # Pronouns that would lose their referent if inverted
+                    pronouns = {'it', 'he', 'she', 'they', 'this', 'that', 'these', 'those', 'its', 'their'}
+
+                    if len(parts) == 2 and len(second_part.split()) > 3 and second_first_word not in pronouns:
+                        # Move second part to front (safe - no pronoun referent issues)
+                        inverted = second_part.capitalize() + ', ' + parts[0].lower()
+                        result.append(inverted)
+                        starters_used.append(inverted.split()[0].lower())
+                        continue
+
+            result.append(sent)
+            starters_used.append(starter)
+
+        return '. '.join(result) + '.'
+
+    def _move_phrase_to_front(self, sentence):
+        """Move a prepositional phrase from the end to the beginning."""
+        # Look for phrases like "in the X", "from the Y", "through the Z"
+        prep_patterns = [
+            r'^(.+?)\s+(in the \w+)\.?$',
+            r'^(.+?)\s+(from the \w+)\.?$',
+            r'^(.+?)\s+(through the \w+)\.?$',
+            r'^(.+?)\s+(during the \w+)\.?$',
+            r'^(.+?)\s+(within the \w+)\.?$',
+        ]
+
+        for pattern in prep_patterns:
+            match = re.match(pattern, sentence, re.IGNORECASE)
+            if match:
+                main_clause = match.group(1)
+                prep_phrase = match.group(2)
+                # Move prep phrase to front
+                return f"{prep_phrase.capitalize()}, {main_clause[0].lower() + main_clause[1:]}"
+
+        return sentence
+
+    def add_parenthetical_asides(self, paragraph):
+        """
+        Add parenthetical asides to break up the rhythm.
+        Human writers naturally include asides; AI tends not to.
+
+        NOTE: Keep asides simple and rare. Avoid formal ones like "to be sure"
+        which can be flagged as AI patterns.
+        """
+        sentences = self._split_sentences(paragraph)
+        result = []
+
+        # Simple, casual asides only - avoid formal ones
+        asides = [', though,', ', really,', ', I think,', ', at least,']
+
+        aside_idx = 0
+        for i, sent in enumerate(sentences):
+            sent = sent.strip()
+            if not sent:
+                continue
+
+            words = sent.split()
+            # Add aside to long sentences (>18 words) very occasionally
+            if len(words) > 18 and i % 5 == 3 and aside_idx < len(asides):
+                # Insert aside after the subject (roughly after 4-6 words)
+                insert_pos = min(5, len(words) // 3)
+                words.insert(insert_pos, asides[aside_idx])
+                aside_idx += 1
+                result.append(' '.join(words).replace('  ', ' '))
+            else:
+                result.append(sent)
+
+        return '. '.join(result) + '.'
+
+    def create_burstiness(self, paragraph):
+        """
+        Create burstiness by matching the LEARNED sentence length distribution from sample text.
+
+        Uses self.target_burstiness which is learned from the sample that passes GPTZero.
+        """
+        sentences = self._split_sentences(paragraph)
+        if len(sentences) < 4:
+            return paragraph
+
+        lengths = [len(s.split()) for s in sentences]
+        total = len(lengths)
+
+        # Calculate current distribution
+        current_short = sum(1 for l in lengths if l <= 10) / total if total else 0
+        current_medium = sum(1 for l in lengths if 11 <= l <= 25) / total if total else 0
+        current_long = sum(1 for l in lengths if l > 25) / total if total else 0
+
+        # Get target distribution from learned patterns (defaults if not learned)
+        target_short = self.target_burstiness.get('short', 0.2)
+        target_medium = self.target_burstiness.get('medium', 0.5)
+        target_long = self.target_burstiness.get('long', 0.3)
+
+        # Determine what adjustments are needed
+        need_more_short = current_short < target_short - 0.1
+        need_more_long = current_long < target_long - 0.1
+        need_less_medium = current_medium > target_medium + 0.15
+
+        result = []
+        merged_one = False
+
+        for i, sent in enumerate(sentences):
+            sent = sent.strip()
+            if not sent:
+                continue
+
+            words = sent.split()
+
+            # If we need more long sentences and have medium ones, try merging
+            if need_more_long and not merged_one and i + 1 < len(sentences):
+                next_sent = sentences[i + 1].strip()
+                if 11 <= len(words) <= 25 and 11 <= len(next_sent.split()) <= 25:
+                    # Merge two medium sentences into one long one
+                    merged = f"{sent}; {next_sent[0].lower() + next_sent[1:]}"
+                    result.append(merged)
+                    merged_one = True
+                    sentences[i + 1] = ''  # Mark as used
+                    continue
+
+            result.append(sent)
+
+        return '. '.join([s for s in result if s]) + '.'
+
+    def process_paragraph(self, paragraph, genre='mixed'):
+        """
+        Apply all algorithmic transformations to a paragraph.
+
+        Uses LEARNED PATTERNS from sample text to guide transformations.
+        The goal is to match the sample's sentence length distribution and
+        punctuation patterns, which pass GPTZero.
+        """
+        # Step 1: Merge short sentences (aggressive merging to match sample's long sentences)
+        # Sample has 45% long sentences - we need to create more long sentences
+        result = self.merge_short_sentences(paragraph)
+
+        # Step 2: Create burstiness using learned distribution
+        result = self.create_burstiness(result)
+
+        # Step 3: Vary sentence starters (but avoid AI-flagged transitions)
+        result = self.vary_sentence_starters(result)
+
+        # Step 4: Add semicolons to match sample's punctuation pattern
+        # Sample has 0.19 semicolons per sentence - add more semicolons
+        result = self._add_semicolons_like_sample(result)
+
+        # Step 5: Clean up
+        result = self._cleanup_punctuation(result)
+
+        return result.strip()
+
+    def _add_semicolons_like_sample(self, paragraph):
+        """
+        Add semicolons to match the sample text's punctuation pattern.
+
+        The sample has ~0.19 semicolons per sentence, so we should have
+        roughly 1 semicolon per 5 sentences on average.
+        """
+        target_ratio = self.punctuation_patterns.get('semicolon_per_sentence', 0.19)
+        sentences = self._split_sentences(paragraph)
+
+        if len(sentences) < 3:
+            return paragraph
+
+        # Count current semicolons
+        current_semicolons = paragraph.count(';')
+        target_semicolons = int(len(sentences) * target_ratio)
+
+        # If we already have enough, return as-is
+        if current_semicolons >= target_semicolons:
+            return paragraph
+
+        # Add semicolons by replacing periods between short consecutive sentences
+        result = []
+        i = 0
+        semicolons_added = 0
+
+        while i < len(sentences):
+            sent = sentences[i].strip()
+            if not sent:
+                i += 1
+                continue
+
+            # Look for opportunities to add semicolons
+            if (semicolons_added < target_semicolons - current_semicolons and
+                i + 1 < len(sentences) and
+                len(sent.split()) < 20 and  # Short enough sentence
+                len(sentences[i + 1].strip().split()) < 20):  # Next also short
+
+                next_sent = sentences[i + 1].strip()
+                # Lowercase next sentence start, but preserve "I" (first person pronoun)
+                if next_sent and next_sent[0] == 'I' and (len(next_sent) == 1 or not next_sent[1].isalpha()):
+                    next_start = next_sent  # Keep "I" uppercase
+                else:
+                    next_start = next_sent[0].lower() + next_sent[1:] if next_sent else ""
+                # Replace period with semicolon
+                result.append(f"{sent}; {next_start}")
+                semicolons_added += 1
+                i += 2
+                continue
+
+            result.append(sent)
+            i += 1
+
+        return '. '.join(result) + '.'
+
+    def _cleanup_punctuation(self, text):
+        """Clean up punctuation artifacts from algorithmic manipulation."""
+        # Fix period followed by punctuation (e.g., ".,")
+        text = re.sub(r'\.,', ',', text)
+        text = re.sub(r'\.;', ';', text)
+        text = re.sub(r'\.\s+,', ',', text)
+        text = re.sub(r'\.\s+;', ';', text)
+
+        # Remove double periods
+        text = re.sub(r'\.+', '.', text)
+
+        # Fix spacing around punctuation
+        text = re.sub(r'\s+\.', '.', text)  # Remove space before period
+        text = re.sub(r'\s+,', ',', text)  # Remove space before comma
+        text = re.sub(r'\s+;', ';', text)  # Remove space before semicolon
+
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
+
+        # Ensure proper spacing after punctuation
+        text = re.sub(r'\.([A-Z])', r'. \1', text)
+        text = re.sub(r',([a-zA-Z])', r', \1', text)
+        text = re.sub(r';([a-zA-Z])', r'; \1', text)
+
+        # Fix lowercase 'i' that should be 'I' (only standalone)
+        text = re.sub(r'\bi\b', 'I', text)
+
+        # Fix double punctuation
+        text = re.sub(r'[,;]\s*[,;]', ';', text)
+        text = re.sub(r'[,;]\s*\.', '.', text)
+
+        # Fix cases like ". ;" or " .;"
+        text = re.sub(r'\.\s*;', ';', text)
+        text = re.sub(r'\.\s*,', ',', text)
+
+        # Clean up any remaining oddities
+        text = re.sub(r';\s*\.', '.', text)
+        text = re.sub(r',\s*\.', '.', text)
+
+        # Ensure sentence starts with capital
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        result = []
+        for sent in sentences:
+            if sent:
+                sent = sent[0].upper() + sent[1:] if len(sent) > 1 else sent.upper()
+                result.append(sent)
+
+        return ' '.join(result)
+
+    def _split_sentences(self, text):
+        """Split text into sentences, preserving structure."""
+        # Split on period, exclamation, question mark followed by space and capital
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+        return [s.strip() for s in sentences if s.strip()]
+
 
 class GPTZeroMetricOptimizer:
     """Optimize text to evade GPTZero detection by targeting specific metrics."""
 
     def __init__(self, analyzer):
         self.analyzer = analyzer
+        self.sentence_manipulator = AlgorithmicSentenceManipulator()
 
     def calculate_metrics(self, text):
         """Calculate GPTZero detection metrics."""
@@ -63,6 +450,10 @@ class GPTZeroMetricOptimizer:
         """Split text into sentences."""
         sentences = re.split(r'[.!?]+', text)
         return [s.strip() for s in sentences if s.strip()]
+
+    def apply_algorithmic_fixes(self, text):
+        """Apply algorithmic sentence manipulation (no AI involved)."""
+        return self.sentence_manipulator.process_paragraph(text)
 
     def validate_metrics(self, text, target_metrics=None):
         """
@@ -214,6 +605,17 @@ class AgenticHumanizer:
 
         # Initialize Markov chain style transfer agent
         self.markov_agent = StyleTransferAgent(config_path)
+
+        # Initialize metaphor detector for AI-typical flourish detection
+        self.metaphor_detector = MetaphorDetector(nlp=self.markov_agent.analyzer.nlp)
+
+        # Load metaphor simplification prompt
+        simplify_prompt_path = Path(__file__).parent / "prompts" / "simplify_metaphor.md"
+        if simplify_prompt_path.exists():
+            with open(simplify_prompt_path, 'r') as f:
+                self.simplify_metaphor_prompt = f.read()
+        else:
+            self.simplify_metaphor_prompt = None
 
         # Check if database exists, train if needed
         db_path = Path("style_brain.db")
@@ -691,6 +1093,164 @@ class AgenticHumanizer:
 
         return genre
 
+    def _get_sample_patterns(self):
+        """Get cached sample patterns from the Markov agent."""
+        try:
+            # Try to get from analyzer's cached patterns
+            if hasattr(self.markov_agent.analyzer, 'cached_sample_patterns'):
+                return self.markov_agent.analyzer.cached_sample_patterns
+
+            # Otherwise, analyze sample file
+            sample_path = Path(__file__).parent / "prompts" / "sample.txt"
+            if sample_path.exists():
+                with open(sample_path, 'r') as f:
+                    sample_text = f.read()
+                return self.markov_agent.analyzer.analyze_sample_patterns(sample_text)
+        except Exception:
+            pass
+        return {}
+
+    def _get_learned_patterns_for_manipulator(self):
+        """
+        Get learned patterns from the sample text (prompts/sample.txt) for the algorithmic manipulator.
+
+        These patterns are from human text that passes GPTZero, so we mirror them.
+        """
+        patterns = {}
+
+        try:
+            # Get burstiness distribution from database
+            burstiness = self.markov_agent.db.get_learned_pattern('burstiness')
+            if burstiness:
+                patterns['burstiness'] = burstiness
+
+            # Get punctuation patterns
+            punctuation = self.markov_agent.db.get_learned_pattern('punctuation')
+            if punctuation:
+                patterns['punctuation'] = punctuation
+
+            # Get sample patterns from analyzer
+            sample_patterns = self._get_sample_patterns()
+            if sample_patterns:
+                # Extract sentence openers
+                if 'sentence_openers' in sample_patterns:
+                    patterns['sentence_openers'] = dict(sample_patterns['sentence_openers'])
+
+                # Extract sentence lengths by position
+                if 'sentence_lengths_by_position' in sample_patterns:
+                    patterns['sentence_lengths_by_position'] = sample_patterns['sentence_lengths_by_position']
+
+        except Exception as e:
+            print(f">> Warning: Could not load learned patterns: {e}")
+
+        return patterns
+
+    def _simplify_metaphors(self, text):
+        """
+        Simplify AI-typical metaphors and flowery language.
+
+        This addresses the ROOT CAUSE of ZeroGPT detection:
+        AI text has dense poetic flourishes that human text doesn't have.
+
+        Example transformations:
+        - "shrouded in fog" → "uncertain"
+        - "trembling victories" → "fragile wins"
+        - "map the leviathan" → "understand the system"
+        """
+        if not self.simplify_metaphor_prompt:
+            return text
+
+        # Detect sentences with metaphors
+        flagged_sentences = self.metaphor_detector.detect_metaphor_sentences(text)
+
+        if not flagged_sentences:
+            return text
+
+        print(f"    >> Found {len(flagged_sentences)} sentences with AI-typical metaphors")
+
+        result = text
+        for item in flagged_sentences:
+            original_sent = item['sentence']
+            metaphor_words = item['metaphor_words']
+
+            # Skip if sentence is too short
+            if len(original_sent.split()) < 5:
+                continue
+
+            # Call LLM to simplify
+            prompt = f"""{self.simplify_metaphor_prompt}
+
+INPUT: "{original_sent}"
+OUTPUT:"""
+
+            try:
+                simplified = self.call_model(self.editor_model, prompt, "")
+                simplified = simplified.strip().strip('"').strip("'")
+
+                # Validate: simplified should be similar length (not truncated or expanded)
+                orig_len = len(original_sent.split())
+                simp_len = len(simplified.split())
+
+                if simp_len < orig_len * 0.5 or simp_len > orig_len * 1.5:
+                    print(f"      ! Skipping bad simplification (length mismatch)")
+                    continue
+
+                # Check that it doesn't reintroduce metaphors
+                new_metaphors = self.metaphor_detector.find_metaphor_words(simplified)
+                if len(new_metaphors) >= len(metaphor_words):
+                    print(f"      ! Skipping - still has metaphors: {new_metaphors}")
+                    continue
+
+                # Replace in text
+                result = result.replace(original_sent, simplified)
+                print(f"      ✓ Simplified: {metaphor_words} removed")
+
+            except Exception as e:
+                print(f"      ! Error simplifying: {e}")
+                continue
+
+        return result
+
+    def _apply_structural_templates(self, paragraph):
+        """
+        Apply structural templates from sample text to a paragraph.
+
+        This transfers STYLE (punctuation placement) without changing WORDS.
+        The key insight: GPTZero detects AI by structure, not vocabulary.
+        """
+        try:
+            nlp = self.markov_agent.analyzer.nlp
+            extractor = self.markov_agent.structural_extractor
+
+            doc = nlp(paragraph)
+            sentences = list(doc.sents)
+
+            result_sentences = []
+            for sent in sentences:
+                # Get word count
+                word_count = sum(1 for t in sent if not t.is_punct and not t.is_space)
+
+                if word_count < 5:
+                    result_sentences.append(str(sent))
+                    continue
+
+                # Get matching template from sample
+                template = extractor.get_matching_template(word_count)
+
+                if template is None:
+                    result_sentences.append(str(sent))
+                    continue
+
+                # Apply template (changes punctuation only, not words)
+                modified = extractor.apply_template(sent, template)
+                result_sentences.append(modified)
+
+            return ' '.join(result_sentences)
+
+        except Exception as e:
+            print(f">> Warning: Could not apply structural templates: {e}")
+            return paragraph
+
     def _comprehensive_gptzero_validation(self, original, output, sample_patterns=None):
         """
         Comprehensive validation against all GPTZero detection metrics.
@@ -984,6 +1544,43 @@ Output ONLY the fixed text - no explanations."""
             print(f"    ! Error fixing variation: {e}")
             return text  # Return original if fix fails
 
+    def _remove_ai_transitions(self, text):
+        """
+        Remove transition phrases that are flagged as AI patterns by detectors.
+        GPTZero specifically flags: "In fact,", "Indeed,", "Moreover,", "Furthermore,", etc.
+        """
+        # List of transitions to remove (case-insensitive at sentence start)
+        ai_transitions = [
+            'In fact, ', 'In fact,', 'Indeed, ', 'Indeed,',
+            'Moreover, ', 'Moreover,', 'Furthermore, ', 'Furthermore,',
+            'Additionally, ', 'Additionally,', 'Consequently, ', 'Consequently,',
+            'Subsequently, ', 'Subsequently,', 'Therefore, ', 'Therefore,',
+            'Hence, ', 'Hence,', 'Thus, ', 'Thus,',
+            'As a result, ', 'As a result,', 'To be sure, ', 'To be sure,',
+            'Needless to say, ', 'Needless to say,', 'It is worth noting that ',
+        ]
+
+        for transition in ai_transitions:
+            # Remove at start of sentence (after period, semicolon, or start of text)
+            text = re.sub(r'(?<=[.;!?]\s)' + re.escape(transition), '', text, flags=re.IGNORECASE)
+            text = re.sub(r'^' + re.escape(transition), '', text, flags=re.IGNORECASE)
+
+        # Fix capitalization: lowercase after semicolons (not sentence endings)
+        # But preserve "I" and proper nouns - only lowercase common words
+        def fix_semicolon_cap(match):
+            word_start = match.group(1)
+            # Don't lowercase "I" standing alone
+            if word_start == 'I':
+                return '; I'
+            # Lowercase common words that shouldn't be capitalized after semicolon
+            return '; ' + word_start.lower()
+
+        text = re.sub(r'; ([A-Z])(?=[a-z])', fix_semicolon_cap, text)
+        # But capitalize after periods, question marks, exclamation marks
+        text = re.sub(r'([.!?]\s)([a-z])', lambda m: m.group(1) + m.group(2).upper(), text)
+
+        return text.strip()
+
     def _remove_em_dashes(self, text):
         """
         Remove em dashes from text, replacing them with appropriate punctuation.
@@ -1274,24 +1871,37 @@ Output ONLY the polished text."""
 
     def humanize(self, text, max_retries=3):
         """
-        Humanize text by processing paragraph-by-paragraph for maximum accuracy.
-        This approach preserves facts and citations better than whole-text processing.
-        Uses minimal intervention - only changes structure, not vocabulary.
+        Humanize text using a two-phase approach:
+
+        Phase 1: ALGORITHMIC MANIPULATION (no AI)
+        - Merge short sentences
+        - Vary sentence starters
+        - Create burstiness (length variation)
+        - Add parenthetical asides
+
+        Phase 2: AI-ASSISTED POLISH (only if needed)
+        - Only for paragraphs that still fail metrics
+        - Minimal, targeted changes
+
+        This approach avoids introducing AI patterns by doing most work algorithmically.
         """
         # Detect genre to adjust processing
         genre = self._detect_genre(text)
         print(f"\n>> Detected genre: {genre}")
 
-        # For narrative text, we use minimal intervention (no vocabulary injection)
-        minimal_mode = genre in ('narrative', 'mixed')
-        if minimal_mode:
-            print(">> Using MINIMAL INTERVENTION mode (preserving author's voice)")
+        # Get learned patterns from sample text
+        learned_patterns = self._get_learned_patterns_for_manipulator()
+
+        # Initialize algorithmic manipulator WITH learned patterns from sample
+        manipulator = AlgorithmicSentenceManipulator(learned_patterns=learned_patterns)
+        print(f">> Loaded learned patterns: burstiness={learned_patterns.get('burstiness', 'default')}")
 
         # Split by Paragraphs (preserve newlines)
         paragraphs = text.split('\n\n')
         final_output = []
 
-        print(f"Processing {len(paragraphs)} paragraphs individually for maximum accuracy...")
+        print(f"\n========== PHASE 1: ALGORITHMIC MANIPULATION ==========")
+        print(f"Processing {len(paragraphs)} paragraphs...")
 
         for index, para in enumerate(paragraphs):
             if not para.strip():  # Handle empty lines
@@ -1310,360 +1920,217 @@ Output ONLY the polished text."""
                 continue
 
             total_paras = len([p for p in paragraphs if p.strip() and not (p.strip().startswith('#') or len(p.split()) < 10)])
-            print(f"  > Restructuring Paragraph {index + 1}/{total_paras}...")
+            print(f"  > Paragraph {index + 1}/{total_paras}...")
 
-            # Analyze input paragraph to get metrics and word count for scaling
-            input_metrics = self.markov_agent.analyzer.analyze_paragraph(para)
-            if not input_metrics:
-                print(f"    ! Could not analyze input paragraph. Using original.")
-                final_output.append(para)
-                continue
-            input_word_count = sum(s['length'] for s in input_metrics['sentences'])
+            # ========== PHASE 0: METAPHOR SIMPLIFICATION ==========
+            # FIRST: Simplify AI-typical metaphors and flowery language
+            # This addresses the ROOT CAUSE of ZeroGPT detection
+            metaphor_density = self.metaphor_detector.get_metaphor_density(para)
+            if metaphor_density > 0.3:  # More than 0.3 metaphors per 100 words
+                print(f"    [META] Metaphor density: {metaphor_density:.2f}% - simplifying...")
+                simplified_para = self._simplify_metaphors(para)
+            else:
+                simplified_para = para
 
-            # Get Markov template based on current state (or random if first paragraph)
-            # Use semantic matching if available
-            prediction = self.markov_agent.db.predict_next_template(
-                self.current_markov_signature,
-                input_text=para,
-                semantic_matcher=self.markov_agent.semantic_matcher
-            )
-            if not prediction:
-                print(f"    ! Database empty or prediction failed. Using original paragraph.")
-                final_output.append(para)
-                continue
+            # ========== PHASE 1: STRUCTURAL TEMPLATE TRANSFER ==========
+            # Apply structural templates from sample text
+            # This transfers punctuation patterns WITHOUT changing words
+            structured_para = self._apply_structural_templates(simplified_para)
 
-            template_data = prediction['template']
-            template_signature = prediction['signature']
+            # ========== PHASE 2: ALGORITHMIC MANIPULATION ==========
+            # Apply algorithmic sentence manipulation (NO AI INVOLVED)
+            # This is the key to avoiding AI patterns
+            algo_result = manipulator.process_paragraph(structured_para)
 
-            # Calculate scaling factor to adapt template to input content
-            target_word_count = sum(s['length'] for s in template_data)
-            scaling_factor = 1.0
-            if target_word_count > (input_word_count * 1.5):
-                scaling_factor = (input_word_count * 1.2) / target_word_count
-                print(f"    [i] Scaling template by {scaling_factor:.2f}x to fit content.")
+            # Check metrics after algorithmic manipulation
+            algo_metrics = self.gptzero_optimizer.calculate_metrics(algo_result)
+            algo_variance = algo_metrics.get('sentence_length_variance', 0)
+            algo_starters = algo_metrics.get('unique_starter_ratio', 0)
 
-            # Generate detailed template with POS ratios (for sentence length guidance only)
-            markov_template = self.markov_agent.generate_human_readable_template(template_data, scaling_factor)
+            print(f"    [ALGO] Variance: {algo_variance:.1f}, Unique starters: {algo_starters:.1%}")
 
-            # Select example paragraphs similar in length to current paragraph (for rhythm reference)
-            example_paras = self._select_example_paragraphs(para, num_examples=2)
-            examples_text = "\n\n---\n\n".join(example_paras) if example_paras else "No examples available."
+            # Check if algorithmic result is good enough
+            algo_pass, algo_issues = self.gptzero_optimizer.validate_metrics(algo_result)
 
-            # Use the paragraph rewrite template - NO vocabulary injection
-            chunk_prompt = self.paragraph_rewrite_template.format(
-                examples=examples_text,
-                markov_template=markov_template,
-                input_content=para
-            )
+            if algo_pass:
+                print(f"    ✓ Algorithmic manipulation passed! Using result.")
+                new_para = algo_result
+            else:
+                # Try enhanced algorithmic manipulation
+                print(f"    [ALGO] Issues: {', '.join(algo_issues[:2])}")
+                print(f"    [ALGO] Trying enhanced manipulation...")
 
-            # Use the structural editor prompt from file
-            combined_system_prompt = self.structural_editor_prompt
+                # Apply additional algorithmic fixes
+                enhanced = manipulator.add_parenthetical_asides(algo_result)
+                enhanced_metrics = self.gptzero_optimizer.calculate_metrics(enhanced)
+                enhanced_pass, _ = self.gptzero_optimizer.validate_metrics(enhanced)
 
-            # Run the model with timeout handling
-            try:
-                print(f"    Calling {self.editor_model}...", end="", flush=True)
-                new_para = self.call_model(self.editor_model, chunk_prompt, system_prompt=combined_system_prompt)
-                print(f" ✓ Response received ({len(new_para)} chars)")
-            except requests.exceptions.Timeout:
-                print(f" ✗ TIMEOUT")
-                print(f"    ! Timeout for Para {index+1}. Using original.")
-                final_output.append(para)
-                continue
-            except requests.exceptions.RequestException as e:
-                print(f" ✗ REQUEST ERROR: {type(e).__name__}")
-                print(f"    ! Request error for Para {index+1}: {e}. Using original.")
-                final_output.append(para)
-                continue
-            except Exception as e:
-                print(f" ✗ ERROR: {type(e).__name__}")
-                print(f"    ! Unexpected error for Para {index+1}: {e}. Using original.")
-                final_output.append(para)
-                continue
-
-            # Validate that we got a non-empty response
-            if not new_para or not new_para.strip():
-                print(f"    ! Empty response for Para {index+1}. Using original.")
-                final_output.append(para)
-                continue
-
-            # Template Validation - Check if output matches the template structure
-            output_metrics = self.markov_agent.analyzer.analyze_paragraph(new_para)
-            if output_metrics:
-                output_sentences = output_metrics['sentences']
-                template_sent_count = len(template_data)
-                output_sent_count = len(output_sentences)
-
-                # Check sentence count (tolerance ±1)
-                if abs(output_sent_count - template_sent_count) > 1:
-                    print(f"    ! Template validation failed: Expected {template_sent_count} sentences, got {output_sent_count}.")
-                    # Try to fix with feedback
-                    feedback_prompt = f"""Your previous attempt had {output_sent_count} sentences, but the template requires exactly {template_sent_count} sentences.
-
-TEMPLATE:
-{markov_template}
-
-CURRENT OUTPUT:
-{new_para}
-
-Fix the sentence count to match the template exactly. Keep all words and meaning.
-Output ONLY the corrected paragraph."""
-                    try:
-                        corrected_para = self.call_model(self.editor_model, feedback_prompt, system_prompt=combined_system_prompt)
-                        if corrected_para and corrected_para.strip():
-                            # Re-validate
-                            corrected_metrics = self.markov_agent.analyzer.analyze_paragraph(corrected_para)
-                            if corrected_metrics:
-                                corrected_count = len(corrected_metrics['sentences'])
-                                if abs(corrected_count - template_sent_count) <= 1:
-                                    print(f"    ✓ Template validation passed after correction")
-                                    new_para = corrected_para
-                                else:
-                                    print(f"    ! Correction still failed. Using original paragraph.")
-                                    final_output.append(para)
-                                    continue
-                            else:
-                                print(f"    ! Could not analyze corrected paragraph. Using original.")
-                                final_output.append(para)
-                                continue
-                        else:
-                            print(f"    ! Empty correction response. Using original paragraph.")
-                            final_output.append(para)
-                            continue
-                    except Exception as e:
-                        print(f"    ! Error during template correction: {e}. Using original paragraph.")
-                        final_output.append(para)
-                        continue
+                if enhanced_pass:
+                    print(f"    ✓ Enhanced algorithmic manipulation passed!")
+                    new_para = enhanced
                 else:
-                    # Check sentence lengths (tolerance ±2 words per sentence)
-                    length_mismatches = []
-                    for i, (template_sent, output_sent) in enumerate(zip(template_data, output_sentences[:len(template_data)])):
-                        target_len = int(template_sent['length'] * scaling_factor)
-                        target_len = max(5, target_len)
-                        actual_len = output_sent['length']
-                        if abs(actual_len - target_len) > 2:
-                            length_mismatches.append(f"Sentence {i+1}: expected ~{target_len} words, got {actual_len}")
+                    # ========== PHASE 2: AI-ASSISTED (only if needed) ==========
+                    print(f"    [AI] Algorithmic not enough, using minimal AI assistance...")
 
-                    if length_mismatches:
-                        print(f"    ! Sentence length mismatches: {', '.join(length_mismatches[:3])}")
-                        # Don't fail, just warn - lengths are approximate
-                    else:
-                        print(f"    ✓ Template validation passed (sentence count and lengths)")
-            else:
-                print(f"    ! Could not analyze output for template validation")
+                    # Very constrained AI prompt - just fix specific issues
+                    fix_prompt = f"""Fix ONLY these specific issues in the text below:
+{chr(10).join(f"- {issue}" for issue in algo_issues[:2])}
 
-            # Entity Verification - Hard Fail if critical entities drop
-            entities_valid, missing_entities, entity_feedback = self._verify_entities_preserved(para, new_para)
-            if not entities_valid:
-                print(f"    ! Entity preservation failed in Para {index+1}: {entity_feedback}")
-                # Try to regenerate with entity preservation feedback
-                entity_fix_prompt = f"""Your previous output is missing critical entities that must be preserved:
+TEXT TO FIX:
+{algo_result}
 
-MISSING ENTITIES:
-{entity_feedback}
+RULES:
+1. Keep ALL original words - only change punctuation and sentence boundaries
+2. To vary sentence length: merge short sentences with semicolons (;) or split long ones
+3. To vary starters: move prepositional phrases to the beginning (e.g., "In the morning," "From the ruins,")
+4. NEVER reorder clauses where "it", "he", "she", "they", "this", "that" would lose their referent
+5. DO NOT add new words, phrases, or vocabulary
+6. DO NOT paraphrase - preserve exact meaning and clause order
+7. Output ONLY the fixed text, nothing else"""
 
-ORIGINAL PARAGRAPH:
-{para}
-
-CURRENT OUTPUT:
-{new_para}
-
-TASK: Regenerate the output ensuring ALL entities (proper nouns, citations, named entities) from the original are preserved. Output ONLY the corrected paragraph."""
-                try:
-                    fixed_para = self.call_model(self.editor_model, entity_fix_prompt, system_prompt=combined_system_prompt)
-                    if fixed_para and fixed_para.strip():
-                        fixed_valid, _, _ = self._verify_entities_preserved(para, fixed_para)
-                        if fixed_valid:
-                            print(f"    ✓ Entities preserved after correction")
-                            new_para = fixed_para
+                    try:
+                        ai_result = self.call_model(self.editor_model, fix_prompt, system_prompt=self.structural_editor_prompt)
+                        if ai_result and ai_result.strip():
+                            # Validate AI didn't mess things up
+                            word_overlap = self._calculate_word_overlap(para, ai_result)
+                            if word_overlap >= 0.90:  # 90% word preservation
+                                new_para = ai_result.strip()
+                                print(f"    ✓ AI fix applied (word preservation: {word_overlap:.1%})")
+                            else:
+                                print(f"    ! AI changed too many words ({word_overlap:.1%}). Using algorithmic result.")
+                                new_para = algo_result
                         else:
-                            print(f"    ! Entity correction failed. Falling back to original paragraph (HARD FAIL).")
-                            final_output.append(para)
-                            continue
-                    else:
-                        print(f"    ! Empty correction response. Falling back to original paragraph (HARD FAIL).")
-                        final_output.append(para)
-                        continue
-                except Exception as e:
-                    print(f"    ! Error during entity correction: {e}. Falling back to original paragraph (HARD FAIL).")
-                    final_output.append(para)
-                    continue
-            else:
-                print(f"    ✓ {entity_feedback}")
+                            new_para = algo_result
+                    except Exception as e:
+                        print(f"    ! AI error: {e}. Using algorithmic result.")
+                        new_para = algo_result
 
-            # WORD PRESERVATION CHECK - Ensure minimal word changes
+            # Final cleanup - remove em dashes and AI transitions
+            new_para = self._remove_em_dashes(new_para)
+            new_para = self._remove_ai_transitions(new_para)
+
+            # Validate word preservation
             word_overlap = self._calculate_word_overlap(para, new_para)
-            if word_overlap < 0.85:  # Require 85% word preservation
-                print(f"    ! Word preservation too low ({word_overlap:.1%}). Model paraphrased instead of restructured.")
-                print(f"    ! Falling back to original paragraph.")
+            if word_overlap < 0.85:
+                print(f"    ! Word preservation too low ({word_overlap:.1%}). Using original.")
                 final_output.append(para)
                 continue
 
             print(f"    ✓ Word preservation: {word_overlap:.1%}")
-
-            # VOCABULARY REPETITION CHECK - Reject outputs with excessive word repetition
-            vocab_valid, vocab_issues, repeated_words = self._check_vocabulary_repetition(new_para)
-            if not vocab_valid:
-                print(f"    ! Vocabulary repetition detected: {', '.join(vocab_issues[:2])}")
-                # This is a critical issue - fall back to original paragraph
-                # The model is likely injecting vocabulary from the sample text
-                print(f"    ! Falling back to original paragraph to avoid repetition.")
-                final_output.append(para)
-                continue
-            else:
-                print(f"    ✓ Vocabulary diversity OK (no excessive repetition)")
-
-            # GPTZero Metric Optimization
-            gptzero_valid, gptzero_issues = self.gptzero_optimizer.validate_metrics(new_para)
-            if not gptzero_valid:
-                print(f"    ! GPTZero metrics below threshold: {', '.join(gptzero_issues)}")
-                print(f"    ! Attempting to optimize...")
-
-                # Get optimization guidance
-                optimization_guidance = self.gptzero_optimizer.optimize_metrics(new_para)
-                if optimization_guidance:
-                    gptzero_prompt = f"""Your output needs optimization to pass GPTZero detection:
-
-OPTIMIZATION NEEDED:
-{optimization_guidance}
-
-CURRENT OUTPUT:
-{new_para}
-
-TASK: Revise the output to address the optimization needs while preserving all meaning and structure. Output ONLY the optimized paragraph."""
-                    try:
-                        optimized_para = self.call_model(self.editor_model, gptzero_prompt, system_prompt=combined_system_prompt)
-                        if optimized_para and optimized_para.strip():
-                            optimized_valid, _ = self.gptzero_optimizer.validate_metrics(optimized_para)
-                            if optimized_valid:
-                                print(f"    ✓ GPTZero metrics optimized")
-                                new_para = optimized_para
-                            else:
-                                print(f"    ! GPTZero optimization incomplete, but continuing")
-                        else:
-                            print(f"    ! Empty optimization response, but continuing")
-                    except Exception as e:
-                        print(f"    ! Error during GPTZero optimization: {e}, but continuing")
-                else:
-                    # Fallback to old method if no guidance
-                    fixed_para = self._fix_sentence_variation(new_para, gptzero_issues)
-                    fixed_pass, _ = self.gptzero_optimizer.validate_metrics(fixed_para)
-                    if fixed_pass:
-                        print(f"    ✓ GPTZero patterns fixed (fallback method)")
-                        new_para = fixed_para
-            else:
-                print(f"    ✓ GPTZero metrics passed")
-
-            # Structure Pattern Validation (Extended) - Compare to sample text patterns
-            sample_patterns = self.get_sample_patterns()
-            structure_valid, structure_issues = self.markov_agent.analyzer.validate_structure_match(new_para, sample_patterns)
-
-            # Calculate style match score
-            style_score = self.markov_agent.analyzer.calculate_style_match_score(new_para, sample_patterns)
-            print(f"    Style match score: {style_score:.2%}")
-
-            if not structure_valid or style_score < 0.6:
-                print(f"    ! Structure pattern issues (score: {style_score:.2%}): {', '.join(structure_issues[:2])}")
-                # Try to fix structure with feedback
-                structure_fix_prompt = f"""Your output structure doesn't match the sample text patterns.
-
-ISSUES:
-{chr(10).join(f"- {issue}" for issue in structure_issues[:3])}
-Style match score: {style_score:.2%} (target: >60%)
-
-SAMPLE PATTERNS:
-- Em-dash frequency: {sample_patterns['punctuation_frequency'].get('em_dash', 0):.2f} per paragraph
-- Semicolon frequency: {sample_patterns['punctuation_frequency'].get('semicolon', 0):.2f} per paragraph
-- Common sentence openers: {', '.join([w for w, _ in sample_patterns['sentence_openers'].most_common(5)])}
-
-CURRENT OUTPUT:
-{new_para}
-
-TASK: Revise the output to better match the sample text structure patterns. Keep the same meaning and words. Output ONLY the revised paragraph."""
-                try:
-                    fixed_structure = self.call_model(self.editor_model, structure_fix_prompt, system_prompt=combined_system_prompt)
-                    if fixed_structure and fixed_structure.strip():
-                        fixed_valid, _ = self.markov_agent.analyzer.validate_structure_match(fixed_structure, sample_patterns)
-                        fixed_score = self.markov_agent.analyzer.calculate_style_match_score(fixed_structure, sample_patterns)
-                        if fixed_valid and fixed_score > style_score:
-                            print(f"    ✓ Structure patterns fixed (score: {fixed_score:.2%})")
-                            new_para = fixed_structure
-                        else:
-                            print(f"    ! Structure fix attempt failed (score: {fixed_score:.2%}), keeping current version")
-                except Exception as e:
-                    print(f"    ! Error fixing structure: {e}")
-            else:
-                print(f"    ✓ Structure patterns match sample (score: {style_score:.2%})")
-
-            # Check for and remove em dashes
-            has_em_dash, em_dash_count = self._check_em_dashes(new_para)
-            if has_em_dash:
-                print(f"    ! Found {em_dash_count} em-dash(es), removing...")
-                new_para = self._remove_em_dashes(new_para)
-                # Verify removal
-                has_em_dash_after, _ = self._check_em_dashes(new_para)
-                if has_em_dash_after:
-                    print(f"    ! Warning: Some em-dashes may remain after removal")
-                else:
-                    print(f"    ✓ All em-dashes removed")
-
-            # Analyze styled output and update Markov signature for next paragraph prediction
-            styled_metrics = self.markov_agent.analyzer.analyze_paragraph(new_para)
-            if styled_metrics:
-                self.current_markov_signature = styled_metrics['signature']
-                print(f"    ✓ Updated Markov state: {styled_metrics['signature'][:50]}...")
-
             final_output.append(new_para)
 
         result = "\n\n".join(final_output)
 
-        # Final validation
-        original_cites = set(re.findall(r'\[\^\d+\]', text))
-        result_cites = set(re.findall(r'\[\^\d+\]', result))
-        if original_cites != result_cites:
-            print(f"\nWARNING: Final output missing citations: {original_cites - result_cites}")
+        # ========== FINAL VALIDATION ==========
+        print(f"\n========== FINAL VALIDATION ==========")
 
-        # Remove any remaining em dashes before final pass
+        # Remove any remaining em dashes
         has_em_dash, em_dash_count = self._check_em_dashes(result)
         if has_em_dash:
-            print(f"\n>> Removing {em_dash_count} em-dash(es) from final output...")
+            print(f">> Removing {em_dash_count} em-dash(es)...")
             result = self._remove_em_dashes(result)
 
-        # Phase 5: Final Humanization Pass
-        print("\n>> Running final humanization pass...")
-        result = self._final_humanization_pass(result)
+        # Remove AI transition phrases
+        result = self._remove_ai_transitions(result)
 
-        # Final em-dash check and removal
-        has_em_dash, em_dash_count = self._check_em_dashes(result)
-        if has_em_dash:
-            print(f">> Removing {em_dash_count} remaining em-dash(es)...")
-            result = self._remove_em_dashes(result)
+        # Calculate metaphor density (before vs after)
+        original_metaphor_density = self.metaphor_detector.get_metaphor_density(text)
+        final_metaphor_density = self.metaphor_detector.get_metaphor_density(result)
+        original_metaphor_words = self.metaphor_detector.find_metaphor_words(text)
+        final_metaphor_words = self.metaphor_detector.find_metaphor_words(result)
+        print(f"   Metaphor density: {original_metaphor_density:.2f}% → {final_metaphor_density:.2f}%")
+        print(f"   Metaphor words: {len(original_metaphor_words)} → {len(final_metaphor_words)}")
+        if final_metaphor_words:
+            print(f"   Remaining metaphors: {final_metaphor_words}")
 
-        # COMPREHENSIVE GPTZero validation on complete output
-        print("\n>> Running comprehensive GPTZero validation...")
-        comp_valid, comp_score, comp_issues, comp_details = self._comprehensive_gptzero_validation(text, result)
+        # Calculate final metrics
+        final_metrics = self.gptzero_optimizer.calculate_metrics(result)
+        print(f"   Sentence length variance: {final_metrics.get('sentence_length_variance', 0):.1f} (target: >30)")
+        print(f"   Unique starter ratio: {final_metrics.get('unique_starter_ratio', 0):.1%} (target: >40%)")
+        print(f"   Sentence type mix: {final_metrics.get('sentence_type_mix', {})}")
 
-        print(f"   Overall score: {comp_score:.1%}")
-        if 'vocabulary_repetition' in comp_details:
-            vocab_info = comp_details['vocabulary_repetition']
-            if vocab_info['repeated_words']:
-                print(f"   ! Repetition issues: {list(vocab_info['repeated_words'].keys())[:5]}")
-        if 'perplexity' in comp_details:
-            ppl_info = comp_details['perplexity']
-            print(f"   Perplexity: output={ppl_info['output']:.1f}, original={ppl_info['original']:.1f}")
-        if 'vocabulary_diversity' in comp_details:
-            div_info = comp_details['vocabulary_diversity']
-            print(f"   Vocabulary diversity: {div_info['unique_ratio']:.1%}")
-        if 'ai_patterns' in comp_details:
-            ai_info = comp_details['ai_patterns']
-            print(f"   AI-flagged sentences: {ai_info['flagged_count']}/{ai_info['total_sentences']}")
-
-        if comp_valid:
-            print("✓ Final output passes comprehensive GPTZero validation")
+        final_pass, final_issues = self.gptzero_optimizer.validate_metrics(result)
+        if final_pass:
+            print("✓ Final output passes GPTZero validation")
         else:
-            print(f"⚠ Final output has issues (score: {comp_score:.1%}): {', '.join(comp_issues[:3])}")
+            print(f"⚠ Final output has issues: {', '.join(final_issues)}")
 
         return result
 
+    def _old_humanize_paragraph(self, para, index, total_paras):
+        """Legacy paragraph processing - AI-based approach (deprecated)."""
+        # This is the old approach that introduced AI patterns
+        # Kept for reference but not used
+
+        # Analyze input paragraph to get metrics and word count for scaling
+        input_metrics = self.markov_agent.analyzer.analyze_paragraph(para)
+        if not input_metrics:
+            return para
+        input_word_count = sum(s['length'] for s in input_metrics['sentences'])
+
+        # Get Markov template based on current state
+        prediction = self.markov_agent.db.predict_next_template(
+            self.current_markov_signature,
+            input_text=para,
+            semantic_matcher=self.markov_agent.semantic_matcher
+        )
+        if not prediction:
+            return para
+
+        template_data = prediction['template']
+
+        # Calculate scaling factor
+        target_word_count = sum(s['length'] for s in template_data)
+        scaling_factor = 1.0
+        if target_word_count > (input_word_count * 1.5):
+            scaling_factor = (input_word_count * 1.2) / target_word_count
+
+        # Generate template
+        markov_template = self.markov_agent.generate_human_readable_template(template_data, scaling_factor)
+
+        # Select examples
+        example_paras = self._select_example_paragraphs(para, num_examples=2)
+        examples_text = "\n\n---\n\n".join(example_paras) if example_paras else "No examples available."
+
+        # Use the paragraph rewrite template
+        chunk_prompt = self.paragraph_rewrite_template.format(
+            examples=examples_text,
+            markov_template=markov_template,
+            input_content=para
+        )
+
+        combined_system_prompt = self.structural_editor_prompt
+
+        try:
+            new_para = self.call_model(self.editor_model, chunk_prompt, system_prompt=combined_system_prompt)
+            return new_para.strip() if new_para else para
+        except:
+            return para
+
+
+# Legacy code - keeping the old template validation for reference
+def _legacy_template_validation():
+    """This was the old template validation that's no longer used."""
+    pass
+    # Template Validation - Check if output matches the template structure
+    # output_metrics = self.markov_agent.analyzer.analyze_paragraph(new_para)
+    # if output_metrics:
+    #     output_sentences = output_metrics['sentences']
+    #     template_sent_count = len(template_data)
+    #     output_sent_count = len(output_sentences)
+    #
+    #     # Check sentence count (tolerance ±1)
+    #     if abs(output_sent_count - template_sent_count) > 1:
+    #         print(f"    ! Template validation failed: Expected {template_sent_count} sentences, got {output_sent_count}.")
+    #         # Try to fix with feedback
+    #         feedback_prompt = f"""Your previous attempt had {output_sent_count} sentences, but the template requires exactly {template_sent_count} sentences.
+    #
+    # TEMPLATE:
+    # {markov_template}
+    #
+    # CURRENT OUTPUT:
+    # {new_para}
+    #
 if __name__ == "__main__":
     # Require input file argument
     if len(sys.argv) < 2:

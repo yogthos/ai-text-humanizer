@@ -36,6 +36,291 @@ STOPWORDS = {
     'bad', 'great', 'small', 'large', 'long', 'short', 'high', 'low', 'big', 'little'
 }
 
+
+class MetaphorDetector:
+    """
+    Detects AI-typical metaphors and flowery language in text.
+
+    Key insight: AI text is DENSE with poetic flourishes like:
+    - "trembling victories against the dark"
+    - "shrouded in fog"
+    - "the friction of a dying organism"
+
+    Human text (that passes ZeroGPT) uses direct, plain language.
+    """
+
+    # Words that signal AI-typical poetic flourishes
+    AI_METAPHOR_WORDS = {
+        'trembling', 'shrouded', 'leviathan', 'indifferent', 'restless',
+        'vapor', 'fog', 'friction', 'beast', 'anchor', 'tether', 'weapon',
+        'ghost', 'skeleton', 'kernel', 'seed', 'ruin', 'crumble', 'grind',
+        'abyss', 'void', 'tapestry', 'symphony', 'orchestra', 'dance',
+        'weave', 'fabric', 'thread', 'maze', 'labyrinth', 'journey',
+        'landscape', 'terrain', 'horizon', 'dawn', 'dusk', 'twilight',
+        'shadow', 'light', 'dark', 'darkness', 'illuminate', 'unveil',
+        'unravel', 'unfold', 'emerge', 'blossom', 'flourish', 'wither',
+        'pristine', 'visceral', 'palpable', 'tangible', 'ethereal'
+    }
+
+    # Patterns that indicate AI-typical elaborate constructions
+    AI_PHRASE_PATTERNS = [
+        r'\w+ of (a |the )?\w+ing \w+',      # "friction of a dying organism"
+        r'shrouded in \w+',                   # "shrouded in fog"
+        r'\w+ victories against',             # "trembling victories against"
+        r'the \w+ of \w+ and \w+',           # "the death of maps and laws"
+        r'an? \w+ (geometry|architecture|machinery|tapestry|symphony)',  # "an indifferent geometry"
+        r'\w+ (beast|leviathan|monster|giant)',  # "restless beast"
+        r'into (the )?(dust|void|abyss|darkness)',  # "into the dust"
+        r'against the (dark|void|unknown)',   # "against the dark"
+    ]
+
+    def __init__(self, nlp=None):
+        self.nlp = nlp
+        # Compile regex patterns for efficiency
+        self.compiled_patterns = [re.compile(p, re.IGNORECASE) for p in self.AI_PHRASE_PATTERNS]
+
+    def count_metaphor_words(self, text):
+        """Count AI-typical metaphor words in text."""
+        text_lower = text.lower()
+        words = set(re.findall(r'\b\w+\b', text_lower))
+        return len(words & self.AI_METAPHOR_WORDS)
+
+    def find_metaphor_words(self, text):
+        """Find all AI-typical metaphor words in text."""
+        text_lower = text.lower()
+        words = set(re.findall(r'\b\w+\b', text_lower))
+        return words & self.AI_METAPHOR_WORDS
+
+    def find_ai_phrases(self, text):
+        """Find all AI-typical phrase patterns in text."""
+        found = []
+        for pattern in self.compiled_patterns:
+            matches = pattern.findall(text)
+            found.extend(matches)
+        return found
+
+    def detect_metaphor_sentences(self, text):
+        """
+        Detect sentences that contain AI-typical metaphors.
+
+        Returns list of (sentence, metaphor_count, metaphor_words) tuples
+        for sentences that need simplification.
+        """
+        if self.nlp is None:
+            # Fallback: split by period
+            sentences = [s.strip() for s in text.split('.') if s.strip()]
+        else:
+            doc = self.nlp(text)
+            sentences = [str(sent).strip() for sent in doc.sents]
+
+        flagged = []
+        for sent in sentences:
+            metaphor_words = self.find_metaphor_words(sent)
+            ai_phrases = self.find_ai_phrases(sent)
+
+            # Flag if: 2+ metaphor words OR any AI phrase pattern
+            if len(metaphor_words) >= 2 or ai_phrases:
+                flagged.append({
+                    'sentence': sent,
+                    'metaphor_count': len(metaphor_words),
+                    'metaphor_words': list(metaphor_words),
+                    'ai_phrases': ai_phrases
+                })
+
+        return flagged
+
+    def get_metaphor_density(self, text):
+        """
+        Calculate metaphor density: metaphor words per 100 words.
+
+        Human text (sample): ~0.1 metaphors per 100 words
+        AI text: often 1-2+ metaphors per 100 words
+        """
+        total_words = len(re.findall(r'\b\w+\b', text))
+        if total_words == 0:
+            return 0
+        metaphor_count = self.count_metaphor_words(text)
+        return (metaphor_count / total_words) * 100
+
+    def needs_simplification(self, text, threshold_density=0.5):
+        """
+        Determine if text needs metaphor simplification.
+
+        Args:
+            text: Text to analyze
+            threshold_density: Metaphors per 100 words threshold (default 0.5)
+
+        Returns:
+            bool: True if text has too many metaphors
+        """
+        density = self.get_metaphor_density(text)
+        return density > threshold_density
+
+
+class StructuralTemplateExtractor:
+    """
+    Extracts structural templates from sample text for style transfer.
+
+    Key insight: GPTZero detects AI by sentence STRUCTURE, not vocabulary.
+    Human text has varied punctuation rhythms. We learn these patterns
+    and apply them to input text WITHOUT changing words.
+    """
+
+    def __init__(self, nlp):
+        self.nlp = nlp
+        self.templates = {
+            'short': [],   # 5-12 words
+            'medium': [],  # 13-25 words
+            'long': []     # 26+ words
+        }
+
+    def extract_template(self, sentence):
+        """
+        Extract structural template from a sentence.
+
+        Returns:
+            {
+                'length': int,
+                'punct_positions': [(normalized_pos, punct_char), ...],
+                'clause_positions': [(normalized_pos, clause_type), ...],
+                'starts_with_subordinate': bool
+            }
+        """
+        doc = self.nlp(str(sentence)) if isinstance(sentence, str) else sentence
+        tokens = list(doc)
+
+        if len(tokens) == 0:
+            return None
+
+        word_count = sum(1 for t in tokens if not t.is_punct and not t.is_space)
+        if word_count == 0:
+            return None
+
+        # Extract punctuation positions (normalized 0-1)
+        punct_positions = []
+        word_idx = 0
+        for token in tokens:
+            if token.is_punct and token.text in ',;:':
+                normalized_pos = word_idx / word_count if word_count > 0 else 0
+                punct_positions.append((normalized_pos, token.text))
+            elif not token.is_punct and not token.is_space:
+                word_idx += 1
+
+        # Extract clause positions
+        clause_positions = []
+        word_idx = 0
+        for token in tokens:
+            if token.dep_ in ["advcl", "ccomp", "xcomp", "relcl"]:
+                normalized_pos = word_idx / word_count if word_count > 0 else 0
+                clause_positions.append((normalized_pos, token.dep_))
+            if not token.is_punct and not token.is_space:
+                word_idx += 1
+
+        # Check if starts with subordinate clause
+        starts_with_sub = False
+        for token in tokens[:5]:  # Check first 5 tokens
+            if token.dep_ in ["advcl", "mark"] or token.text.lower() in ['when', 'while', 'as', 'since', 'because', 'although', 'if']:
+                starts_with_sub = True
+                break
+
+        return {
+            'length': word_count,
+            'punct_positions': punct_positions,
+            'clause_positions': clause_positions,
+            'starts_with_subordinate': starts_with_sub
+        }
+
+    def learn_from_sample(self, sample_text):
+        """Learn structural templates from sample text."""
+        doc = self.nlp(sample_text)
+
+        for sent in doc.sents:
+            template = self.extract_template(sent)
+            if template is None:
+                continue
+
+            length = template['length']
+            if 5 <= length <= 12:
+                self.templates['short'].append(template)
+            elif 13 <= length <= 25:
+                self.templates['medium'].append(template)
+            elif length > 25:
+                self.templates['long'].append(template)
+
+        print(f"Learned {len(self.templates['short'])} short, {len(self.templates['medium'])} medium, {len(self.templates['long'])} long templates")
+
+    def get_matching_template(self, word_count):
+        """Get a template that matches the given word count."""
+        if 5 <= word_count <= 12:
+            templates = self.templates['short']
+        elif 13 <= word_count <= 25:
+            templates = self.templates['medium']
+        else:
+            templates = self.templates['long']
+
+        if not templates:
+            return None
+
+        # Find closest match by length
+        templates_sorted = sorted(templates, key=lambda t: abs(t['length'] - word_count))
+        return templates_sorted[0] if templates_sorted else None
+
+    def apply_template(self, sentence, template):
+        """
+        Apply a structural template to a sentence.
+
+        This ONLY changes punctuation placement, NOT words.
+
+        Returns:
+            Modified sentence with punctuation matching the template
+        """
+        if template is None:
+            return sentence
+
+        doc = self.nlp(sentence) if isinstance(sentence, str) else sentence
+        tokens = list(doc)
+        words = [(i, t) for i, t in enumerate(tokens) if not t.is_punct and not t.is_space]
+
+        if len(words) == 0:
+            return str(sentence)
+
+        # Remove existing internal punctuation (keep sentence-ending)
+        result_tokens = []
+        for i, token in enumerate(tokens):
+            if token.is_punct and token.text in ',;:':
+                continue  # Skip internal punctuation
+            result_tokens.append(token.text)
+
+        # Insert punctuation at template positions
+        word_count = len(words)
+        insertions = []  # (word_index, punct_char)
+
+        for norm_pos, punct_char in template['punct_positions']:
+            target_word_idx = int(norm_pos * word_count)
+            target_word_idx = min(target_word_idx, word_count - 1)
+            insertions.append((target_word_idx, punct_char))
+
+        # Build result with inserted punctuation
+        result_words = []
+        word_idx = 0
+        for token in tokens:
+            if token.is_punct and token.text in ',;:':
+                continue  # Skip old punctuation
+            elif token.is_space:
+                continue
+            elif token.is_punct:
+                result_words.append(token.text)  # Keep sentence-ending punct
+            else:
+                result_words.append(token.text)
+                # Check if we should insert punctuation after this word
+                for ins_idx, punct_char in insertions:
+                    if ins_idx == word_idx:
+                        result_words.append(punct_char)
+                word_idx += 1
+
+        return ' '.join(result_words).replace(' ,', ',').replace(' ;', ';').replace(' :', ':').replace(' .', '.').replace(' !', '!').replace(' ?', '?')
+
+
 class EmbeddingSemanticMatcher:
     """Semantic matching using sentence embeddings for template selection."""
 
@@ -1069,6 +1354,7 @@ class StyleTransferAgent:
         self.burstiness_analyzer = LearnedBurstinessAnalyzer()
         self.punctuation_learner = PunctuationStyleLearner()
         self.vocab_injector = ContextualVocabularyInjector(self.analyzer.nlp)
+        self.structural_extractor = StructuralTemplateExtractor(self.analyzer.nlp)
 
         # Load configuration
         if config_path is None:
@@ -1185,6 +1471,10 @@ class StyleTransferAgent:
         punct_patterns = self.punctuation_learner.get_target_patterns()
         self.db.store_learned_pattern('punctuation', punct_patterns)
         print(f"Learned punctuation patterns: {punct_patterns}")
+
+        # Learn structural templates from sample (punctuation placement patterns)
+        print("Learning structural templates from sample...")
+        self.structural_extractor.learn_from_sample(text)
 
         raw_paras = [p.strip() for p in text.split('\n\n') if p.strip()]
         analyzed_chain = []
