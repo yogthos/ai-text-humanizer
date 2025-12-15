@@ -78,13 +78,15 @@ class AlgorithmicSentenceManipulator:
                     else:
                         next_start = next_sent[0].lower() + next_sent[1:] if next_sent else ""
 
-                    # Use semicolon for most merges, conjunction for variety
-                    if merge_idx % 3 == 0:
-                        merged = f"{sent}; {next_start}"
-                    elif merge_idx % 3 == 1:
+                    # AVOID semicolons - sample has only 0.70 per 100 words
+                    # Use commas and "and" more often (matching sample style)
+                    if merge_idx % 4 == 0:
+                        # Use comma + and for compound structure
                         merged = f"{sent}, and {next_start}"
                     else:
-                        merged = f"{sent}, {next_start}"
+                        # Keep as separate sentences (most natural for sample style)
+                        cap_next = next_start[0].upper() + next_start[1:] if next_start else ''
+                        merged = f"{sent}. {cap_next}"
 
                     result.append(merged)
                     merge_idx += 1
@@ -295,56 +297,13 @@ class AlgorithmicSentenceManipulator:
         """
         Add semicolons to match the sample text's punctuation pattern.
 
-        The sample has ~0.19 semicolons per sentence, so we should have
-        roughly 1 semicolon per 5 sentences on average.
+        DISABLED: Sample has only 0.70 semicolons per 100 words.
+        For a 100-word paragraph, that's less than 1 semicolon.
+        It's better to NOT add semicolons algorithmically.
         """
-        target_ratio = self.punctuation_patterns.get('semicolon_per_sentence', 0.19)
-        sentences = self._split_sentences(paragraph)
-
-        if len(sentences) < 3:
-            return paragraph
-
-        # Count current semicolons
-        current_semicolons = paragraph.count(';')
-        target_semicolons = int(len(sentences) * target_ratio)
-
-        # If we already have enough, return as-is
-        if current_semicolons >= target_semicolons:
-            return paragraph
-
-        # Add semicolons by replacing periods between short consecutive sentences
-        result = []
-        i = 0
-        semicolons_added = 0
-
-        while i < len(sentences):
-            sent = sentences[i].strip()
-            if not sent:
-                i += 1
-                continue
-
-            # Look for opportunities to add semicolons
-            if (semicolons_added < target_semicolons - current_semicolons and
-                i + 1 < len(sentences) and
-                len(sent.split()) < 20 and  # Short enough sentence
-                len(sentences[i + 1].strip().split()) < 20):  # Next also short
-
-                next_sent = sentences[i + 1].strip()
-                # Lowercase next sentence start, but preserve "I" (first person pronoun)
-                if next_sent and next_sent[0] == 'I' and (len(next_sent) == 1 or not next_sent[1].isalpha()):
-                    next_start = next_sent  # Keep "I" uppercase
-                else:
-                    next_start = next_sent[0].lower() + next_sent[1:] if next_sent else ""
-                # Replace period with semicolon
-                result.append(f"{sent}; {next_start}")
-                semicolons_added += 1
-                i += 2
-                continue
-
-            result.append(sent)
-            i += 1
-
-        return '. '.join(result) + '.'
+        # DO NOT add semicolons - the sample text uses very few
+        # 0.70 per 100 words means most paragraphs should have ZERO
+        return paragraph
 
     def _cleanup_punctuation(self, text):
         """Clean up punctuation artifacts from algorithmic manipulation."""
@@ -1251,6 +1210,135 @@ OUTPUT:"""
             print(f">> Warning: Could not apply structural templates: {e}")
             return paragraph
 
+    def _restructure_paragraphs(self, paragraphs):
+        """
+        Adjust paragraph structure to match sample patterns including RHYTHM.
+
+        Actions:
+        1. Get target rhythm from sample (long/short/medium sequence)
+        2. Split very long paragraphs to match target
+        3. Merge short paragraphs to match target
+
+        Returns:
+            List of restructured paragraphs
+        """
+        # First pass: basic restructuring
+        result = []
+        i = 0
+
+        while i < len(paragraphs):
+            para = paragraphs[i]
+
+            # Skip empty, headers, or special content
+            if not para.strip() or para.strip().startswith('#') or self._is_special_content(para):
+                result.append(para)
+                i += 1
+                continue
+
+            word_count = len(para.split())
+
+            # Check if should split (very long > 250 words)
+            if word_count > 250:
+                split_paras = self._split_long_paragraph(para)
+                result.extend(split_paras)
+                print(f"      >> Split long paragraph ({word_count} words) into {len(split_paras)} parts")
+                i += 1
+                continue
+
+            # Check if should merge with next (very short < 40 words)
+            if word_count < 40 and i + 1 < len(paragraphs):
+                next_para = paragraphs[i + 1]
+                if not next_para.strip().startswith('#') and not self._is_special_content(next_para):
+                    next_word_count = len(next_para.split())
+                    combined_count = word_count + next_word_count
+
+                    # Only merge if combined isn't too long
+                    if combined_count < 200:
+                        merged = para.strip() + ' ' + next_para.strip()
+                        result.append(merged)
+                        print(f"      >> Merged short paragraphs ({word_count} + {next_word_count} words)")
+                        i += 2
+                        continue
+
+            result.append(para)
+            i += 1
+
+        return result
+
+    def _split_long_paragraph(self, para):
+        """Split a long paragraph at natural boundaries."""
+        doc = self.markov_agent.analyzer.nlp(para)
+        sentences = list(doc.sents)
+
+        if len(sentences) <= 2:
+            return [para]  # Can't meaningfully split
+
+        # Target: split roughly in half at sentence boundary
+        target_split = len(sentences) // 2
+
+        first_part = ' '.join(str(s) for s in sentences[:target_split])
+        second_part = ' '.join(str(s) for s in sentences[target_split:])
+
+        return [first_part.strip(), second_part.strip()]
+
+    def _enhance_transitions(self, paragraphs):
+        """
+        Improve how paragraphs connect to each other.
+
+        CONSERVATIVE: Only add transitions sparingly to avoid repetition.
+
+        Returns list of paragraphs with improved transitions.
+        """
+        if len(paragraphs) < 2:
+            return paragraphs
+
+        result = [paragraphs[0]]  # First paragraph stays as-is
+
+        # Track how many transitions we've added to avoid over-transitioning
+        transitions_added = 0
+        max_transitions = len(paragraphs) // 5  # Add at most 20% of paragraphs
+
+        for i in range(1, len(paragraphs)):
+            para = paragraphs[i]
+            prev_para = paragraphs[i - 1]
+
+            # Skip headers, empty, or special content
+            if not para.strip() or para.strip().startswith('#') or self._is_special_content(para):
+                result.append(para)
+                continue
+
+            if not prev_para.strip() or prev_para.strip().startswith('#'):
+                result.append(para)
+                continue
+
+            # Don't add transitions if paragraph already starts with common transition words
+            first_word = para.split()[0].lower() if para.split() else ""
+            if first_word in ['the', 'this', 'these', 'such', 'however', 'but', 'yet', 'thus', 'also', 'i', 'we']:
+                result.append(para)
+                continue
+
+            # Only add reference transitions when there are clearly shared nouns
+            if transitions_added < max_transitions:
+                prev_doc = self.markov_agent.analyzer.nlp(prev_para[-150:])
+                curr_doc = self.markov_agent.analyzer.nlp(para[:100])
+
+                prev_nouns = {t.lemma_.lower() for t in prev_doc if t.pos_ == 'NOUN' and len(t.text) > 4}
+                curr_nouns = {t.lemma_.lower() for t in curr_doc if t.pos_ == 'NOUN' and len(t.text) > 4}
+
+                shared_nouns = prev_nouns & curr_nouns
+
+                # Only add reference transition if there are at least 2 shared nouns
+                if len(shared_nouns) >= 2:
+                    # Change "The X..." to "This X..."
+                    if para.lower().startswith('the '):
+                        para = 'This ' + para[4:]
+                        transitions_added += 1
+                        print(f"      >> Added 'This' transition")
+
+            result.append(para)
+
+        return result
+
     def _comprehensive_gptzero_validation(self, original, output, sample_patterns=None):
         """
         Comprehensive validation against all GPTZero detection metrics.
@@ -1898,6 +1986,15 @@ Output ONLY the polished text."""
 
         # Split by Paragraphs (preserve newlines)
         paragraphs = text.split('\n\n')
+
+        # ========== PRE-PROCESSING: PARAGRAPH RESTRUCTURE ==========
+        print(f"\n========== PARAGRAPH RESTRUCTURE ==========")
+        paragraphs = self._restructure_paragraphs(paragraphs)
+
+        # ========== PRE-PROCESSING: TRANSITION ENHANCEMENT ==========
+        print(f"\n========== TRANSITION ENHANCEMENT ==========")
+        paragraphs = self._enhance_transitions(paragraphs)
+
         final_output = []
 
         print(f"\n========== PHASE 1: ALGORITHMIC MANIPULATION ==========")
@@ -1981,12 +2078,13 @@ TEXT TO FIX:
 
 RULES:
 1. Keep ALL original words - only change punctuation and sentence boundaries
-2. To vary sentence length: merge short sentences with semicolons (;) or split long ones
-3. To vary starters: move prepositional phrases to the beginning (e.g., "In the morning," "From the ruins,")
-4. NEVER reorder clauses where "it", "he", "she", "they", "this", "that" would lose their referent
-5. DO NOT add new words, phrases, or vocabulary
-6. DO NOT paraphrase - preserve exact meaning and clause order
-7. Output ONLY the fixed text, nothing else"""
+2. To vary sentence length: merge short sentences with ", and" or split long ones with periods
+3. AVOID semicolons (;) - use periods or ", and" instead
+4. To vary starters: move prepositional phrases to the beginning (e.g., "In the morning," "From the ruins,")
+5. NEVER reorder clauses where "it", "he", "she", "they", "this", "that" would lose their referent
+6. DO NOT add new words, phrases, or vocabulary
+7. DO NOT paraphrase - preserve exact meaning and clause order
+8. Output ONLY the fixed text, nothing else"""
 
                     try:
                         ai_result = self.call_model(self.editor_model, fix_prompt, system_prompt=self.structural_editor_prompt)

@@ -292,10 +292,15 @@ class StructuralTemplateExtractor:
             result_tokens.append(token.text)
 
         # Insert punctuation at template positions
+        # BUT: Exclude semicolons - sample has only 0.70 per 100 words
+        # Semicolons should be rare, not inserted via templates
         word_count = len(words)
         insertions = []  # (word_index, punct_char)
 
         for norm_pos, punct_char in template['punct_positions']:
+            # Skip semicolons - they make output sound too formal/AI-like
+            if punct_char == ';':
+                continue
             target_word_idx = int(norm_pos * word_count)
             target_word_idx = min(target_word_idx, word_count - 1)
             insertions.append((target_word_idx, punct_char))
@@ -512,11 +517,13 @@ class PunctuationStyleLearner:
                 'parentheses_per_sentence': punct_counts['parentheses'] / total_sentences
             }
         else:
+            # Conservative defaults - sample has 0.70 semicolons per 100 words
+            # With ~10 words/sentence = 0.07 semicolons per sentence
             self.punctuation_patterns = {
-                'em_dash_per_sentence': 0.1,
-                'semicolon_per_sentence': 0.15,
-                'colon_per_sentence': 0.1,
-                'parentheses_per_sentence': 0.2
+                'em_dash_per_sentence': 0.0,  # Em-dashes forbidden
+                'semicolon_per_sentence': 0.07,  # Very conservative
+                'colon_per_sentence': 0.05,
+                'parentheses_per_sentence': 0.1
             }
 
         print(f"Learned punctuation patterns: {self.punctuation_patterns}")
@@ -524,11 +531,12 @@ class PunctuationStyleLearner:
     def get_target_patterns(self):
         """Return learned punctuation patterns."""
         if self.punctuation_patterns is None:
+            # Conservative defaults matching sample analysis
             return {
-                'em_dash_per_sentence': 0.1,
-                'semicolon_per_sentence': 0.15,
-                'colon_per_sentence': 0.1,
-                'parentheses_per_sentence': 0.2
+                'em_dash_per_sentence': 0.0,  # Em-dashes forbidden
+                'semicolon_per_sentence': 0.07,  # Very conservative
+                'colon_per_sentence': 0.05,
+                'parentheses_per_sentence': 0.1
             }
         return self.punctuation_patterns
 
@@ -542,8 +550,9 @@ class PunctuationStyleLearner:
 
         guidance = []
         # DO NOT include em-dash guidance - em-dashes are forbidden in output
-        if target_patterns.get('semicolon_per_sentence', 0) > 0.1:
-            guidance.append(f"Use semicolons (;) approximately {target_patterns['semicolon_per_sentence']:.2f} times per sentence to connect related clauses")
+        # Only suggest semicolons if sample uses them frequently (>0.15)
+        if target_patterns.get('semicolon_per_sentence', 0) > 0.15:
+            guidance.append(f"Use semicolons (;) sparingly, approximately {target_patterns['semicolon_per_sentence']:.2f} times per sentence")
         if target_patterns.get('colon_per_sentence', 0) > 0.1:
             guidance.append(f"Use colons (:) approximately {target_patterns['colon_per_sentence']:.2f} times per sentence for lists and explanations")
 
@@ -641,6 +650,472 @@ class ContextualVocabularyInjector:
             print(f"Warning: Error in vocabulary injection: {e}")
 
         return suggestions
+
+
+class PhrasePatternExtractor:
+    """
+    Extract distinctive phrase patterns from sample text.
+
+    Key insight: Author voice is captured in PHRASE PATTERNS, not individual words.
+    "That is to say" vs "In other words" - same meaning, different voice.
+    """
+
+    # AI-typical phrases that should be mapped to sample equivalents
+    AI_TYPICAL_PHRASES = [
+        'it is important to note that',
+        'it is worth noting that',
+        'plays a crucial role',
+        'plays a significant role',
+        'significantly impacts',
+        'in recent years',
+        'furthermore',
+        'moreover',
+        'additionally',
+        'consequently',
+        'as a result',
+        'in conclusion',
+        'to summarize',
+        'it can be observed that',
+        'this demonstrates that',
+        'this suggests that',
+        'it is evident that',
+        'it should be noted that',
+        'in terms of',
+        'with regard to',
+        'with respect to',
+        'due to the fact that',
+        'in order to',
+        'for the purpose of',
+        'at the present time',
+        'at this point in time',
+        'in the event that',
+        'despite the fact that',
+        'regardless of the fact that',
+        'it is essential to',
+        'it is crucial to',
+        'it is vital to',
+        'serves as a',
+        'acts as a',
+        'functions as a'
+    ]
+
+    def __init__(self, nlp):
+        self.nlp = nlp
+        self.phrase_patterns = {
+            'connectors': Counter(),      # "that is to say", "on the one hand"
+            'qualifiers': Counter(),      # "under certain conditions"
+            'rhetorical': Counter(),      # "why is it that"
+            'argumentative': Counter(),   # "the reason is"
+            'transitions': Counter()      # sentence/paragraph transitions
+        }
+        self.ngram_frequencies = {
+            2: Counter(),  # bigrams
+            3: Counter(),  # trigrams
+            4: Counter()   # 4-grams
+        }
+        self.sentence_starters = Counter()
+        self.paragraph_starters = Counter()
+
+    def extract_ngrams(self, text, n):
+        """Extract n-grams from text."""
+        doc = self.nlp(text.lower())
+        tokens = [t.text for t in doc if not t.is_punct and not t.is_space]
+        ngrams = []
+        for i in range(len(tokens) - n + 1):
+            ngram = ' '.join(tokens[i:i+n])
+            ngrams.append(ngram)
+        return ngrams
+
+    def learn_from_sample(self, sample_text):
+        """Learn phrase patterns from sample text."""
+        # Extract n-grams
+        for n in [2, 3, 4]:
+            ngrams = self.extract_ngrams(sample_text, n)
+            self.ngram_frequencies[n].update(ngrams)
+
+        # Extract sentence starters
+        doc = self.nlp(sample_text)
+        for sent in doc.sents:
+            words = [t.text.lower() for t in sent if not t.is_punct and not t.is_space]
+            if len(words) >= 3:
+                # First word
+                self.sentence_starters[words[0]] += 1
+                # First two words
+                self.sentence_starters[' '.join(words[:2])] += 1
+                # First three words
+                self.sentence_starters[' '.join(words[:3])] += 1
+
+        # Extract paragraph starters
+        paragraphs = [p.strip() for p in sample_text.split('\n\n') if p.strip()]
+        for para in paragraphs:
+            para_doc = self.nlp(para)
+            first_sent = list(para_doc.sents)[0] if list(para_doc.sents) else None
+            if first_sent:
+                words = [t.text.lower() for t in first_sent if not t.is_punct and not t.is_space]
+                if len(words) >= 3:
+                    self.paragraph_starters[' '.join(words[:3])] += 1
+
+        # Categorize common patterns
+        self._categorize_patterns(sample_text)
+
+        print(f"Learned phrase patterns: {sum(len(c) for c in self.phrase_patterns.values())} unique patterns")
+        print(f"N-gram frequencies: 2-gram={len(self.ngram_frequencies[2])}, 3-gram={len(self.ngram_frequencies[3])}, 4-gram={len(self.ngram_frequencies[4])}")
+
+    def _categorize_patterns(self, text):
+        """Categorize phrase patterns by type."""
+        text_lower = text.lower()
+
+        # Connector patterns
+        connector_markers = [
+            'that is to say', 'that is', 'on the one hand', 'on the other hand',
+            'what is more', 'in other words', 'for example', 'for instance',
+            'as a matter of fact', 'in this way', 'such as', 'namely'
+        ]
+        for marker in connector_markers:
+            count = text_lower.count(marker)
+            if count > 0:
+                self.phrase_patterns['connectors'][marker] = count
+
+        # Qualifier patterns
+        qualifier_markers = [
+            'under certain conditions', 'in the process of', 'according to',
+            'in general', 'as a whole', 'in particular', 'especially',
+            'chiefly', 'mainly', 'primarily', 'necessarily', 'inevitably'
+        ]
+        for marker in qualifier_markers:
+            count = text_lower.count(marker)
+            if count > 0:
+                self.phrase_patterns['qualifiers'][marker] = count
+
+        # Rhetorical patterns
+        rhetorical_markers = [
+            'why is it that', 'how can', 'what is', 'from this it can be seen',
+            'it is evident', 'it is clear', 'we can see', 'it follows that'
+        ]
+        for marker in rhetorical_markers:
+            count = text_lower.count(marker)
+            if count > 0:
+                self.phrase_patterns['rhetorical'][marker] = count
+
+        # Argumentative patterns
+        argumentative_markers = [
+            'the reason is', 'therefore', 'thus', 'hence', 'consequently',
+            'because of this', 'for this reason', 'this is why', 'this shows'
+        ]
+        for marker in argumentative_markers:
+            count = text_lower.count(marker)
+            if count > 0:
+                self.phrase_patterns['argumentative'][marker] = count
+
+    def get_sample_connector(self, ai_phrase):
+        """Get a sample-equivalent connector for an AI phrase."""
+        # Map AI phrases to sample equivalents
+        mappings = {
+            'furthermore': 'what is more',
+            'moreover': 'in addition',
+            'additionally': 'also',
+            'consequently': 'thus',
+            'as a result': 'therefore',
+            'it is important to note that': 'we must note that',
+            'it is worth noting that': 'it should be noted that',
+            'in recent years': 'in the present period',
+            'plays a crucial role': 'is of great importance',
+            'plays a significant role': 'occupies an important position',
+            'significantly impacts': 'influences',
+            'due to the fact that': 'because',
+            'in order to': 'to',
+            'at the present time': 'at present',
+            'in terms of': 'as regards',
+            'with regard to': 'concerning',
+            'it is evident that': 'it is clear that',
+            'it is essential to': 'we must',
+            'it is crucial to': 'it is necessary to',
+        }
+
+        ai_lower = ai_phrase.lower()
+        return mappings.get(ai_lower, None)
+
+    def get_top_patterns(self, category, n=10):
+        """Get top N patterns in a category."""
+        return self.phrase_patterns.get(category, Counter()).most_common(n)
+
+    def get_distinctive_ngrams(self, n=3, min_freq=2, top_k=20):
+        """Get most frequent n-grams that appear at least min_freq times."""
+        return [(ngram, count) for ngram, count in self.ngram_frequencies[n].most_common(top_k)
+                if count >= min_freq]
+
+
+class ParagraphAnalyzer:
+    """
+    Analyze paragraph-level patterns from sample text.
+
+    Captures:
+    - Paragraph length distribution
+    - Internal structure (thesis-example-conclusion)
+    - Transition patterns between paragraphs
+    - Rhetorical devices (questions, contrasts, citations)
+    """
+
+    # Structure types we can identify
+    STRUCTURE_TYPES = {
+        'thesis_first': 'Statement followed by evidence and elaboration',
+        'question_answer': 'Rhetorical question followed by answer',
+        'contrast': 'Comparison of opposing viewpoints',
+        'citation': 'Quote from authority with interpretation',
+        'progression': 'Sequential points building to conclusion',
+        'example': 'General statement with specific examples'
+    }
+
+    def __init__(self, nlp):
+        self.nlp = nlp
+        self.length_stats = {
+            'word_counts': [],
+            'sentence_counts': [],
+            'min_words': 0,
+            'max_words': 0,
+            'mean_words': 0,
+            'std_words': 0
+        }
+        self.structure_distribution = Counter()
+        self.transition_patterns = []
+        self.first_sentence_patterns = Counter()
+        self.last_sentence_patterns = Counter()
+
+    def learn_from_sample(self, sample_text):
+        """Learn paragraph patterns from sample text."""
+        paragraphs = [p.strip() for p in sample_text.split('\n\n') if p.strip() and len(p.strip()) > 50]
+
+        if not paragraphs:
+            print("Warning: No paragraphs found in sample")
+            return
+
+        # Analyze each paragraph
+        for i, para in enumerate(paragraphs):
+            self._analyze_paragraph(para, i, paragraphs)
+
+        # Calculate length statistics
+        if self.length_stats['word_counts']:
+            counts = self.length_stats['word_counts']
+            self.length_stats['min_words'] = min(counts)
+            self.length_stats['max_words'] = max(counts)
+            self.length_stats['mean_words'] = sum(counts) / len(counts)
+            variance = sum((x - self.length_stats['mean_words']) ** 2 for x in counts) / len(counts)
+            self.length_stats['std_words'] = variance ** 0.5
+
+        print(f"Learned paragraph patterns from {len(paragraphs)} paragraphs")
+        print(f"  Length: {self.length_stats['mean_words']:.0f} words avg (range: {self.length_stats['min_words']}-{self.length_stats['max_words']})")
+        print(f"  Structure types: {dict(self.structure_distribution.most_common(3))}")
+
+    def _analyze_paragraph(self, para, index, all_paragraphs):
+        """Analyze a single paragraph."""
+        doc = self.nlp(para)
+        sentences = list(doc.sents)
+
+        # Length stats
+        word_count = sum(1 for t in doc if not t.is_punct and not t.is_space)
+        self.length_stats['word_counts'].append(word_count)
+        self.length_stats['sentence_counts'].append(len(sentences))
+
+        # Structure type
+        structure_type = self._identify_structure(para, sentences)
+        self.structure_distribution[structure_type] += 1
+
+        # First/last sentence patterns
+        if sentences:
+            first_sent = str(sentences[0])
+            last_sent = str(sentences[-1])
+
+            # Categorize first sentence
+            first_type = self._categorize_sentence(first_sent)
+            self.first_sentence_patterns[first_type] += 1
+
+            # Categorize last sentence
+            last_type = self._categorize_sentence(last_sent)
+            self.last_sentence_patterns[last_type] += 1
+
+        # Transition patterns (how this paragraph connects to previous)
+        if index > 0:
+            prev_para = all_paragraphs[index - 1]
+            transition = self._analyze_transition(prev_para, para)
+            self.transition_patterns.append(transition)
+
+    def _identify_structure(self, para, sentences):
+        """Identify the structural type of a paragraph."""
+        para_lower = para.lower()
+
+        # Check for question-answer structure
+        if '?' in para and len(sentences) > 1:
+            return 'question_answer'
+
+        # Check for citation structure
+        if '"' in para or 'said' in para_lower or 'wrote' in para_lower:
+            return 'citation'
+
+        # Check for contrast structure
+        contrast_markers = ['on the one hand', 'on the other hand', 'however', 'but', 'yet', 'although']
+        if any(marker in para_lower for marker in contrast_markers):
+            return 'contrast'
+
+        # Check for example structure
+        example_markers = ['for example', 'for instance', 'such as', 'e.g.']
+        if any(marker in para_lower for marker in example_markers):
+            return 'example'
+
+        # Check for progression structure
+        progression_markers = ['first', 'second', 'third', 'finally', 'then', 'next']
+        if sum(1 for marker in progression_markers if marker in para_lower) >= 2:
+            return 'progression'
+
+        # Default: thesis first
+        return 'thesis_first'
+
+    def _categorize_sentence(self, sentence):
+        """Categorize a sentence by its rhetorical function."""
+        sent_lower = sentence.lower().strip()
+
+        if sent_lower.endswith('?'):
+            return 'question'
+        if sent_lower.startswith(('this ', 'these ', 'such ', 'that ')):
+            return 'reference_back'
+        if sent_lower.startswith(('we ', 'let us', "let's")):
+            return 'inclusive'
+        if any(sent_lower.startswith(word) for word in ['thus', 'therefore', 'hence', 'consequently']):
+            return 'conclusion'
+        if any(sent_lower.startswith(word) for word in ['for example', 'for instance']):
+            return 'example'
+        if '"' in sentence:
+            return 'citation'
+
+        return 'statement'
+
+    def _analyze_transition(self, prev_para, curr_para):
+        """Analyze how current paragraph transitions from previous."""
+        curr_doc = self.nlp(curr_para)
+        first_sent = str(list(curr_doc.sents)[0]).lower() if list(curr_doc.sents) else ""
+
+        # Check transition type
+        if any(word in first_sent for word in ['this', 'these', 'such', 'that']):
+            return 'reference'
+        if any(word in first_sent for word in ['however', 'but', 'yet', 'although']):
+            return 'contrast'
+        if any(word in first_sent for word in ['thus', 'therefore', 'hence', 'consequently']):
+            return 'conclusion'
+        if any(word in first_sent for word in ['also', 'moreover', 'furthermore', 'in addition']):
+            return 'addition'
+
+        return 'new_topic'
+
+    def get_target_length_range(self):
+        """Get the target paragraph length range based on sample."""
+        mean = self.length_stats['mean_words']
+        std = self.length_stats['std_words']
+        return (max(50, mean - std), mean + std)
+
+    def get_dominant_structure(self):
+        """Get the most common paragraph structure type."""
+        if self.structure_distribution:
+            return self.structure_distribution.most_common(1)[0][0]
+        return 'thesis_first'
+
+    def should_split_paragraph(self, word_count):
+        """Check if a paragraph should be split based on sample patterns."""
+        max_acceptable = self.length_stats['max_words'] * 1.2 if self.length_stats['max_words'] else 300
+        return word_count > max_acceptable
+
+    def should_merge_paragraph(self, word_count):
+        """Check if a paragraph is too short based on sample patterns."""
+        min_acceptable = self.length_stats['min_words'] * 0.5 if self.length_stats['min_words'] else 30
+        return word_count < min_acceptable
+
+    def learn_length_rhythm(self, sample_text):
+        """
+        Learn the pattern of paragraph length variation.
+
+        Returns a sequence of length categories: ['long', 'short', 'medium', ...]
+        This captures the RHYTHM of how the author varies paragraph lengths.
+        """
+        paragraphs = [p.strip() for p in sample_text.split('\n\n') if p.strip() and len(p.strip()) > 50]
+
+        if not paragraphs:
+            self.length_rhythm = ['medium']
+            return
+
+        # Categorize each paragraph
+        rhythm = []
+        for para in paragraphs:
+            word_count = len(para.split())
+            category = self._categorize_length(word_count)
+            rhythm.append(category)
+
+        self.length_rhythm = rhythm
+
+        # Also learn common patterns (bigrams of length categories)
+        self.rhythm_transitions = Counter()
+        for i in range(len(rhythm) - 1):
+            transition = (rhythm[i], rhythm[i + 1])
+            self.rhythm_transitions[transition] += 1
+
+        print(f"  Rhythm pattern (first 20): {rhythm[:20]}")
+        print(f"  Common transitions: {self.rhythm_transitions.most_common(5)}")
+
+    def _categorize_length(self, word_count):
+        """Categorize paragraph length into short/medium/long."""
+        mean = self.length_stats.get('mean_words', 100)
+        std = self.length_stats.get('std_words', 50)
+
+        if word_count < mean - std * 0.5:
+            return 'short'
+        elif word_count > mean + std * 0.5:
+            return 'long'
+        else:
+            return 'medium'
+
+    def get_target_rhythm(self, num_paragraphs):
+        """
+        Get target length pattern for N paragraphs.
+
+        Returns list of target categories matching sample rhythm.
+        """
+        if not hasattr(self, 'length_rhythm') or not self.length_rhythm:
+            # Default: alternate medium and long
+            return ['medium', 'long'] * (num_paragraphs // 2 + 1)
+
+        # Cycle through the learned rhythm
+        result = []
+        for i in range(num_paragraphs):
+            idx = i % len(self.length_rhythm)
+            result.append(self.length_rhythm[idx])
+
+        return result
+
+    def get_target_word_count(self, category):
+        """Get target word count for a length category."""
+        mean = self.length_stats.get('mean_words', 100)
+        std = self.length_stats.get('std_words', 50)
+
+        if category == 'short':
+            return max(30, int(mean - std * 0.7))
+        elif category == 'long':
+            return int(mean + std * 0.7)
+        else:
+            return int(mean)
+
+    def get_next_category(self, current_category):
+        """Predict next paragraph category based on learned transitions."""
+        if not hasattr(self, 'rhythm_transitions') or not self.rhythm_transitions:
+            # Default: vary from current
+            return 'medium' if current_category == 'long' else 'long'
+
+        # Find most common transition from current category
+        candidates = [(next_cat, count) for (curr, next_cat), count
+                      in self.rhythm_transitions.items() if curr == current_category]
+
+        if not candidates:
+            return 'medium'
+
+        # Return most common next category
+        return max(candidates, key=lambda x: x[1])[0]
+
 
 class VocabularyExtractor:
     """Extracts and filters vocabulary from sample text."""
