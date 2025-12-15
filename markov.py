@@ -37,6 +37,45 @@ STOPWORDS = {
 }
 
 
+def normalize_sample_text(text: str) -> str:
+    """
+    Normalize sample text by:
+    - Removing leading tabs and spaces from lines
+    - Collapsing multiple spaces to single space (but preserving paragraph breaks)
+    - Removing trailing whitespace from lines
+    - Preserving paragraph structure (double newlines)
+    - Removing excessive blank lines (more than 2 consecutive)
+
+    Args:
+        text: Raw text from sample file
+
+    Returns:
+        Normalized text ready for style learning
+    """
+    lines = text.splitlines()
+    normalized_lines = []
+
+    for line in lines:
+        # Remove leading tabs and spaces
+        line = line.lstrip('\t ')
+        # Collapse multiple spaces to single space
+        line = re.sub(r' +', ' ', line)
+        # Remove trailing whitespace
+        line = line.rstrip()
+        normalized_lines.append(line)
+
+    # Join lines back together
+    text = '\n'.join(normalized_lines)
+
+    # Remove excessive blank lines (more than 2 consecutive newlines)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # Remove leading/trailing whitespace from entire text
+    text = text.strip()
+
+    return text
+
+
 class MetaphorDetector:
     """
     Detects AI-typical metaphors and flowery language in text.
@@ -1926,6 +1965,10 @@ class StyleTransferAgent:
         print(f"Reading {file_path}...")
         with open(file_path, 'r', encoding='utf-8') as f:
             text = f.read()
+
+        # Normalize the sample text
+        print("Normalizing sample text...")
+        text = normalize_sample_text(text)
 
         # Extract vocabulary from sample text
         print("Extracting vocabulary from sample text...")

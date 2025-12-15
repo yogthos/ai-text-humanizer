@@ -11,7 +11,7 @@ from pathlib import Path
 from transformers import GPT2LMHeadModel, GPT2TokenizerFast
 from glm import GLMProvider
 from deepseek import DeepSeekProvider
-from markov import StyleTransferAgent, MetaphorDetector
+from markov import StyleTransferAgent, MetaphorDetector, normalize_sample_text
 
 # Suppress the loss_type warning
 warnings.filterwarnings("ignore", message=".*loss_type.*")
@@ -531,7 +531,9 @@ class AgenticHumanizer:
             self.paragraph_rewrite_template = f.read().strip()
         # Load style sample for Few-Shot Style Transfer
         with open(prompts_dir / "sample.txt", "r", encoding="utf-8") as f:
-            self.style_sample = f.read().strip()
+            raw_sample = f.read()
+        # Normalize the sample text (remove tabs, normalize whitespace)
+        self.style_sample = normalize_sample_text(raw_sample)
 
         # Cache for style guide (extracted once, reused)
         self._style_guide = None

@@ -12,7 +12,32 @@ You are rearranging furniture in a room, not buying new furniture. Keep every pi
 - DO NOT inject philosophical or formal terminology.
 - FORBIDDEN: em-dashes (—), double hyphens (--), and these words: process, development, contradiction, principal, aspect, concrete, revolutionary, mechanism, framework, paradigm
 
-### 2. REMOVING AI PATTERNS (STRUCTURE ONLY)
+### 2. COHERENCE (NON-NEGOTIABLE)
+Narrative flow and logical relationships MUST be preserved. Structure changes cannot break meaning.
+
+- **Temporal sequence:** Time markers ("I was thirteen", "Every morning") must stay in logical order. Context comes BEFORE action.
+- **Subject-predicate integrity:** Each sentence's subject MUST remain the subject of its predicate. "That country is a ghost" cannot become a modifier on a different noun. Don't convert independent sentences into appositives or modifiers.
+- **Cause-before-effect:** Causes must precede their effects. Don't invert this relationship.
+- **Pronoun referents:** Pronouns ("it", "this", "they") must appear AFTER the noun they reference.
+- **Setup before payoff:** Context sentences stay before the sentences they contextualize.
+
+**FORBIDDEN RESTRUCTURING PATTERNS:**
+- DO NOT embed time/context with "which" creating awkward constructions
+  - BAD: "Every morning, which required a pilgrimage, began when I was thirteen"
+  - GOOD: "When I was thirteen, every morning required a pilgrimage"
+- DO NOT separate setup sentences from their payoff
+  - BAD: "One memory defines that era. The silence is that of a paralyzed economy." (disconnected)
+  - GOOD: "One memory defines that era: the silence of a paralyzed economy."
+- DO NOT convert independent sentences into modifiers/appositives attached to different nouns
+  - BAD: "From the ruins of the Soviet Union, a ghost now that haunts history, I spent my childhood"
+  - WHY: "That country is a ghost" has subject "country" - you cannot attach "ghost" to "ruins"
+  - GOOD: "I spent my childhood scavenging in the ruins of the Soviet Union. That country is a ghost now."
+  - RULE: Each sentence's SUBJECT must remain the subject of its predicate
+- DO NOT invert clause order if it breaks logical flow
+- DO NOT force-merge unrelated ideas just to vary sentence length
+- If meeting a length target would break coherence, PRESERVE COHERENCE instead
+
+### 3. REMOVING AI PATTERNS (STRUCTURE ONLY)
 AI text has these patterns - fix them by changing STRUCTURE, not WORDS:
 
 1. **Uniform sentence length** → Vary lengths: short (5-10), medium (15-20), long (25+)
@@ -21,19 +46,20 @@ AI text has these patterns - fix them by changing STRUCTURE, not WORDS:
 4. **Passive hedging** ("It is important to note...") → Just state the fact
 5. **Em-dashes everywhere** → Use commas, semicolons, or periods instead
 
-### 3. FORBIDDEN VOCABULARY
+### 4. FORBIDDEN VOCABULARY
 NEVER add these AI-signaling words:
 - delve, leverage, seamless, tapestry, crucial, vibrant, realm, landscape, symphony, orchestrate
 - myriad, plethora, paradigm, synergy, holistic, robust, streamline, optimize
 - process, development, contradiction, principal, aspect, concrete, revolutionary, condition
 
-### 4. HOW TO RESTRUCTURE
+### 5. HOW TO RESTRUCTURE
 - **Merge short sentences:** "The sky darkened. Rain began." → "The sky darkened; rain began."
 - **Split long sentences:** Use periods or semicolons at natural pauses.
 - **Vary starters:** If 3 sentences start with "The", change 2 of them by moving clauses.
 - **Keep the flow:** Ensure sentences connect naturally.
+- **Coherence first:** If restructuring would break narrative flow, don't do it.
 
-### 5. FORMATTING
+### 6. FORMATTING
 - Keep the same number of paragraphs.
 - Keep markdown headers exactly as they are.
 - Output ONLY the restructured text - no explanations or commentary.

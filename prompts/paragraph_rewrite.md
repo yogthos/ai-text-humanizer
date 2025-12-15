@@ -7,7 +7,35 @@
 **INPUT PARAGRAPH TO RESTRUCTURE:**
 {input_content}
 
-**TASK:** Restructure the input paragraph to vary sentence lengths as specified in the Markov template above. Your ONLY job is to change sentence boundaries and punctuation - NOT to change words.
+**COHERENCE REQUIREMENTS (NON-NEGOTIABLE):**
+Narrative flow and logical relationships MUST be preserved. These rules OVERRIDE sentence length targets.
+
+1. **Subject-predicate integrity:** Each sentence's subject MUST stay with its predicate. "That country is a ghost" CANNOT become a modifier attached to "ruins" - they have different subjects.
+2. **Narrative flow trumps metrics:** If varying sentence length would break coherence, DON'T vary it
+3. **Context before action:** Time/place/age sentences MUST precede the actions they describe
+4. **No forced mergers:** Don't use "which" clauses to jam unrelated ideas together
+5. **Cause before effect:** Keep logical order intact
+6. **Clear references:** Pronouns must follow their referents
+
+**FORBIDDEN PATTERNS (examples of what NOT to do):**
+
+BAD: "Every morning, which required a pilgrimage, began when I was thirteen"
+GOOD: "When I was thirteen, every morning required a pilgrimage"
+(Time context must come first)
+
+BAD: "One memory defines that era. The silence is that of a paralyzed economy."
+GOOD: "One memory defines that era: the silence of a paralyzed economy."
+(The two ideas must connect)
+
+BAD: "The system, which crashed, was built by engineers; they worked hard"
+GOOD: "Engineers built the system. They worked hard, but it crashed."
+(Don't force unrelated clauses together)
+
+BAD: "From the ruins of the Soviet Union, a ghost now that haunts history, I spent my childhood"
+GOOD: "I spent my childhood scavenging in the ruins of the Soviet Union. That country is a ghost now."
+(CRITICAL: "country" is the subject of "is a ghost" - you cannot move that predicate to modify "ruins")
+
+**TASK:** Restructure the input paragraph to vary sentence lengths as specified in the Markov template above. Your ONLY job is to change sentence boundaries and punctuation - NOT to change words. If meeting length targets would break narrative coherence, preserve coherence instead.
 
 **CRITICAL: PRESERVE THE ORIGINAL VOICE**
 - This is a personal narrative. Keep it personal.
