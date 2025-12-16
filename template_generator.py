@@ -900,7 +900,10 @@ class TemplateGenerator:
                                        semantic_weight: int = 0,
                                        used_openers: Optional[List[str]] = None,
                                        used_phrases: Optional[List[str]] = None,
-                                       paragraph_index: int = 0) -> ParagraphTemplate:
+                                       paragraph_index: int = 0,
+                                       phrase_analyzer: Optional[Any] = None,
+                                       output_phrase_counts: Optional[Dict[str, int]] = None,
+                                       output_total_paragraphs: int = 0) -> ParagraphTemplate:
         """
         Generate template by finding similar paragraphs from sample based on context.
 
@@ -910,6 +913,7 @@ class TemplateGenerator:
         3. Extracts templates from those similar paragraphs dynamically
         4. Enforces variety by checking opener types and phrases
         5. Falls back to distribution-based selection when all candidates share opener
+        6. Scores templates by phrase distribution match (NEW)
 
         Args:
             input_text: Current paragraph being transformed
@@ -921,6 +925,9 @@ class TemplateGenerator:
             used_openers: List of opener types already used (for variety)
             used_phrases: List of opener phrases already used (for exact repetition avoidance)
             paragraph_index: Current paragraph index
+            phrase_analyzer: PhraseDistributionAnalyzer instance for distribution matching
+            output_phrase_counts: Current phrase usage counts in output
+            output_total_paragraphs: Total paragraphs in output so far
 
         Returns:
             ParagraphTemplate extracted from contextually similar paragraphs
@@ -1143,19 +1150,51 @@ class TemplateGenerator:
                                         if len(templates) >= 8:  # Ensure good variety
                                             break
 
-                        # LENGTH DISTRIBUTION MATCHING: Score and select best match
+                        # MULTI-FACTOR SCORING: Score by length distribution AND phrase distribution
                         if len(templates) > 1:
                             scored_templates = []
-                            for template in templates:
-                                score = self._score_length_distribution_match(template.length_distribution)
-                                scored_templates.append((score, template))
+                            for template, phrase in zip(templates, template_phrases):
+                                # Score 1: Length distribution match (40% weight)
+                                length_score = self._score_length_distribution_match(template.length_distribution)
 
-                            # Sort by length distribution match (higher is better)
+                                # Score 2: Phrase distribution match (30% weight if phrase analyzer available)
+                                phrase_score = 1.0  # Default neutral
+                                if phrase_analyzer and phrase:
+                                    normalized_phrase = phrase.lower().strip()
+                                    phrase_score = phrase_analyzer.score_phrase_distribution_match(
+                                        normalized_phrase,
+                                        output_phrase_counts or {},
+                                        output_total_paragraphs,
+                                        role=role
+                                    )
+
+                                # Score 3: Opener type variety (30% weight)
+                                opener_score = 1.0  # Default neutral
+                                if template.sentences and used_openers:
+                                    opener_type = template.sentences[0].opener_type
+                                    # Boost if opener type not recently used
+                                    if opener_type not in used_openers[-3:]:
+                                        opener_score = 1.5
+                                    else:
+                                        opener_score = 0.5  # Penalize recently used
+
+                                # Combined score (weighted average)
+                                combined_score = (
+                                    length_score * 0.4 +
+                                    phrase_score * 0.3 +
+                                    opener_score * 0.3
+                                )
+                                scored_templates.append((combined_score, template, phrase))
+
+                            # Sort by combined score (higher is better)
                             scored_templates.sort(key=lambda x: -x[0])
 
                             # Take top candidates, then select by paragraph index for variety
-                            top_scored = [t for _, t in scored_templates[:min(5, len(scored_templates))]]
-                            selected = top_scored[paragraph_index % len(top_scored)] if top_scored else None
+                            top_scored = [(t, p) for _, t, p in scored_templates[:min(5, len(scored_templates))]]
+                            if top_scored:
+                                selected, selected_phrase = top_scored[paragraph_index % len(top_scored)]
+                            else:
+                                selected = None
                         else:
                             selected = templates[0] if templates else None
 

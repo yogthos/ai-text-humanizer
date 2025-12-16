@@ -27,6 +27,7 @@ from verifier import Verifier, VerificationResult, TransformationHint
 from structural_analyzer import StructuralAnalyzer, StructuralPattern
 from cadence_analyzer import CadenceAnalyzer, CadenceProfile
 from semantic_regrouper import SemanticRegrouper, SemanticChunk
+from phrase_distribution_analyzer import PhraseDistributionAnalyzer
 
 
 @dataclass
@@ -134,6 +135,19 @@ class StyleTransferPipeline:
                 print(f"  - Analyzed {self.cadence_profile.paragraph_count} paragraphs")
                 print(f"  - Avg length: {self.cadence_profile.avg_paragraph_length:.0f} words")
 
+        # Initialize phrase distribution analyzer (if enabled)
+        self.phrase_analyzer = None
+        phrase_config = self._get_phrase_config()
+        if phrase_config.get("enabled", True):
+            print("Analyzing phrase distribution...")
+            sample_text = self.synthesizer.sample_text
+            if sample_text:
+                phrase_length = phrase_config.get("phrase_length", 3)
+                self.phrase_analyzer = PhraseDistributionAnalyzer(sample_text, phrase_length=phrase_length)
+                dist = self.phrase_analyzer.get_distribution()
+                print(f"  - Analyzed {dist.total_paragraphs} paragraphs")
+                print(f"  - Found {len(dist.phrase_frequencies)} unique opener phrases")
+
         print(f"Pipeline ready (provider: {self.synthesizer.llm.provider}, max_retries: {self.max_retries})")
 
     def _load_pipeline_config(self, max_retries_override: Optional[int] = None):
@@ -182,6 +196,23 @@ class StyleTransferPipeline:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     return config.get("cadence_matching", {})
+            except (json.JSONDecodeError, IOError):
+                pass
+
+        return {}  # Return empty dict with defaults
+
+    def _get_phrase_config(self) -> Dict[str, Any]:
+        """Get phrase distribution configuration from config file."""
+        if self.config_path is None:
+            config_path = Path(__file__).parent / "config.json"
+        else:
+            config_path = Path(self.config_path)
+
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    return config.get("phrase_distribution", {})
             except (json.JSONDecodeError, IOError):
                 pass
 
@@ -320,6 +351,10 @@ class StyleTransferPipeline:
         used_openers = []
         used_phrases = []
 
+        # Track phrase usage counts for distribution matching
+        output_phrase_counts: Dict[str, int] = {}
+        output_total_paragraphs = 0
+
         for i, item in enumerate(items_to_process):
             if verbose:
                 print(f"\n--- {item_type.capitalize().rstrip('s')} {i + 1}/{len(items_to_process)} ---")
@@ -345,6 +380,8 @@ class StyleTransferPipeline:
                     position_in_document=position,
                     used_openers=used_openers,
                     used_phrases=used_phrases,
+                    output_phrase_counts=output_phrase_counts,
+                    output_total_paragraphs=output_total_paragraphs,
                     verbose=verbose
                 )
             else:
@@ -358,6 +395,8 @@ class StyleTransferPipeline:
                     position_in_document=position,
                     used_openers=used_openers,  # Pass for variety
                     used_phrases=used_phrases,  # Pass for exact repetition avoidance
+                    output_phrase_counts=output_phrase_counts,
+                    output_total_paragraphs=output_total_paragraphs,
                     verbose=verbose
                 )
 
@@ -369,6 +408,10 @@ class StyleTransferPipeline:
                     used_openers.append(result.opener_type_used)
                 if result.opener_phrase_used:
                     used_phrases.append(result.opener_phrase_used)
+                    # Update phrase counts for distribution matching
+                    phrase_key = result.opener_phrase_used.lower().strip()
+                    output_phrase_counts[phrase_key] = output_phrase_counts.get(phrase_key, 0) + 1
+                    output_total_paragraphs += 1
                 if verbose and (result.opener_type_used or result.opener_phrase_used):
                     avoiding_types = used_openers[-3:] if len(used_openers) > 1 else []
                     avoiding_phrases = used_phrases[-5:] if len(used_phrases) > 1 else []
@@ -443,6 +486,8 @@ class StyleTransferPipeline:
                                           position_in_document: Optional[Tuple[int, int]] = None,
                                           used_openers: Optional[List[str]] = None,
                                           used_phrases: Optional[List[str]] = None,
+                                          output_phrase_counts: Optional[Dict[str, int]] = None,
+                                          output_total_paragraphs: int = 0,
                                           verbose: bool = False) -> PipelineResult:
         """
         Transform a single paragraph with full document context and iterative refinement.
@@ -517,7 +562,10 @@ class StyleTransferPipeline:
                 semantic_weight=len(para_semantics.claims) // 2,
                 used_openers=used_openers,
                 used_phrases=used_phrases,
-                paragraph_index=para_idx
+                paragraph_index=para_idx,
+                phrase_analyzer=self.phrase_analyzer,
+                output_phrase_counts=output_phrase_counts or {},
+                output_total_paragraphs=output_total_paragraphs
             )
 
             if template:
@@ -643,6 +691,8 @@ class StyleTransferPipeline:
                                      position_in_document: Optional[Tuple[int, int]] = None,
                                      used_openers: Optional[List[str]] = None,
                                      used_phrases: Optional[List[str]] = None,
+                                     output_phrase_counts: Optional[Dict[str, int]] = None,
+                                     output_total_paragraphs: int = 0,
                                      verbose: bool = False) -> PipelineResult:
         """
         Transform a semantic chunk with full document context and iterative refinement.
@@ -721,6 +771,9 @@ class StyleTransferPipeline:
                 semantic_weight=len(chunk_semantics.claims),
                 used_openers=used_openers,
                 used_phrases=used_phrases,
+                phrase_analyzer=self.phrase_analyzer,
+                output_phrase_counts=output_phrase_counts or {},
+                output_total_paragraphs=output_total_paragraphs
             )
 
             # Synthesize from semantic chunk
