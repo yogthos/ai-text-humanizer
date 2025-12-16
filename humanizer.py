@@ -173,6 +173,7 @@ class StyleTransferPipeline:
         self.max_retries = 10
         self.convergence_threshold = 0.02  # Stop if improvement < 2%
         self.min_iterations = 2  # Always do at least 2 iterations
+        self.max_iterations_per_paragraph = 5  # Max iterations per paragraph/chunk
 
         # Try to load from config
         if self.config_path is None:
@@ -193,6 +194,8 @@ class StyleTransferPipeline:
                     self.convergence_threshold = pipeline_config['convergence_threshold']
                 if 'min_iterations' in pipeline_config:
                     self.min_iterations = pipeline_config['min_iterations']
+                if 'max_iterations_per_paragraph' in pipeline_config:
+                    self.max_iterations_per_paragraph = pipeline_config['max_iterations_per_paragraph']
 
             except (json.JSONDecodeError, IOError):
                 pass  # Use defaults if config can't be read
@@ -605,7 +608,7 @@ class StyleTransferPipeline:
         self._current_position = position_in_document
 
         # Use fewer iterations per paragraph (we'll iterate on the whole document too)
-        max_para_iterations = min(5, self.max_retries)
+        max_para_iterations = min(self.max_iterations_per_paragraph, self.max_retries)
 
         # If we have document-level hints (e.g., overused words), add them
         if doc_level_hints:
@@ -892,7 +895,7 @@ class StyleTransferPipeline:
         self._current_position = position_in_document
 
         # Use fewer iterations per chunk
-        max_chunk_iterations = min(5, self.max_retries)
+        max_chunk_iterations = min(self.max_iterations_per_paragraph, self.max_retries)
 
         # If we have document-level hints, add them
         if doc_level_hints:

@@ -1070,6 +1070,85 @@ class TemplateGenerator:
             medium_threshold=self.medium_threshold
         )
 
+    def _scale_template_to_input_length(self, template: ParagraphTemplate, input_text: str) -> ParagraphTemplate:
+        """
+        Scale template to match input paragraph length.
+
+        If input is longer than template, expand template proportionally.
+        This ensures output matches input length.
+        """
+        input_word_count = len(input_text.split())
+        input_sentence_count = len(list(self.nlp(input_text).sents))
+
+        # If input is significantly longer, scale up the template
+        if input_word_count > template.total_word_count * 1.2:
+            scale_factor = input_word_count / max(template.total_word_count, 1)
+
+            # Scale sentence word counts proportionally
+            scaled_sentences = []
+            for sent in template.sentences:
+                scaled_word_count = int(sent.word_count * scale_factor)
+                # Recalculate length category
+                if scaled_word_count <= self.short_threshold:
+                    length_category = 'short'
+                elif scaled_word_count <= self.medium_threshold:
+                    length_category = 'medium'
+                else:
+                    length_category = 'long'
+
+                scaled_sent = SentenceTemplate(
+                    word_count=scaled_word_count,
+                    pos_sequence=sent.pos_sequence,
+                    punctuation=sent.punctuation,
+                    opener_type=sent.opener_type,
+                    has_subordinate_clause=sent.has_subordinate_clause,
+                    clause_count=sent.clause_count,
+                    length_category=length_category
+                )
+                scaled_sentences.append(scaled_sent)
+
+            # If input has more sentences, add more sentences to template
+            if input_sentence_count > template.sentence_count:
+                # Add sentences based on the last sentence pattern
+                last_sent = template.sentences[-1] if template.sentences else scaled_sentences[-1]
+                for _ in range(input_sentence_count - template.sentence_count):
+                    # Use continuation pattern (pronoun or det_noun opener)
+                    continuation_sent = SentenceTemplate(
+                        word_count=int(last_sent.word_count * 0.8),  # Slightly shorter
+                        pos_sequence=last_sent.pos_sequence[:10] if len(last_sent.pos_sequence) > 10 else last_sent.pos_sequence,
+                        punctuation=last_sent.punctuation,
+                        opener_type='pronoun' if len(scaled_sentences) % 2 == 0 else 'det_noun',
+                        has_subordinate_clause=False,
+                        clause_count=1,
+                        length_category='medium'
+                    )
+                    scaled_sentences.append(continuation_sent)
+
+            # Recalculate length distribution
+            length_counts = {'short': 0, 'medium': 0, 'long': 0}
+            for sent in scaled_sentences:
+                length_counts[sent.length_category] += 1
+
+            total_sents = len(scaled_sentences)
+            length_distribution = {
+                'short': length_counts['short'] / total_sents,
+                'medium': length_counts['medium'] / total_sents,
+                'long': length_counts['long'] / total_sents
+            }
+
+            return ParagraphTemplate(
+                sentence_count=len(scaled_sentences),
+                sentences=scaled_sentences,
+                total_word_count=sum(s.word_count for s in scaled_sentences),
+                structural_role=template.structural_role,
+                position_ratio=template.position_ratio,
+                length_distribution=length_distribution,
+                short_threshold=template.short_threshold,
+                medium_threshold=template.medium_threshold
+            )
+
+        return template
+
     def generate_template_from_context(self,
                                        input_text: str,
                                        preceding_output: Optional[str] = None,
@@ -1385,6 +1464,9 @@ class TemplateGenerator:
                                 selected = self._split_long_sentence_template(selected)
 
                         if selected:
+                            # Scale template to match input length (CRITICAL for content preservation)
+                            selected = self._scale_template_to_input_length(selected, input_text)
+
                             # Adjust for semantic weight if needed
                             if semantic_weight > 0:
                                 adjusted_sentences = []
@@ -1438,7 +1520,9 @@ class TemplateGenerator:
                 print(f"  [TemplateGen] Context-based selection failed: {e}, using position-based")
 
         # Fallback to position-based selection
-        return self.generate_template(role, position_ratio, semantic_weight, used_openers, paragraph_index)
+        template = self.generate_template(role, position_ratio, semantic_weight, used_openers, paragraph_index)
+        # Scale to match input length
+        return self._scale_template_to_input_length(template, input_text)
 
     def _split_long_sentence_template(self, template: ParagraphTemplate) -> ParagraphTemplate:
         """

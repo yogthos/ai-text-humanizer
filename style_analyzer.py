@@ -149,9 +149,18 @@ class StyleProfile:
         guide.append("")
         guide.append("## Sentence Structure")
         guide.append(f"- Average sentence length: {self.sentences.avg_length:.1f} words")
+        guide.append(f"**CRITICAL: Match this average sentence length in your output.**")
 
         dist = self.sentences.length_distribution
         guide.append(f"- Length mix: {dist.get('short', 0)*100:.0f}% short (5-10 words), {dist.get('medium', 0)*100:.0f}% medium (11-25 words), {dist.get('long', 0)*100:.0f}% long (26+ words)")
+
+        # Emphasize long, complex sentences if they're common in the style
+        long_pct = dist.get('long', 0)
+        if long_pct > 0.3:  # If >30% are long sentences
+            guide.append(f"**IMPORTANT: This style uses many long, complex sentences ({long_pct*100:.0f}%). Your output must include similarly long, detailed sentences with multiple clauses.**")
+
+        if self.sentences.avg_length > 20:
+            guide.append(f"**IMPORTANT: This style favors longer sentences (avg {self.sentences.avg_length:.1f} words). Use complex sentence structures with subordinate clauses, not short choppy sentences.**")
 
         if self.sentences.opener_distribution:
             openers = sorted(self.sentences.opener_distribution.items(), key=lambda x: -x[1])
@@ -168,6 +177,10 @@ class StyleProfile:
         guide.append(f"- Assertiveness: {'high' if self.tone.assertiveness > 0.7 else 'moderate' if self.tone.assertiveness > 0.4 else 'hedged'}")
         guide.append(f"- Passive voice: {self.tone.passive_voice_ratio*100:.0f}% of sentences")
         guide.append(f"- Average paragraph: {self.tone.paragraph_length_avg:.0f} sentences")
+
+        # Emphasize paragraph length if style uses long paragraphs
+        if self.tone.paragraph_length_avg > 5:
+            guide.append(f"**IMPORTANT: This style uses long paragraphs (avg {self.tone.paragraph_length_avg:.0f} sentences). Your output paragraphs must be similarly long and detailed, not short.**")
 
         # Add distinctive patterns section (NEW)
         if self.distinctive_patterns:

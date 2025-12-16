@@ -370,10 +370,11 @@ class Synthesizer:
         temperature = max(0.3, 0.7 - (iteration * 0.1))
 
         # Calculate max_tokens based on input length
-        # Style transfer typically produces similar or slightly longer text
+        # Style transfer should produce similar or slightly longer text
         input_token_estimate = len(input_text) // 4  # ~4 chars per token
-        # Allow 50% buffer for style transfer expansion
-        max_tokens = min(8192, max(4096, int(input_token_estimate * 1.5)))
+        # Allow 100% buffer to ensure we can generate full-length output (input length + style expansion)
+        # For long paragraphs, ensure we have enough tokens
+        max_tokens = min(16384, max(4096, int(input_token_estimate * 2.0)))
 
         # Generate using LLM
         output_text = self.llm.generate(
@@ -727,12 +728,24 @@ Return ONLY the rewritten text. No commentary, no explanations, no added citatio
             parts.append("\n\n## ORIGINAL TEXT TO REWRITE")
         parts.append(input_text)
 
+        # Add explicit length requirement
+        input_word_count = len(input_text.split())
+        # Use semantic extractor's nlp for sentence counting
+        doc = self.semantic_extractor.nlp(input_text)
+        input_sentence_count = len(list(doc.sents))
+        parts.append("\n\n## LENGTH REQUIREMENT (CRITICAL)")
+        parts.append(f"**Your output MUST be approximately the same length as the input:**")
+        parts.append(f"- Input: ~{input_word_count} words, ~{input_sentence_count} sentences")
+        parts.append(f"- Output target: ~{input_word_count} words (±10%), ~{input_sentence_count} sentences (±1)")
+        parts.append(f"**DO NOT shorten or condense the content. Express all claims with full detail.**")
+        parts.append(f"If the input is long and detailed, your output must also be long and detailed.")
+
         # Final instruction
         parts.append("\n\n## YOUR OUTPUT")
         if preceding_output:
-            parts.append("Rewrite ONLY the paragraph above in the target style. Use the syntactic constructions and phrases provided. Maintain consistency with the already-transformed paragraphs. Express all the same meaning using the vocabulary, sentence patterns, and tone established. Output only the rewritten paragraph, nothing else.")
+            parts.append(f"Rewrite ONLY the paragraph above in the target style. Use the syntactic constructions and phrases provided. Maintain consistency with the already-transformed paragraphs. Express all the same meaning using the vocabulary, sentence patterns, and tone established. **Your output must be approximately {input_word_count} words** to match the input length. Output only the rewritten paragraph, nothing else.")
         else:
-            parts.append("Rewrite the original text in the target style. ACTIVELY USE the syntactic constructions and characteristic phrases provided. Express all the same meaning using the vocabulary, sentence patterns, and tone of the style examples. Output only the rewritten text.")
+            parts.append(f"Rewrite the original text in the target style. ACTIVELY USE the syntactic constructions and characteristic phrases provided. Express all the same meaning using the vocabulary, sentence patterns, and tone of the style examples. **Your output must be approximately {input_word_count} words** to match the input length. Output only the rewritten text.")
 
         return '\n'.join(parts)
 

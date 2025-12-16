@@ -429,7 +429,7 @@ class SemanticRegrouper:
         """
         Validate that all semantic content is included.
 
-        Raises warning if content is missing.
+        Ensures all claims are included, adding missing ones to appropriate chunks.
         """
         # Collect all claims from chunks (use text as identifier since Claim isn't hashable)
         chunk_claim_texts = set()
@@ -442,7 +442,38 @@ class SemanticRegrouper:
         missing = original_claim_texts - chunk_claim_texts
 
         if missing:
-            print(f"  [SemanticRegrouper] Warning: {len(missing)} claims not included in regrouping")
+            print(f"  [SemanticRegrouper] Warning: {len(missing)} claims not included in regrouping, adding them now")
+            # Add missing claims to the last chunk (or create a new one if needed)
+            missing_claims = [c for c in self.semantic_content.claims if c.text in missing]
+            if chunks:
+                # Add to last chunk
+                chunks[-1].claims.extend(missing_claims)
+                # Update target length to accommodate additional claims
+                chunks[-1].target_length += len(missing_claims) * 20  # Estimate 20 words per claim
+                chunks[-1].target_sentence_count = max(chunks[-1].target_sentence_count, len(chunks[-1].claims))
+            else:
+                # Create a new chunk for missing claims
+                if missing_claims:
+                    # Find related relationships and entities for missing claims
+                    missing_claim_texts = {c.text for c in missing_claims}
+                    related_relationships = [
+                        r for r in self.semantic_content.relationships
+                        if r.source in missing_claim_texts or r.target in missing_claim_texts
+                    ]
+                    related_entities = [
+                        e for e in self.semantic_content.entities
+                        if any(e.text in claim.text for claim in missing_claims)
+                    ]
+                    new_chunk = SemanticChunk(
+                        claims=missing_claims,
+                        relationships=related_relationships,
+                        entities=related_entities,
+                        target_length=len(missing_claims) * 20,
+                        target_sentence_count=max(1, len(missing_claims)),
+                        position=1.0,
+                        role='body'
+                    )
+                    chunks.append(new_chunk)
 
         # Check relationships (use evidence text as identifier)
         chunk_rel_evidence = set()
