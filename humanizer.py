@@ -73,20 +73,18 @@ class StyleTransferPipeline:
     - Convergence detection to stop when improvements plateau
     """
 
-    def __init__(self, config_path: str = None, max_retries: int = 10):
+    def __init__(self, config_path: str = None, max_retries: int = None):
         """
         Initialize the pipeline.
 
         Args:
             config_path: Path to config.json for LLM provider settings
-            max_retries: Maximum synthesis attempts (default 10 for genetic approach)
+            max_retries: Maximum synthesis attempts (overrides config if provided)
         """
         self.config_path = config_path
-        self.max_retries = max_retries
 
-        # Convergence settings
-        self.convergence_threshold = 0.02  # Stop if improvement < 2%
-        self.min_iterations = 2  # Always do at least 2 iterations
+        # Load pipeline settings from config
+        self._load_pipeline_config(max_retries)
 
         # Initialize components
         print("Initializing pipeline components...")
@@ -107,7 +105,41 @@ class StyleTransferPipeline:
         print("Loading structural patterns...")
         self._role_patterns = self.synthesizer.get_role_patterns()
 
-        print(f"Pipeline ready (provider: {self.synthesizer.llm.provider}, max_retries: {max_retries})")
+        print(f"Pipeline ready (provider: {self.synthesizer.llm.provider}, max_retries: {self.max_retries})")
+
+    def _load_pipeline_config(self, max_retries_override: Optional[int] = None):
+        """Load pipeline configuration from config.json."""
+        # Default values
+        self.max_retries = 10
+        self.convergence_threshold = 0.02  # Stop if improvement < 2%
+        self.min_iterations = 2  # Always do at least 2 iterations
+
+        # Try to load from config
+        if self.config_path is None:
+            config_path = Path(__file__).parent / "config.json"
+        else:
+            config_path = Path(self.config_path)
+
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+
+                pipeline_config = config.get('pipeline', {})
+
+                if 'max_retries' in pipeline_config:
+                    self.max_retries = pipeline_config['max_retries']
+                if 'convergence_threshold' in pipeline_config:
+                    self.convergence_threshold = pipeline_config['convergence_threshold']
+                if 'min_iterations' in pipeline_config:
+                    self.min_iterations = pipeline_config['min_iterations']
+
+            except (json.JSONDecodeError, IOError):
+                pass  # Use defaults if config can't be read
+
+        # Override with provided value (CLI takes precedence)
+        if max_retries_override is not None:
+            self.max_retries = max_retries_override
 
     def transform(self, input_text: str,
                   verbose: bool = False,
@@ -557,7 +589,7 @@ Examples:
     parser.add_argument('input_file', help='Input file to transform')
     parser.add_argument('-o', '--output', help='Output file path (default: output/<input_name>)')
     parser.add_argument('-c', '--config', help='Config file path (default: config.json)')
-    parser.add_argument('-r', '--retries', type=int, default=3, help='Max retry attempts (default: 3)')
+    parser.add_argument('-r', '--retries', type=int, default=None, help='Max retry attempts (overrides config.json, default: from config or 10)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument('--chunked', action='store_true', help='Process paragraph by paragraph')
     parser.add_argument('--analyze-only', action='store_true', help='Only analyze input, no transformation')

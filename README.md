@@ -1,320 +1,291 @@
-# AI Text Depattern
+# AI Text Depattern - Style Transfer Pipeline
 
-An agentic text humanization tool that rewrites AI-generated text to sound more natural and human-like using **Algorithmic Sentence Manipulation** combined with minimal AI assistance. The system learns writing patterns from a human sample and applies them primarily through algorithmic transformations, avoiding the introduction of AI-generated patterns.
+A Python tool that rewrites AI-generated text to match a target writing style while preserving all original meaning. Uses Few-Shot Style Transfer with iterative refinement to eliminate AI fingerprints and adopt distinctive stylistic patterns.
 
-## Approach
+## Overview
 
-AI Text Depattern uses a **Markov-based structural transfer** approach. The core insight: **GPTZero detects AI by sentence STRUCTURE, not vocabulary**. Human text (the sample) passes ZeroGPT because of its punctuation rhythms and sentence patterns, not simpler words.
+This tool implements a 4-stage pipeline that:
+1. **Extracts semantic content** (facts, claims, relationships) from input text
+2. **Analyzes target style** from a sample text (vocabulary, sentence patterns, structural roles)
+3. **Synthesizes new text** using LLM to express the extracted meaning in the target style
+4. **Verifies and refines** iteratively using transformation hints until quality thresholds are met
 
-### Core Strategy: Transfer Structure, Preserve Words
-
-1. **Learn from Sample Text** (`prompts/sample.txt`)
-   - Build comprehensive Markov model of sentence patterns
-   - Extract punctuation positions (where commas, semicolons appear)
-   - Learn sentence length distributions and clause structures
-   - The sample text passes ZeroGPT - we learn WHY it passes
-
-2. **Apply Structure to Input** (100% Word Preservation)
-   - Apply structural templates WITHOUT changing ANY words
-   - Insert/move punctuation to match sample's patterns
-   - Merge short sentences with semicolons
-   - Reorder clauses to match sample's rhythm
-   - **ALL technical terms and vocabulary preserved**
-
-3. **Algorithmic Manipulation** (No AI Involved)
-   - Creates burstiness (sentence length variation)
-   - Varies sentence starters by moving phrases
-   - **Avoids AI-flagged patterns**: No "In fact,", "Indeed,", etc.
-   - Pure algorithmic transformations - no LLM generation
-
-4. **Minimal AI Fallback** (Only If Needed)
-   - Only used if algorithmic manipulation doesn't meet thresholds
-   - Highly constrained prompts for specific fixes
-   - Still preserves 95%+ of original words
-
-## Algorithm Overview
-
-```mermaid
-flowchart TD
-    A[Input Text] --> B[Genre Detection]
-    B --> C{Narrative?}
-    C -->|Yes| D[Minimal Intervention Mode]
-    C -->|No| E[Standard Mode]
-
-    D --> F[Phase 1: Algorithmic Manipulation]
-    E --> F
-
-    F --> G[Merge Short Sentences]
-    G --> H[Create Burstiness]
-    H --> I[Vary Sentence Starters]
-    I --> J[Add Parenthetical Asides]
-    J --> K[Calculate Metrics]
-
-    K --> L{Pass GPTZero<br/>Thresholds?}
-    L -->|Yes| M[Use Algorithmic Result]
-    L -->|No| N[Phase 2: Minimal AI Fix]
-
-    N --> O[Constrained AI Prompt]
-    O --> P[Fix Specific Issues Only]
-    P --> Q[Word Preservation Check]
-    Q --> R{95%+ Words<br/>Preserved?}
-    R -->|No| S[Use Algorithmic Result]
-    R -->|Yes| T[Use AI-Fixed Result]
-
-    M --> U[Final Validation]
-    S --> U
-    T --> U
-
-    U --> V[Vocabulary Repetition Check]
-    V --> W[Perplexity Validation]
-    W --> X[Entity Verification]
-    X --> Y[Output]
-```
+The system uses a genetic algorithm approach with convergence detection, automatically refining output until it matches the target style while preserving semantic content.
 
 ## Architecture
 
-### Training Phase
+### High-Level Pipeline
 
-The system learns style patterns from a human writing sample (`prompts/sample.txt`):
+```mermaid
+flowchart TB
+    Input[Input Text] --> SE[Stage 1: Semantic Extraction]
+    Sample[Sample Text] --> SA[Stage 2: Style Analysis]
+
+    SE --> |Semantic Content| SYN[Stage 3: Synthesis]
+    SA --> |Style Profile| SYN
+    SA --> |Role Patterns| SYN
+
+    SYN --> |Generated Text| VER[Stage 4: Verification]
+    SE --> |Original Semantics| VER
+
+    VER --> |Pass?| Pass{All Checks Pass?}
+    Pass -->|Yes| Output[Final Output]
+    Pass -->|No| Hints[Generate Transformation Hints]
+    Hints --> |Refinement Hints| SYN
+
+    style SE fill:#e1f5ff
+    style SA fill:#fff4e1
+    style SYN fill:#e8f5e9
+    style VER fill:#fce4ec
+```
+
+### Detailed Stage Flow
 
 ```mermaid
 flowchart LR
-    A[Sample Text] --> B[Vocabulary Extraction]
-    A --> C[Paragraph Analysis]
-    A --> D[Structural Pattern Extraction]
+    subgraph Stage1[Stage 1: Semantic Extraction]
+        Input[Input Text] --> NLP[spaCy NLP]
+        NLP --> Entities[Extract Entities]
+        NLP --> Claims[Extract Claims]
+        NLP --> Relations[Extract Relationships]
+        NLP --> Preserved[Preserved Elements]
+        Entities --> SC[SemanticContent]
+        Claims --> SC
+        Relations --> SC
+        Preserved --> SC
+    end
 
-    B --> E[Store Vocabulary by POS]
-    C --> F[Markov Chain Training]
-    C --> G[Embedding Generation]
-    D --> H[Store Structural Patterns]
+    subgraph Stage2[Stage 2: Style Analysis]
+        Sample[Sample Text] --> Cache{Patterns Cached?}
+        Cache -->|Yes| Load[Load from SQLite]
+        Cache -->|No| Extract[Extract Patterns]
+        Extract --> Save[Save to SQLite]
+        Load --> SP[StyleProfile]
+        Extract --> SP
+        SP --> Vocab[Vocabulary Profile]
+        SP --> Sent[Sentence Patterns]
+        SP --> Patterns[Distinctive Patterns]
+        SP --> Roles[Structural Roles]
+    end
 
-    E --> I[(SQLite Database)]
-    F --> I
-    G --> I
-    H --> I
+    subgraph Stage3[Stage 3: Synthesis]
+        SC --> Prompt[Build Prompts]
+        SP --> Prompt
+        Roles --> Prompt
+        Hints[Transformation Hints] --> Prompt
+        Prompt --> LLM[LLM Provider]
+        LLM --> Clean[Post-Process & Clean]
+        Clean --> Output[Generated Text]
+    end
 
-    I --> J[Burstiness Distribution]
-    I --> K[Punctuation Patterns]
-    I --> L[Paragraph Templates]
-    I --> M[Sample Embeddings]
+    subgraph Stage4[Stage 4: Verification]
+        Output --> SemCheck[Semantic Check]
+        Output --> StyleCheck[Style Check]
+        Output --> StructCheck[Structural Check]
+        SC --> SemCheck
+        SP --> StyleCheck
+        Roles --> StructCheck
+        SemCheck --> Result[VerificationResult]
+        StyleCheck --> Result
+        StructCheck --> Result
+        Result --> Hints
+    end
+
+    Stage1 --> Stage3
+    Stage2 --> Stage3
+    Stage3 --> Stage4
+    Stage4 -->|Iterate| Stage3
 ```
 
-**Training Steps:**
-1. **Vocabulary Extraction**: Identifies non-technical words by POS (verbs, nouns, adjectives, adverbs) with frequency counts
-2. **Paragraph Analysis**: Analyzes each paragraph for sentence structure, length, complexity, voice (active/passive)
-3. **Markov Chain Training**: Learns paragraph-to-paragraph transitions and stores templates
-4. **Embedding Generation**: Creates semantic embeddings for each sample paragraph (using sentence-transformers, optional)
-5. **Pattern Learning**: Extracts burstiness distribution, punctuation frequencies, and structural patterns
+### Iterative Refinement Loop
 
-### Generation Phase
+```mermaid
+sequenceDiagram
+    participant Pipeline
+    participant Synthesizer
+    participant Verifier
+    participant LLM
 
-For each input paragraph, the system:
+    Pipeline->>Synthesizer: Synthesize (iteration 1)
+    Synthesizer->>LLM: Generate with style guide
+    LLM-->>Synthesizer: Output text
+    Synthesizer-->>Pipeline: SynthesisResult
+
+    Pipeline->>Verifier: Verify output
+    Verifier->>Verifier: Check semantics
+    Verifier->>Verifier: Check style patterns
+    Verifier->>Verifier: Check structural roles
+    Verifier->>Verifier: Detect AI fingerprints
+    Verifier-->>Pipeline: VerificationResult + Hints
+
+    alt Verification Failed
+        Pipeline->>Pipeline: Calculate improvement score
+        Pipeline->>Pipeline: Check convergence
+
+        alt Not Converged
+            Pipeline->>Synthesizer: Synthesize (iteration 2) with hints
+            Synthesizer->>LLM: Generate with hints + style guide
+            LLM-->>Synthesizer: Refined output
+            Synthesizer-->>Pipeline: SynthesisResult
+            Note over Pipeline: Loop continues...
+        else Converged
+            Pipeline->>Pipeline: Return best result
+        end
+    else Verification Passed
+        Pipeline->>Pipeline: Return successful result
+    end
+```
+
+### Structural Role Analysis
 
 ```mermaid
 flowchart TD
-    A[Input Paragraph] --> B[Algorithmic Manipulation]
-    B --> C[Merge Sentences]
-    C --> D[Vary Starters]
-    D --> E[Create Burstiness]
-    E --> F[Calculate Metrics]
+    Sample[Sample Text] --> Parse[Parse Document Structure]
+    Parse --> Sections[Detect Sections]
+    Parse --> Paragraphs[Detect Paragraphs]
+    Parse --> Sentences[Detect Sentences]
 
-    F --> G{Pass Thresholds?}
-    G -->|Yes| H[Use Result]
-    G -->|No| I[Minimal AI Fix]
+    Sections --> Roles[Assign Structural Roles]
+    Paragraphs --> Roles
+    Sentences --> Roles
 
-    I --> J[Constrained Prompt]
-    J --> K[Fix Specific Issues]
-    K --> L[Word Preservation Check]
-    L --> M{95%+ Preserved?}
-    M -->|Yes| H
-    M -->|No| N[Use Algorithmic Result]
+    Roles --> SO[Section Opener]
+    Roles --> PO[Paragraph Opener]
+    Roles --> Body[Body Sentence]
+    Roles --> PC[Paragraph Closer]
 
-    H --> O[Vocabulary Repetition Check]
-    N --> O
-    O --> P{No Injected Words?}
-    P -->|No| Q[Use Original]
-    P -->|Yes| R[Perplexity Check]
+    SO --> Patterns[Extract Patterns by Role]
+    PO --> Patterns
+    Body --> Patterns
+    PC --> Patterns
 
-    R --> S{Not Too Predictable?}
-    S -->|Yes| T[Output]
-    S -->|No| Q
-    Q --> T
+    Patterns --> Cache[(SQLite Cache)]
+    Cache --> Map[Map Input to Roles]
+    Map --> Synthesis[Role-Aware Synthesis]
+
+    style SO fill:#ffebee
+    style PO fill:#e3f2fd
+    style Body fill:#f1f8e9
+    style PC fill:#fff3e0
 ```
 
-**Key Components:**
+## Installation
 
-1. **AlgorithmicSentenceManipulator**
-   - `merge_short_sentences()`: Combines consecutive short sentences (<12 words) using semicolons and conjunctions
-   - `vary_sentence_starters()`: Moves prepositional phrases to front, adds transition words
-   - `create_burstiness()`: Ensures mix of short, medium, and long sentences
-   - `add_parenthetical_asides()`: Adds natural human-like asides (e.g., ", of course,", ", naturally,")
-   - **No AI involved** - pure algorithmic transformations
+### Prerequisites
 
-2. **Minimal AI Assistance** (Fallback Only)
-   - Only triggered if algorithmic manipulation doesn't meet thresholds
-   - Highly constrained prompts that fix specific issues
-   - Emphasizes word preservation (95%+ threshold)
-   - No vocabulary injection or paraphrasing
+- Python 3.8 or higher
+- pip (Python package manager)
 
-3. **Validation Layers**
-   - **Vocabulary Repetition**: Detects and rejects injected vocabulary from sample text
-   - **Perplexity Validation**: Ensures output isn't too predictable (AI-like)
-   - **Entity Verification**: Ensures all named entities, proper nouns, and citations preserved
-   - **Word Preservation**: Validates 95%+ word overlap (prevents paraphrasing)
-   - **GPTZero Optimization**: Ensures sentence-length variance >30, unique-starter ratio >40%
+### Setup
 
-## System Components
-
-```mermaid
-graph TB
-    subgraph "Core Classes"
-        A[AgenticHumanizer]
-        B[AlgorithmicSentenceManipulator]
-        C[StyleTransferAgent]
-        D[TextAnalyzer]
-        E[StyleDatabase]
-    end
-
-    subgraph "Style Analysis"
-        F[VocabularyExtractor]
-        G[EmbeddingSemanticMatcher]
-        H[LearnedBurstinessAnalyzer]
-        I[PunctuationStyleLearner]
-    end
-
-    subgraph "Validation"
-        J[GPTZeroMetricOptimizer]
-        K[EntityTracker]
-        L[VocabularyRepetitionChecker]
-        M[PerplexityValidator]
-    end
-
-    subgraph "Providers"
-        N[GLMProvider]
-        O[DeepSeekProvider]
-        P[Ollama]
-    end
-
-    A --> B
-    A --> C
-    A --> J
-    A --> K
-    A --> L
-    A --> M
-    A --> N
-    A --> O
-    A --> P
-
-    B --> J
-    C --> D
-    C --> E
-    C --> F
-    C --> G
-    C --> H
-    C --> I
-
-    D --> F
-```
-
-## Prerequisites
-
-1. **Python 3.8+** (Python 3.13 recommended for spacy compatibility)
-2. **Model Provider** (choose one):
-   - **Ollama**: Install and run locally with these models:
-```bash
-ollama pull qwen3:32b
-ollama pull deepseek-r1:8b
-ollama serve
-```
-   - **GLM (Z.AI)**: Get API key from [Z.AI](https://z.ai) and configure in `config.json`
-   - **DeepSeek**: Get API key from [DeepSeek](https://platform.deepseek.com) and configure in `config.json`
-
-## Setup
-
-1. **Create and activate virtual environment**:
+1. **Clone the repository** (or navigate to the project directory):
    ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # bash/zsh
-   # or: source venv/bin/activate.fish  # fish
-   # or: venv\Scripts\Activate.ps1  # Windows PowerShell
+   cd ai-text-depattern
    ```
 
-2. **Install dependencies**:
+2. **Create a virtual environment**:
+   ```bash
+   python3 -m venv venv
+   ```
+
+3. **Activate the virtual environment**:
+
+   On macOS/Linux:
+   ```bash
+   source venv/bin/activate
+   ```
+
+   On Windows:
+   ```bash
+   venv\Scripts\activate
+   ```
+
+4. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
-   Note: First run downloads GPT-2 Large (~3GB) for perplexity scoring.
 
-3. **Configure models** (optional):
-   Edit `config.json` to choose provider and models:
-   - Set `"provider"` to `"ollama"`, `"glm"`, or `"deepseek"`
-   - For GLM: Set `glm.api_key` or use `GLM_API_KEY` environment variable
-   - For DeepSeek: Set `deepseek.api_key` or use `DEEPSEEK_API_KEY` environment variable
+5. **Download spaCy language model**:
+   ```bash
+   python -m spacy download en_core_web_sm
+   ```
 
-4. **Configure style sample** (IMPORTANT):
-   Edit `prompts/sample.txt` to match your desired writing style.
+6. **Configure API keys** (if using DeepSeek or GLM):
 
-   **The sample text should match the genre of your input text!**
-   - For narrative text: use narrative writing samples
-   - For academic text: use academic writing samples
-   - For technical text: use technical documentation samples
-
-   The system learns sentence length distribution, opener words, and punctuation patterns from this sample.
+   Edit `config.json` and add your API keys, or set environment variables:
+   ```bash
+   export DEEPSEEK_API_KEY=your-api-key-here
+   export GLM_API_KEY=your-api-key-here
+   ```
 
 ## Usage
 
-### Command Line
+### Basic Usage
 
-Process a markdown file:
+Transform a single file:
 ```bash
-python humanizer.py input/generated.md
+python humanizer.py input/document.md
 ```
 
-Specify output file:
+Output will be written to `output/document.md` by default.
+
+### Command-Line Options
+
 ```bash
-python humanizer.py input/generated.md output/humanized.md
+python humanizer.py [OPTIONS] input_file
 ```
 
-If no output file is specified, it defaults to `output/<input_filename>`.
+**Options:**
+- `-o, --output PATH` - Specify output file path
+- `-c, --config PATH` - Use custom config file (default: `config.json`)
+- `-r, --retries N` - Maximum refinement iterations (overrides config.json, default: from config or 10)
+- `-v, --verbose` - Show detailed progress and metrics
+- `--chunked` - Process document paragraph by paragraph (for long documents)
+- `--analyze-only` - Only analyze input, don't transform
+- `--json` - Output results as JSON
 
-### Python API
+### Examples
 
-```python
-from humanizer import AgenticHumanizer
+**Basic transformation:**
+```bash
+python humanizer.py input/small.md
+```
 
-pipeline = AgenticHumanizer()
-text = "Your AI-generated text here..."
-result = pipeline.humanize(text, max_retries=3)
-print(result)
+**Custom output path with verbose output:**
+```bash
+python humanizer.py input/small.md -o output/transformed.md --verbose
+```
+
+**Long document with paragraph-by-paragraph processing:**
+```bash
+python humanizer.py input/long-document.md --chunked -r 10
+```
+
+**Maximum refinement iterations:**
+```bash
+python humanizer.py input/small.md -r 10 --verbose
 ```
 
 ## Configuration
 
-Edit `config.json` to configure:
+Configuration is managed through `config.json`. The file contains settings for LLM providers and verification thresholds.
 
-- **Provider**: Set `"provider"` to `"ollama"`, `"glm"`, or `"deepseek"`
-- **Ollama Settings**: Configure `ollama.url`, `ollama.editor_model`, `ollama.critic_model`
-- **GLM Settings**: Configure `glm.api_key` (or use `GLM_API_KEY` env var), `glm.editor_model`, `glm.critic_model`
-- **DeepSeek Settings**: Configure `deepseek.api_key` (or use `DEEPSEEK_API_KEY` env var), `deepseek.editor_model`, `deepseek.critic_model`
+### Provider Configuration
 
-### Sample config.json
+Choose your LLM provider by setting the `provider` field:
 
 ```json
 {
-  "provider": "ollama",
-  "ollama": {
-    "url": "http://localhost:11434/api/generate",
-    "editor_model": "qwen3:32b",
-    "critic_model": "deepseek-r1:8b"
-  },
-  "glm": {
-    "api_key": "",
-    "api_url": "https://api.z.ai/api/paas/v4/chat/completions",
-    "editor_model": "glm-4.6",
-    "critic_model": "glm-4.6"
-  },
+  "provider": "deepseek"  // Options: "deepseek", "glm", "ollama"
+}
+```
+
+#### DeepSeek Configuration
+
+```json
+{
   "deepseek": {
-    "api_key": "",
+    "api_key": "your-api-key-here",
     "api_url": "https://api.deepseek.com/v1/chat/completions",
     "editor_model": "deepseek-chat",
     "critic_model": "deepseek-chat"
@@ -322,157 +293,285 @@ Edit `config.json` to configure:
 }
 ```
 
-**Note:** For GLM and DeepSeek, you can also set the API key via environment variable:
-- `export GLM_API_KEY=your-api-key-here`
-- `export DEEPSEEK_API_KEY=your-api-key-here`
+**API Key:** Set `api_key` in config.json or use environment variable:
+```bash
+export DEEPSEEK_API_KEY=your-api-key-here
+```
 
-## How It Works
+#### GLM (Z.AI) Configuration
 
-### Training Process
+```json
+{
+  "glm": {
+    "api_key": "your-api-key-here",
+    "api_url": "https://api.z.ai/api/paas/v4/chat/completions",
+    "editor_model": "glm-4.6",
+    "critic_model": "glm-4.6"
+  }
+}
+```
 
-On first run, the system automatically trains on `prompts/sample.txt`:
+**API Key:** Set `api_key` in config.json or use environment variable:
+```bash
+export GLM_API_KEY=your-api-key-here
+```
 
-1. **Vocabulary Extraction**: Identifies preferred words by POS category
-2. **Burstiness Learning**: Calculates sentence length distribution (short ≤10, medium 11-25, long >25)
-3. **Punctuation Learning**: Measures frequency of semicolons, colons, parentheses per sentence
-4. **Sentence Opener Analysis**: Extracts common sentence-starting words
-5. **Structural Pattern Extraction**: Analyzes headers, citations, quotations, rhetorical devices
-6. **Markov Chain Training**: Learns paragraph structure transitions
-7. **Embedding Storage**: Creates semantic embeddings for template matching (optional)
+#### Ollama (Local) Configuration
 
-The trained model is stored in `style_brain.db` (SQLite database).
+For local models via Ollama:
 
-**Example Learned Patterns** (from academic sample):
-- Burstiness: 12% short, 42% medium, 45% long sentences
-- Semicolons: 0.19 per sentence (add more semicolons to match)
-- Common openers: "without", "because", "thus", "under", "according"
+```json
+{
+  "ollama": {
+    "url": "http://localhost:11434/api/generate",
+    "editor_model": "qwen3:32b",
+    "critic_model": "deepseek-r1:8b"
+  }
+}
+```
 
-**Key Insight**: The algorithmic manipulator uses these learned patterns to transform text. If your sample text passes GPTZero, the transformed output will inherit those patterns and also pass.
+**Setup:**
+1. Install [Ollama](https://ollama.ai/)
+2. Pull required models:
+   ```bash
+   ollama pull qwen3:32b
+   ollama pull deepseek-r1:8b
+   ```
+3. Start Ollama server:
+   ```bash
+   ollama serve
+   ```
 
-### Generation Process
+### Verification Thresholds
 
-For each paragraph:
+Control the balance between style fidelity and semantic preservation:
 
-1. **Genre Detection**: Identifies narrative, academic, or technical text
-2. **Algorithmic Manipulation** (Primary):
-   - Merges short sentences using semicolons and conjunctions
-   - Varies sentence starters by moving phrases
-   - Creates burstiness (sentence length variation)
-   - Adds natural parenthetical asides
-3. **Metric Calculation**: Checks sentence-length variance, unique-starter ratio, sentence type mix
-4. **Minimal AI Fix** (Fallback Only):
-   - Only if algorithmic manipulation doesn't meet thresholds
-   - Highly constrained prompt to fix specific issues
-   - Emphasizes word preservation (95%+)
-5. **Validation Cascade**:
-   - Vocabulary repetition check (prevents injected words)
-   - Perplexity validation (ensures not too predictable)
-   - Entity preservation (hard fail if missing)
-   - Word preservation (95%+ threshold)
-   - GPTZero metrics (variance >30, unique starters >40%)
+```json
+{
+  "verification": {
+    "max_meaning_drift": 0.70,      // Maximum allowed semantic drift (0.0-1.0)
+    "min_claim_coverage": 0.80,    // Minimum percentage of claims preserved
+    "min_style_match": 0.60,        // Minimum style match score
+    "min_structural_match": 0.40    // Minimum structural pattern match
+  }
+}
+```
 
-### Key Features
+#### Threshold Tuning Guide
 
-- **Structural Template Transfer**: Learns punctuation/rhythm patterns from sample text and applies to input
-- **100% Word Preservation**: ALL original words preserved - only structure changes
-- **Markov-Based Style Learning**: Comprehensive Markov model captures sentence patterns from sample
-- **Algorithmic-First Approach**: Most transformations done algorithmically, avoiding AI patterns
-- **Minimal AI Involvement**: AI only used as fallback for specific metric fixes
-- **Genre-Aware Processing**: Detects and adapts to narrative, academic, or technical text
-- **Meaning Preservation**: Technical terms, proper nouns, and facts never altered
-- **GPTZero Evasion**: Directly optimizes metrics used by AI detectors
+| Setting | Lower Value | Higher Value | Use Case |
+|---------|-------------|--------------|----------|
+| `max_meaning_drift` | Stricter semantic preservation (0.40) | More aggressive style transfer (0.80) | Lower for technical docs, higher for creative rewriting |
+| `min_claim_coverage` | More lenient (0.70) | Stricter (0.95) | Higher for factual content, lower for summaries |
+| `min_style_match` | More lenient (0.50) | Stricter (0.75) | Higher for strict style requirements |
+| `min_structural_match` | More lenient (0.30) | Stricter (0.60) | Higher for matching specific structural patterns |
 
-## File Structure
+**Example Configurations:**
+
+**Conservative (preserve meaning):**
+```json
+{
+  "verification": {
+    "max_meaning_drift": 0.40,
+    "min_claim_coverage": 0.90,
+    "min_style_match": 0.50,
+    "min_structural_match": 0.30
+  }
+}
+```
+
+**Aggressive (strong style transfer):**
+```json
+{
+  "verification": {
+    "max_meaning_drift": 0.80,
+    "min_claim_coverage": 0.75,
+    "min_style_match": 0.70,
+    "min_structural_match": 0.50
+  }
+}
+```
+
+### Pipeline Configuration
+
+Control the iterative refinement behavior:
+
+```json
+{
+  "pipeline": {
+    "max_retries": 10,              // Maximum refinement iterations
+    "convergence_threshold": 0.02,  // Stop when improvement < 2%
+    "min_iterations": 2             // Always do at least 2 iterations
+  }
+}
+```
+
+#### Pipeline Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_retries` | 10 | Maximum number of refinement iterations. Higher values allow more refinement but take longer. Recommended: 8-10 for quality, 3-5 for speed. |
+| `convergence_threshold` | 0.02 | Stop iterating when improvement between iterations is less than this percentage (2%). Lower = more iterations, higher = stops sooner. |
+| `min_iterations` | 2 | Always perform at least this many iterations, even if convergence is detected early. |
+
+**Note:** The `-r, --retries` command-line argument overrides `max_retries` from config.json if provided.
+
+**Example Configurations:**
+
+**Fast (fewer iterations):**
+```json
+{
+  "pipeline": {
+    "max_retries": 5,
+    "convergence_threshold": 0.03,
+    "min_iterations": 2
+  }
+}
+```
+
+**Thorough (more iterations):**
+```json
+{
+  "pipeline": {
+    "max_retries": 15,
+    "convergence_threshold": 0.01,
+    "min_iterations": 3
+  }
+}
+```
+
+## Project Structure
 
 ```
 ai-text-depattern/
-├── humanizer.py          # Main orchestrator class
-├── markov.py             # Style transfer agent and analysis
-├── glm.py                # GLM API provider
-├── deepseek.py           # DeepSeek API provider
-├── config.json           # Configuration file
-├── style_brain.db        # Trained model database (auto-generated)
+├── humanizer.py              # Main pipeline orchestrator
+├── semantic_extractor.py     # Stage 1: Extract meaning from input
+├── style_analyzer.py         # Stage 2: Analyze target style
+├── synthesizer.py            # Stage 3: Generate text in target style
+├── verifier.py               # Stage 4: Verify and generate hints
+├── structural_analyzer.py    # Structural role analysis and pattern extraction
+├── config.json               # Configuration file
+├── requirements.txt          # Python dependencies
 ├── prompts/
-│   ├── sample.txt        # Human writing style sample
-│   ├── editor.md         # Structural editor prompt
-│   ├── paragraph_rewrite.md  # Paragraph rewriting template
-│   ├── structural_editor.md  # Structural editor system prompt
-│   └── structural_*.md   # Structural analysis prompts
-└── requirements.txt      # Python dependencies
+│   └── sample.txt            # Target style sample (Stalin's Dialectical Materialism)
+├── input/                    # Input files directory
+├── output/                   # Output files directory
+├── structural_cache.db       # SQLite cache for structural patterns (auto-generated)
+└── README.md                 # This file
 ```
 
-## Technical Details
+## How It Works
 
-### Database Schema
+### Stage 1: Semantic Extraction
 
-The SQLite database (`style_brain.db`) stores:
+Uses spaCy NLP to extract:
+- **Entities**: Named entities, proper nouns, technical terms
+- **Claims**: Factual statements and assertions
+- **Relationships**: Logical connections between concepts
+- **Preserved Elements**: Citations, numbers, quotes, technical terms
 
-- **states**: Paragraph structure templates with signatures
-- **transitions**: Markov chain transitions between paragraph states
-- **vocabulary**: Preferred words by POS category with frequencies
-- **sample_embeddings**: Semantic embeddings for template matching (optional)
-- **learned_patterns**: Burstiness, punctuation, and structural patterns
-- **structural_patterns**: High-level patterns (headers, citations, etc.)
+### Stage 2: Style Analysis
 
-### Validation Thresholds
+Analyzes the sample text (`prompts/sample.txt`) to extract:
+- **Vocabulary Profile**: Word frequency, formality, transition words
+- **Sentence Patterns**: Length distribution, opener types, structure
+- **Distinctive Patterns**:
+  - Phrasal patterns (e.g., "Contrary to...", "Hence,...")
+  - Syntactic constructions (e.g., "The X method therefore holds that...")
+  - Discourse markers and their positions
+- **Structural Roles**: Patterns by position (section opener, paragraph opener, etc.)
 
-- **Word Preservation**: ≥95% word overlap required (increased from 85%)
-- **Entity Preservation**: 100% for named entities and citations
-- **Sentence Length Variance**: >30 for GPTZero evasion
-- **Unique Starter Ratio**: >40% for GPTZero evasion
-- **Vocabulary Repetition**: Flags injected words from sample text
-- **Perplexity**: Must be within 50% of original (prevents too-predictable text)
+Patterns are cached in SQLite for performance.
 
-### Model Configuration
+### Stage 3: Synthesis
 
-- **Temperature**: 0.5-0.6 (stricter adherence to instructions)
-- **Top-p**: 0.85 (nucleus sampling)
-- **Context Window**: 8192 tokens (Ollama), model-dependent for APIs
+LLM generates new text using:
+- Extracted semantic content (what to say)
+- Style profile (how to say it)
+- Structural role guidance (where to use which patterns)
+- Transformation hints from previous iterations (what to fix)
 
-### Algorithmic Transformations
+Post-processing removes AI fingerprints and applies pattern replacements.
 
-The `AlgorithmicSentenceManipulator` performs transformations using **LEARNED PATTERNS** from the sample text:
+### Stage 4: Verification
 
-1. **Sentence Merging** (matches sample's punctuation frequency):
-   - Combines consecutive short sentences (<12 words) using semicolons
-   - Target: Match sample's semicolon frequency (~0.19 per sentence)
-   - **Note**: After semicolons, text is lowercased ("; the road" not "; The road") except for "I"
+Validates output across three dimensions:
 
-2. **Burstiness Creation** (matches sample's length distribution):
-   - Uses LEARNED distribution from sample (e.g., 12% short, 42% medium, 45% long)
-   - Merges medium sentences to create long ones to match target ratio
-   - Creates natural sentence length variation
+1. **Semantic Verification**:
+   - Claim coverage (are all facts preserved?)
+   - Meaning drift (has the meaning changed?)
 
-3. **Starter Variation**:
-   - Moves prepositional phrases to the front ("In the ruins, I...")
-   - Inverts clause order when possible
-   - **Avoids AI-flagged transitions**: Does NOT add "In fact,", "Indeed,", "Moreover,", etc.
-   - Tracks recent starters to avoid repetition
+2. **Style Verification**:
+   - Sentence length match
+   - Pattern coverage (are distinctive patterns used?)
+   - Discourse marker usage
+   - Formality match
+   - AI fingerprint detection
 
-4. **Semicolon Addition** (matches sample's punctuation):
-   - Adds semicolons to match sample's frequency
-   - Replaces periods between short consecutive sentences with semicolons
+3. **Structural Verification**:
+   - Role-appropriate patterns
+   - Position-based pattern usage
 
-5. **Structural Template Transfer** (NEW):
-   - Learns punctuation patterns from sample text (where commas, semicolons appear)
-   - Applies these templates to input sentences WITHOUT changing words
-   - Transfers STYLE (rhythm, punctuation) while preserving MEANING
-   - Key insight: GPTZero detects AI by sentence structure, not vocabulary
+If verification fails, generates specific `TransformationHint` objects that tell the synthesizer exactly what to fix.
 
-6. **Post-Processing Cleanup**:
-   - Removes em-dashes (replaces with commas or semicolons)
-   - **Removes AI transition phrases**: Strips "In fact,", "Indeed,", "Moreover,", etc.
-   - Fixes capitalization after semicolons (lowercase unless "I")
-   - Fixes double punctuation artifacts
+### Iterative Refinement
 
-## Limitations
+The pipeline uses a genetic algorithm approach:
 
-- Requires substantial sample text (recommended: 1000+ words) for effective training
-- Semantic matching requires `sentence-transformers` (optional, falls back to Markov-only if unavailable)
-- Processing time scales with input length (paragraph-by-paragraph processing)
-- First run downloads GPT-2 Large model (~3GB) for perplexity scoring
-- Algorithmic manipulation may not always meet all GPTZero thresholds (AI fallback used in those cases)
+1. Generate initial output
+2. Verify and score
+3. Generate transformation hints
+4. Re-synthesize with hints
+5. Track improvement score
+6. Stop when:
+   - All checks pass, OR
+   - Convergence detected (improvement < 2%), OR
+   - Max iterations reached
+
+## Key Features
+
+- ✅ **Dynamic Pattern Extraction**: Patterns extracted from sample text at runtime (no hardcoding)
+- ✅ **SQLite Caching**: Structural patterns cached for fast subsequent runs
+- ✅ **Context-Aware Synthesis**: Each sentence considers its structural role (section opener, paragraph opener, etc.)
+- ✅ **AI Fingerprint Detection**: Automatically detects and removes AI-typical phrases
+- ✅ **Iterative Refinement**: Genetic algorithm approach with convergence detection
+- ✅ **Configurable Thresholds**: Balance style fidelity vs semantic preservation
+- ✅ **Multiple LLM Providers**: DeepSeek, GLM (Z.AI), or Ollama (local)
+
+## Troubleshooting
+
+### "Module not found" errors
+
+Make sure the virtual environment is activated:
+```bash
+source venv/bin/activate  # macOS/Linux
+venv\Scripts\activate     # Windows
+```
+
+### API key errors
+
+Check that your API key is set in `config.json` or as an environment variable:
+```bash
+echo $DEEPSEEK_API_KEY  # Check if set
+```
+
+### Low quality output
+
+- Increase `--retries` (e.g., `-r 10`) for more refinement iterations
+- Adjust `max_meaning_drift` in config.json (higher = more aggressive style transfer)
+- Check that `prompts/sample.txt` contains sufficient style examples
+
+### Slow performance
+
+- Structural patterns are cached after first run
+- Use `--chunked` for very long documents
+- Consider using local Ollama models to avoid API rate limits
 
 ## License
 
 [Add your license here]
+
+## Contributing
+
+[Add contribution guidelines here]
+
