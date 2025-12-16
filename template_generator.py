@@ -94,8 +94,12 @@ class ParagraphTemplate:
     short_threshold: int = 10  # Dynamic threshold for short sentences
     medium_threshold: int = 25  # Dynamic threshold for medium sentences
 
-    def to_constraint_string(self) -> str:
-        """Convert to a constraint description for LLM."""
+    def to_constraint_string(self, used_phrases: Optional[List[str]] = None) -> str:
+        """Convert to a constraint description for LLM.
+
+        Args:
+            used_phrases: List of opener phrases recently used (to avoid repetition)
+        """
         role_desc = {
             'section_opener': 'SECTION OPENER - introduces a major point',
             'paragraph_opener': 'PARAGRAPH OPENER - introduces topic',
@@ -129,6 +133,29 @@ class ParagraphTemplate:
         lines.append(f"- Long sentences ({self.medium_threshold+1}+ words): {long_pct:.0f}%")
         lines.append("")
         lines.append("**IMPORTANT**: Vary sentence lengths within this paragraph to match the mix above.")
+
+        # Add explicit phrase avoidance (CRITICAL for preventing repetition)
+        if used_phrases:
+            # Normalize and get unique phrases from last 5 used
+            normalized_used = []
+            seen = set()
+            for phrase in used_phrases[-5:]:
+                if phrase:
+                    normalized = phrase.lower().strip()
+                    if normalized and normalized not in seen:
+                        normalized_used.append(normalized)
+                        seen.add(normalized)
+
+            if normalized_used:
+                lines.append("")
+                lines.append("### 🚫 CRITICAL: DO NOT USE THESE PHRASES")
+                lines.append("**You MUST avoid starting the first sentence with any of these recently used phrases:**")
+                for phrase in normalized_used:
+                    # Capitalize first letter for display
+                    display_phrase = phrase.capitalize() if phrase else phrase
+                    lines.append(f"- \"{display_phrase}...\"")
+                lines.append("")
+                lines.append("**This is MANDATORY** - use a DIFFERENT opener phrase even if it matches the opener type above.")
 
         # Add general guidance based on role
         lines.append("")
@@ -907,11 +934,12 @@ class TemplateGenerator:
         # Use example selector to find similar paragraphs from sample
         if example_selector:
             try:
+                # IMPROVEMENT 1: Get larger initial candidate pool for better variety
                 # Find diverse similar paragraphs from sample based on context
                 # Uses MMR to balance relevance and diversity
                 similar_paragraphs = example_selector.select_diverse_examples(
                     context_text,  # Use full context for matching
-                    k=5  # Get top 5 diverse similar
+                    k=12  # Get top 12 diverse similar (increased from 5 for better variety)
                 )
 
                 if similar_paragraphs:
@@ -927,6 +955,112 @@ class TemplateGenerator:
                             template_phrases.append(opener_phrase)
 
                     if templates:
+                        # IMPROVEMENT 2: Check variety early and apply filters before narrowing
+                        # Check opener type variety in initial pool
+                        opener_types = [t.sentences[0].opener_type for t in templates if t.sentences]
+                        unique_openers = set(opener_types)
+
+                        # IMPROVEMENT 3: Trigger distribution-based fallback more aggressively
+                        # If low variety detected (few unique openers) OR all openers are recently used
+                        low_variety = len(unique_openers) <= 2  # Only 1-2 unique opener types
+                        all_recently_used = False
+                        if len(unique_openers) == 1 and used_openers:
+                            single_opener = list(unique_openers)[0]
+                            all_recently_used = single_opener in used_openers[-3:]
+
+                        if low_variety or all_recently_used:
+                            # Get additional diverse templates from distribution-based selection
+                            dist_templates, dist_phrases = self._get_distribution_based_templates(
+                                example_selector, role, position_ratio,
+                                used_openers, used_phrases, target_count=8
+                            )
+                            # Add to pool (avoiding duplicates by phrase)
+                            existing_phrases = set(template_phrases)
+                            for t, phrase in zip(dist_templates, dist_phrases):
+                                if phrase and phrase not in existing_phrases:
+                                    templates.append(t)
+                                    template_phrases.append(phrase)
+                                    existing_phrases.add(phrase)
+                                    if len(templates) >= 15:  # Cap at 15 total
+                                        break
+
+                        # Re-check variety after adding distribution-based templates
+                        opener_types = [t.sentences[0].opener_type for t in templates if t.sentences]
+                        unique_openers = set(opener_types)
+
+                        # Apply variety filters EARLY (before sentence count filtering)
+                        if used_openers and templates:
+                            varied = []
+                            varied_phrases = []
+                            for t, phrase in zip(templates, template_phrases):
+                                if t.sentences and t.sentences[0].opener_type not in used_openers[-3:]:
+                                    varied.append(t)
+                                    varied_phrases.append(phrase)
+
+                            # If we filtered out too many, get more alternatives
+                            if len(varied) < 3 and used_openers:
+                                dist_templates, dist_phrases = self._get_distribution_based_templates(
+                                    example_selector, role, position_ratio,
+                                    used_openers, used_phrases, target_count=10
+                                )
+                                for t, phrase in zip(dist_templates, dist_phrases):
+                                    if t.sentences and t.sentences[0].opener_type not in used_openers[-3:]:
+                                        if phrase not in [p for _, p in zip(varied, varied_phrases)]:
+                                            varied.append(t)
+                                            varied_phrases.append(phrase)
+                                            if len(varied) >= 5:  # Ensure at least 5 varied options
+                                                break
+
+                            if varied:
+                                templates = varied
+                                template_phrases = varied_phrases
+
+                        # Apply phrase variety filter EARLY
+                        if used_phrases and templates:
+                            normalized_used = [p.lower().strip() if p else "" for p in used_phrases[-5:]]
+                            phrase_varied = []
+                            phrase_varied_phrases = []
+                            for t, phrase in zip(templates, template_phrases):
+                                normalized_phrase = phrase.lower().strip() if phrase else ""
+                                matches_used = False
+                                if normalized_phrase:
+                                    for used_phrase in normalized_used:
+                                        if used_phrase and (normalized_phrase == used_phrase or
+                                                          normalized_phrase.startswith(used_phrase) or
+                                                          used_phrase.startswith(normalized_phrase)):
+                                            matches_used = True
+                                            break
+                                if not matches_used:
+                                    phrase_varied.append(t)
+                                    phrase_varied_phrases.append(phrase if phrase else "")
+
+                            # If filtered out too many, get alternatives
+                            if len(phrase_varied) < 3 and used_phrases:
+                                dist_templates, dist_phrases = self._get_distribution_based_templates(
+                                    example_selector, role, position_ratio,
+                                    used_openers, used_phrases, target_count=10
+                                )
+                                for t, phrase in zip(dist_templates, dist_phrases):
+                                    normalized_phrase = phrase.lower().strip() if phrase else ""
+                                    matches_used = False
+                                    if normalized_phrase:
+                                        for used_phrase in normalized_used:
+                                            if used_phrase and (normalized_phrase == used_phrase or
+                                                              normalized_phrase.startswith(used_phrase) or
+                                                              used_phrase.startswith(normalized_phrase)):
+                                                matches_used = True
+                                                break
+                                    if not matches_used:
+                                        if phrase not in phrase_varied_phrases:
+                                            phrase_varied.append(t)
+                                            phrase_varied_phrases.append(phrase if phrase else "")
+                                            if len(phrase_varied) >= 5:
+                                                break
+
+                            if phrase_varied:
+                                templates = phrase_varied
+                                template_phrases = phrase_varied_phrases
+
                         # PRIORITY 1: Filter by sentence count - prefer multi-sentence templates
                         input_word_count = len(input_text.split())
 
@@ -978,108 +1112,30 @@ class TemplateGenerator:
                                     # Match phrases (approximate)
                                     template_phrases = dist_phrases[:len(multi_dist)]
 
-                        # Check if all templates share the same opener type
-                        opener_types = [t.sentences[0].opener_type for t in templates if t.sentences]
-                        unique_openers = set(opener_types)
+                        # NOTE: Variety filtering already done earlier, but check again after sentence count filtering
+                        # to ensure we still have variety after narrowing by sentence count
+                        if templates:
+                            opener_types = [t.sentences[0].opener_type for t in templates if t.sentences]
+                            unique_openers = set(opener_types)
 
-                        # If all templates share the same opener AND it's recently used, seek variety
-                        if len(unique_openers) == 1 and opener_types[0] in used_openers[-3:]:
-                            # Use distribution-based fallback to get templates with different openers
-                            dist_templates, dist_phrases = self._get_distribution_based_templates(
-                                example_selector, role, position_ratio,
-                                used_openers, used_phrases, target_count=5
-                            )
-                            # Prefer multi-sentence from distribution-based too
-                            multi_dist = [t for t in dist_templates if t.sentence_count >= 2]
-                            if multi_dist:
-                                templates = multi_dist
-                                template_phrases = dist_phrases[:len(multi_dist)]
-                            elif dist_templates:
-                                templates = dist_templates
-                                template_phrases = dist_phrases
-
-                        # Filter by used_openers for variety (CRITICAL: do this even if only 1 template)
-                        if used_openers and templates:
-                            varied = []
-                            varied_phrases = []
-                            for t, phrase in zip(templates, template_phrases):
-                                if t.sentences and t.sentences[0].opener_type not in used_openers[-3:]:
-                                    varied.append(t)
-                                    varied_phrases.append(phrase)
-
-                            # If we filtered out all templates, try to find alternatives
-                            if not varied and used_openers:
-                                # Try distribution-based selection to get different opener types
+                            # If we lost variety after sentence count filtering, get more options
+                            if len(unique_openers) <= 1 and used_openers:
+                                # Try to get more diverse templates with same sentence count
+                                preferred_count = templates[0].sentence_count if templates else None
                                 dist_templates, dist_phrases = self._get_distribution_based_templates(
                                     example_selector, role, position_ratio,
-                                    used_openers, used_phrases, target_count=10
+                                    used_openers, used_phrases, target_count=8
                                 )
-                                # Filter these by opener types too
+                                # Filter to same sentence count and different openers
                                 for t, phrase in zip(dist_templates, dist_phrases):
-                                    if t.sentences and t.sentences[0].opener_type not in used_openers[-3:]:
-                                        varied.append(t)
-                                        varied_phrases.append(phrase)
-                                        if len(varied) >= 3:  # Get at least 3 alternatives
+                                    if (t.sentence_count == preferred_count and
+                                        t.sentences and
+                                        t.sentences[0].opener_type not in used_openers[-3:] and
+                                        phrase not in template_phrases):
+                                        templates.append(t)
+                                        template_phrases.append(phrase)
+                                        if len(templates) >= 8:  # Ensure good variety
                                             break
-
-                            # Use filtered list if we have options
-                            if varied:
-                                templates = varied
-                                template_phrases = varied_phrases
-
-                        # Filter by used_phrases to avoid exact repetition (CRITICAL: do this even if only 1 template)
-                        if used_phrases and templates:
-                            # Normalize used_phrases for comparison (they should already be normalized, but be safe)
-                            normalized_used = [p.lower().strip() if p else "" for p in used_phrases[-5:]]
-
-                            phrase_varied = []
-                            phrase_varied_phrases = []
-                            for t, phrase in zip(templates, template_phrases):
-                                # Normalize phrase for comparison
-                                normalized_phrase = phrase.lower().strip() if phrase else ""
-                                # Check if phrase matches any used phrase (exact match or starts with)
-                                matches_used = False
-                                if normalized_phrase:
-                                    for used_phrase in normalized_used:
-                                        if used_phrase and (normalized_phrase == used_phrase or
-                                                          normalized_phrase.startswith(used_phrase) or
-                                                          used_phrase.startswith(normalized_phrase)):
-                                            matches_used = True
-                                            break
-
-                                if not matches_used:
-                                    phrase_varied.append(t)
-                                    phrase_varied_phrases.append(phrase if phrase else "")
-
-                            # If we filtered out all templates, try to find alternatives
-                            if not phrase_varied and used_phrases:
-                                # Try distribution-based selection to get different phrases
-                                dist_templates, dist_phrases = self._get_distribution_based_templates(
-                                    example_selector, role, position_ratio,
-                                    used_openers, used_phrases, target_count=10
-                                )
-                                # Filter these by phrases too
-                                for t, phrase in zip(dist_templates, dist_phrases):
-                                    normalized_phrase = phrase.lower().strip() if phrase else ""
-                                    matches_used = False
-                                    if normalized_phrase:
-                                        for used_phrase in normalized_used:
-                                            if used_phrase and (normalized_phrase == used_phrase or
-                                                              normalized_phrase.startswith(used_phrase) or
-                                                              used_phrase.startswith(normalized_phrase)):
-                                                matches_used = True
-                                                break
-                                    if not matches_used:
-                                        phrase_varied.append(t)
-                                        phrase_varied_phrases.append(phrase if phrase else "")
-                                        if len(phrase_varied) >= 3:  # Get at least 3 alternatives
-                                            break
-
-                            # Use filtered list if we have options, otherwise fall back to original
-                            if phrase_varied:
-                                templates = phrase_varied
-                                template_phrases = phrase_varied_phrases
-                            # If still no alternatives, at least log a warning (but proceed with original)
 
                         # LENGTH DISTRIBUTION MATCHING: Score and select best match
                         if len(templates) > 1:
@@ -1256,6 +1312,7 @@ class TemplateGenerator:
     def get_template_prompt(self, role: str, position_ratio: float,
                             claim_count: int = 3,
                             used_openers: Optional[List[str]] = None,
+                            used_phrases: Optional[List[str]] = None,
                             paragraph_index: int = 0) -> str:
         """
         Get a template as a prompt constraint for the LLM (position-based).
@@ -1265,6 +1322,7 @@ class TemplateGenerator:
             position_ratio: Position in document (0-1)
             claim_count: Number of semantic claims to express
             used_openers: List of opener types already used (for variety)
+            used_phrases: List of opener phrases already used (for exact repetition avoidance)
             paragraph_index: Current paragraph index
 
         Returns:
@@ -1278,7 +1336,7 @@ class TemplateGenerator:
             used_openers=used_openers,
             paragraph_index=paragraph_index
         )
-        return template.to_constraint_string()
+        return template.to_constraint_string(used_phrases=used_phrases)
 
     def get_template_prompt_from_context(self,
                                          input_text: str,
@@ -1323,7 +1381,7 @@ class TemplateGenerator:
             paragraph_index=paragraph_index
         )
 
-        return template.to_constraint_string()
+        return template.to_constraint_string(used_phrases=used_phrases)
 
 
 # Test

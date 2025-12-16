@@ -53,7 +53,9 @@ class StyleVerification:
     formality_match: float  # How close to target formality
     pattern_coverage: float  # NEW: How many distinctive patterns are used
     discourse_marker_usage: float  # NEW: How well discourse markers match target
-    issues: List[str]
+    issues: List[str] = field(default_factory=list)  # Issues found during verification
+    phrase_repetition_detected: bool = False  # NEW: Detected recently used opener phrase
+    repeated_phrase: Optional[str] = None  # NEW: The phrase that was repeated
 
 
 @dataclass
@@ -226,7 +228,8 @@ class Verifier:
                iteration: int = 0,
                previous_score: float = 0.0,
                accumulated_context: Optional[str] = None,
-               position_in_document: Optional[Tuple[int, int]] = None) -> VerificationResult:
+               position_in_document: Optional[Tuple[int, int]] = None,
+               used_phrases: Optional[List[str]] = None) -> VerificationResult:
         """
         Verify synthesis output against input and target style.
 
@@ -239,6 +242,7 @@ class Verifier:
             previous_score: Score from previous iteration
             accumulated_context: Full transformed text so far (for statistical analysis)
             position_in_document: Tuple of (paragraph_index, total_paragraphs) for position-aware checks
+            used_phrases: List of opener phrases recently used (to detect repetition)
 
         Returns:
             VerificationResult with pass/fail, details, and transformation hints
@@ -254,15 +258,17 @@ class Verifier:
         style_result = self._verify_style(
             output_text, target_style,
             accumulated_context=accumulated_context,
-            position_in_document=position_in_document
+            position_in_document=position_in_document,
+            used_phrases=used_phrases
         )
         preservation_result = self._verify_preservation(input_semantics, output_text)
 
-        # Determine overall pass/fail
+        # Determine overall pass/fail (phrase repetition is a critical failure)
         overall_passed = (
             semantic_result.passed and
             style_result.passed and
-            preservation_result.passed
+            preservation_result.passed and
+            not style_result.phrase_repetition_detected  # CRITICAL: Fail if phrase repetition detected
         )
 
         # Generate recommendations
@@ -332,6 +338,18 @@ class Verifier:
 
         # Use accumulated context for document-wide statistics
         text_for_statistics = accumulated_context if accumulated_context else output_text
+
+        # CRITICAL: Phrase repetition check - must be fixed immediately
+        if style_result.phrase_repetition_detected and style_result.repeated_phrase:
+            hints.append(TransformationHint(
+                sentence_index=0,  # First sentence
+                current_text=output_text[:100] if len(output_text) > 100 else output_text,
+                structural_role="paragraph_opener",
+                expected_patterns=[],
+                issue=f"🚨 CRITICAL: Output starts with recently used phrase '{style_result.repeated_phrase}'",
+                suggestion=f"REWRITE the first sentence to use a COMPLETELY DIFFERENT opener phrase. Do NOT use '{style_result.repeated_phrase}' or any variation of it. Use a different opener type entirely.",
+                priority=1  # Highest priority - must fix immediately
+            ))
 
         # CRITICAL: AI fingerprints first - these must be addressed
         ai_patterns = self._detect_ai_patterns(output_text)
@@ -421,6 +439,37 @@ class Verifier:
         # LIMIT: Return max 15 hints, sorted by priority
         hints.sort(key=lambda h: h.priority)
         return hints[:15]
+
+    def _extract_opener_phrase(self, text: str) -> str:
+        """Extract the actual opener phrase (first 2-3 words) from text.
+
+        Returns normalized phrase (lowercase, trimmed) for consistent matching.
+        """
+        if not text:
+            return ""
+
+        # Use semantic_extractor's nlp for consistency
+        doc = self.semantic_extractor.nlp(text)
+        sentences = list(doc.sents)
+        if not sentences:
+            return ""
+
+        first_sent = sentences[0]
+        tokens = [t for t in first_sent if not t.is_space and not t.is_punct]
+
+        # Get first 2-3 words (normalized to lowercase, trimmed)
+        if len(tokens) >= 3:
+            phrase = ' '.join([t.text.lower().strip() for t in tokens[:3]])
+        elif len(tokens) >= 2:
+            phrase = ' '.join([t.text.lower().strip() for t in tokens[:2]])
+        elif tokens:
+            phrase = tokens[0].text.lower().strip()
+        else:
+            return ""
+
+        # Normalize whitespace
+        phrase = ' '.join(phrase.split())
+        return phrase
 
     def _detect_ai_patterns(self, text: str) -> List[str]:
         """Detect AI-typical patterns that should be removed."""
@@ -596,7 +645,8 @@ class Verifier:
                       output_text: str,
                       target_style: Optional[StyleProfile],
                       accumulated_context: Optional[str] = None,
-                      position_in_document: Optional[Tuple[int, int]] = None) -> StyleVerification:
+                      position_in_document: Optional[Tuple[int, int]] = None,
+                      used_phrases: Optional[List[str]] = None) -> StyleVerification:
         """
         Verify output matches target style with full document awareness.
 
@@ -605,8 +655,30 @@ class Verifier:
             target_style: Target style profile
             accumulated_context: Full transformed document so far (for statistical checks)
             position_in_document: (current_index, total) for position-aware checks
+            used_phrases: List of opener phrases recently used (to detect repetition)
         """
         issues = []
+
+        # CRITICAL: Check for phrase repetition (recently used opener phrases)
+        phrase_repetition_detected = False
+        repeated_phrase = None
+        if used_phrases and output_text:
+            output_opener_phrase = self._extract_opener_phrase(output_text)
+            if output_opener_phrase:
+                # Normalize for comparison
+                normalized_output = output_opener_phrase.lower().strip()
+                # Check against last 5 used phrases
+                for used_phrase in used_phrases[-5:]:
+                    if used_phrase:
+                        normalized_used = used_phrase.lower().strip()
+                        # Check for exact match or prefix match
+                        if (normalized_output == normalized_used or
+                            normalized_output.startswith(normalized_used) or
+                            normalized_used.startswith(normalized_output)):
+                            phrase_repetition_detected = True
+                            repeated_phrase = used_phrase
+                            issues.append(f"🚨 CRITICAL: Output starts with recently used phrase '{used_phrase}' - this is REPEATED and must be changed")
+                            break
 
         # Use accumulated context for statistical analysis if available
         # This ensures we catch overuse patterns across the whole document
@@ -633,6 +705,8 @@ class Verifier:
                     formality_match=0.7,
                     pattern_coverage=0.5,
                     discourse_marker_usage=0.5,
+                    phrase_repetition_detected=False,
+                    repeated_phrase=None,
                     issues=[]
                 )
 
@@ -756,12 +830,13 @@ class Verifier:
             statistical_score
         ) / 7
 
-        # STRICT: Fail if ANY AI fingerprints are detected
+        # STRICT: Fail if ANY AI fingerprints are detected OR phrase repetition detected
         has_ai_fingerprints = len(ai_fingerprints) > 0
         passed = (
             overall_match >= self.min_style_match and
             len(ai_words_found) == 0 and
-            not has_ai_fingerprints  # NO AI patterns allowed
+            not has_ai_fingerprints and  # NO AI patterns allowed
+            not phrase_repetition_detected  # CRITICAL: No phrase repetition allowed
         )
 
         return StyleVerification(
@@ -772,6 +847,8 @@ class Verifier:
             formality_match=formality_match,
             pattern_coverage=pattern_coverage,
             discourse_marker_usage=discourse_marker_usage,
+            phrase_repetition_detected=phrase_repetition_detected,
+            repeated_phrase=repeated_phrase,
             issues=issues
         )
 

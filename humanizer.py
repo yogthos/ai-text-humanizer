@@ -493,7 +493,8 @@ class StyleTransferPipeline:
                 iteration=iteration,
                 previous_score=best_score,
                 accumulated_context=accumulated_text,
-                position_in_document=self._current_position  # Set by caller
+                position_in_document=self._current_position,  # Set by caller
+                used_phrases=used_phrases  # For phrase repetition detection
             )
 
             # Calculate score and track improvement
