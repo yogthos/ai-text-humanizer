@@ -391,7 +391,8 @@ class StyleTransferPipeline:
                 document_context=full_document,
                 preceding_output=preceding_output,
                 transformation_hints=transformation_hints,
-                iteration=iteration - 1
+                iteration=iteration - 1,
+                position_in_document=self._current_position
             )
 
             if not synthesis_result.output_text.strip():

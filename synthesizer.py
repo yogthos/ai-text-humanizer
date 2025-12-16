@@ -26,6 +26,7 @@ from structural_analyzer import (
 )
 from example_selector import ExampleSelector
 from ai_word_replacer import AIWordReplacer
+from template_generator import TemplateGenerator
 
 
 @dataclass
@@ -185,6 +186,12 @@ class Synthesizer:
         if self.sample_text:
             self.ai_word_replacer = AIWordReplacer(self.sample_text)
 
+        # Initialize template generator for structural contracts
+        self.template_generator = None
+        if self.sample_text:
+            print("  [Synthesizer] Initializing template generator...")
+            self.template_generator = TemplateGenerator()
+
         # Cache style profile
         self._cached_style_profile = None
         self._cached_role_patterns = None
@@ -207,7 +214,8 @@ class Synthesizer:
                    document_context: Optional[str] = None,
                    preceding_output: Optional[str] = None,
                    transformation_hints: Optional[List[TransformationHint]] = None,
-                   iteration: int = 0) -> SynthesisResult:
+                   iteration: int = 0,
+                   position_in_document: Optional[tuple] = None) -> SynthesisResult:
         """
         Synthesize new text expressing input meaning in sample style.
 
@@ -219,6 +227,7 @@ class Synthesizer:
             preceding_output: Already-transformed preceding paragraphs (for consistency)
             transformation_hints: Hints from previous iteration to guide refinement
             iteration: Current iteration number
+            position_in_document: Tuple of (paragraph_index, total_paragraphs) for template selection
 
         Returns:
             SynthesisResult with output text and metadata
@@ -237,6 +246,28 @@ class Synthesizer:
         # Analyze input structure for role-aware synthesis
         input_structure = self.structural_analyzer.analyze_input_structure(input_text)
 
+        # Generate structural template based on position
+        structural_template = None
+        if self.template_generator and position_in_document:
+            para_idx, total_paras = position_in_document
+            position_ratio = para_idx / max(total_paras - 1, 1) if total_paras > 1 else 0.5
+
+            # Determine role based on position
+            if para_idx == 0:
+                role = 'section_opener'
+            elif position_ratio > 0.9:
+                role = 'closer'
+            elif position_ratio < 0.1:
+                role = 'paragraph_opener'
+            else:
+                role = 'body'
+
+            # Get template with claim count for sizing
+            claim_count = len(semantic_content.claims)
+            structural_template = self.template_generator.get_template_prompt(
+                role, position_ratio, claim_count
+            )
+
         # Build the synthesis prompt with structural awareness
         system_prompt = self._build_system_prompt(style_profile, iteration > 0)
         user_prompt = self._build_user_prompt(
@@ -246,7 +277,8 @@ class Synthesizer:
             input_structure=input_structure,
             role_patterns=role_patterns,
             transformation_hints=transformation_hints,
-            iteration=iteration
+            iteration=iteration,
+            structural_template=structural_template
         )
 
         # Adjust temperature based on iteration (more deterministic as we refine)
@@ -314,6 +346,16 @@ CRITICAL: You must FULLY TRANSFORM the text, not just make minor edits. The outp
 - Express it using the patterns, phrases, and constructions of the target style
 - Vary your sentence structures - do NOT overuse any single pattern
 
+## 🔒 STRUCTURAL CONTRACT (MANDATORY)
+If a STRUCTURAL CONTRACT is provided in the prompt, you MUST:
+1. Follow the EXACT number of sentences specified
+2. Match the target word counts for each sentence (±5 words)
+3. Use the specified opener type for each sentence (noun/adverb/pronoun/etc.)
+4. Follow the POS pattern as closely as possible
+5. Include subordinate clauses where indicated
+
+The structural contract is derived from the target style - following it ensures your output matches the style's sentence architecture.
+
 ## WHAT YOU MUST PRESERVE
 1. All facts and claims (meaning)
 2. ONLY citations that exist in the original - DO NOT ADD NEW CITATIONS
@@ -321,9 +363,9 @@ CRITICAL: You must FULLY TRANSFORM the text, not just make minor edits. The outp
 4. Logical flow
 
 ## WHAT YOU MUST CHANGE
-1. Sentence structure - vary between the target style patterns
-2. Sentence openers - VARY them: some with "Contrary to...", some with "The...", some with subjects
-3. Sentence length - Target 20-35 words, but VARY the lengths naturally
+1. Sentence structure - follow the STRUCTURAL CONTRACT if provided
+2. Sentence openers - use the opener type specified in the contract
+3. Sentence length - match the word counts in the contract
 4. Discourse markers - Use sparingly: "therefore", "hence", "consequently" should NOT appear in every paragraph
 5. Word choice - Match target vocabulary
 
@@ -386,11 +428,17 @@ Return ONLY the rewritten text. No commentary, no explanations, no added citatio
                            input_structure: Optional[List[SentenceAnalysis]] = None,
                            role_patterns: Optional[Dict[str, List[StructuralPattern]]] = None,
                            transformation_hints: Optional[List[TransformationHint]] = None,
-                           iteration: int = 0) -> str:
-        """Build user prompt with semantic content, structural roles, examples, and hints."""
+                           iteration: int = 0,
+                           structural_template: Optional[str] = None) -> str:
+        """Build user prompt with semantic content, structural roles, examples, hints, and template."""
         parts = []
 
-        # Add transformation hints FIRST if this is a refinement iteration
+        # Add structural template FIRST - this is the contract they must follow
+        if structural_template:
+            parts.append(structural_template)
+            parts.append("")
+
+        # Add transformation hints if this is a refinement iteration
         if transformation_hints and iteration > 0:
             parts.append("## ⚠️ TRANSFORMATION HINTS (MUST ADDRESS)")
             parts.append("Your previous output had these issues. FIX THEM:")
