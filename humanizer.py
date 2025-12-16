@@ -17,7 +17,7 @@ import sys
 import json
 import argparse
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, asdict, field
 
 from semantic_extractor import SemanticExtractor, SemanticContent
@@ -94,6 +94,9 @@ class StyleTransferPipeline:
         self.verifier = Verifier(config_path)
         self.structural_analyzer = StructuralAnalyzer()
 
+        # Track current position for context-aware verification
+        self._current_position: Optional[Tuple[int, int]] = None
+
         # Log verification thresholds
         print(f"  Verification thresholds: drift<={self.verifier.max_meaning_drift:.0%}, claims>={self.verifier.min_claim_coverage:.0%}")
 
@@ -113,7 +116,6 @@ class StyleTransferPipeline:
         self.max_retries = 10
         self.convergence_threshold = 0.02  # Stop if improvement < 2%
         self.min_iterations = 2  # Always do at least 2 iterations
-        self.auto_chunk_threshold = 2000  # Token threshold for auto-chunked mode
 
         # Try to load from config
         if self.config_path is None:
@@ -134,8 +136,6 @@ class StyleTransferPipeline:
                     self.convergence_threshold = pipeline_config['convergence_threshold']
                 if 'min_iterations' in pipeline_config:
                     self.min_iterations = pipeline_config['min_iterations']
-                if 'auto_chunk_threshold' in pipeline_config:
-                    self.auto_chunk_threshold = pipeline_config['auto_chunk_threshold']
 
             except (json.JSONDecodeError, IOError):
                 pass  # Use defaults if config can't be read
@@ -148,78 +148,34 @@ class StyleTransferPipeline:
         """Estimate token count (rough: ~4 chars per token for English)."""
         return len(text) // 4
 
-    def _should_use_chunked_mode(self, input_text: str) -> bool:
-        """Determine if text is too long for single-pass processing."""
-        # LLMs typically have 4096 output tokens max
-        # Input + output must fit context; use conservative threshold
-        estimated_tokens = self._estimate_tokens(input_text)
-        # Use configurable threshold (default 2000 tokens)
-        return estimated_tokens > self.auto_chunk_threshold
-
-    def _detect_truncation(self, input_text: str, output_text: str) -> bool:
-        """
-        Detect if output was truncated by the LLM.
-
-        Signs of truncation:
-        - Output significantly shorter than input (paragraphs missing)
-        - Output ends mid-sentence
-        - Paragraph count much lower than input
-        """
-        if not output_text.strip():
-            return True
-
-        # Compare paragraph counts
-        input_paras = len([p for p in input_text.split('\n\n') if p.strip()])
-        output_paras = len([p for p in output_text.split('\n\n') if p.strip()])
-
-        # If output has significantly fewer paragraphs, likely truncated
-        if output_paras < input_paras * 0.7:
-            return True
-
-        # Check if output ends mid-sentence (no terminal punctuation)
-        output_stripped = output_text.strip()
-        if output_stripped and output_stripped[-1] not in '.!?"\'':
-            return True
-
-        # Check word count ratio
-        input_words = len(input_text.split())
-        output_words = len(output_text.split())
-
-        # Style transfer shouldn't reduce word count by more than 40%
-        if output_words < input_words * 0.6:
-            return True
-
-        return False
-
     def transform(self, input_text: str,
-                  verbose: bool = False,
-                  chunk_mode: bool = False) -> PipelineResult:
+                  verbose: bool = False) -> PipelineResult:
         """
-        Transform input text to target style.
+        Transform input text to target style using streaming paragraph-by-paragraph processing.
+
+        Always uses streaming mode for consistency:
+        - Each paragraph is processed with full document context
+        - Statistical checks accumulate across the document
+        - Position-aware hints guide opening vs closing paragraphs
+        - No truncation risk regardless of document length
 
         Args:
             input_text: Text to transform
             verbose: Print detailed progress
-            chunk_mode: Process paragraph by paragraph for long texts
-                       (auto-enabled for long documents)
 
         Returns:
             PipelineResult with transformed text and metadata
         """
         try:
-            # FIRST: Check if chunking is needed BEFORE any expensive operations
-            auto_chunk = self._should_use_chunked_mode(input_text)
-            use_chunked = chunk_mode or auto_chunk
             estimated_tokens = self._estimate_tokens(input_text)
+            paragraphs = [p.strip() for p in input_text.split('\n\n') if p.strip()]
 
             if verbose:
                 print(f"\n=== Pre-flight Check ===")
-                print(f"  - Input: ~{estimated_tokens} tokens")
-                print(f"  - Mode: {'CHUNKED' if use_chunked else 'FULL'}")
-                if auto_chunk and not chunk_mode:
-                    print(f"  - Auto-chunk triggered (threshold: {self.auto_chunk_threshold})")
+                print(f"  - Input: ~{estimated_tokens} tokens, {len(paragraphs)} paragraphs")
+                print(f"  - Mode: STREAMING (context-aware paragraph processing)")
 
-            # Stage 1: Semantic Extraction (do once, share across all modes)
+            # Stage 1: Semantic Extraction (do once, share across all paragraphs)
             if verbose:
                 print("\n=== Stage 1: Semantic Extraction ===")
 
@@ -239,29 +195,10 @@ class StyleTransferPipeline:
                 print(f"  - Sentence variety: {self._style_profile.sentences.length_distribution}")
                 print(f"  - Structural patterns: {len(self._role_patterns)} roles cached")
 
-            # Stage 3 & 4: Transform based on determined mode
-            if use_chunked:
-                return self._transform_chunked_with_context(
-                    input_text, semantic_content, verbose
-                )
-            else:
-                # Try full transform first
-                result = self._transform_full_with_semantics(
-                    input_text, semantic_content, verbose
-                )
-
-                # Check for truncation - if so, retry chunked (but reuse semantics)
-                if result.output_text and self._detect_truncation(input_text, result.output_text):
-                    if verbose:
-                        print("\n  ⚠️ Truncation detected in output!")
-                        print("  Retrying with chunked mode for complete coverage...")
-
-                    # Retry with chunked mode, reusing semantics
-                    return self._transform_chunked_with_context(
-                        input_text, semantic_content, verbose
-                    )
-
-                return result
+            # Stage 3 & 4: Stream through paragraphs with context
+            return self._transform_streaming(
+                input_text, semantic_content, verbose
+            )
 
         except Exception as e:
             import traceback
@@ -276,168 +213,24 @@ class StyleTransferPipeline:
                 error=str(e)
             )
 
-    def _transform_full_with_semantics(self, input_text: str,
-                                         semantic_content: SemanticContent,
-                                         verbose: bool) -> PipelineResult:
-        """Transform entire text at once with iterative refinement."""
-        # Semantic extraction already done in transform()
+    def _transform_streaming(self, input_text: str,
+                               semantic_content: SemanticContent,
+                               verbose: bool) -> PipelineResult:
+        """
+        Transform text using streaming paragraph-by-paragraph processing.
 
-        # Stage 3 & 4: Iterative Synthesis with Verification and Hints
-        if verbose:
-            print("\n=== Stage 3 & 4: Iterative Refinement (Focused Hints) ===")
-
-        best_output = ""
-        best_verification = None
-        best_score = 0.0
-        improvement_history = []
-        transformation_hints = None
-        convergence_achieved = False
-
-        for iteration in range(1, self.max_retries + 1):
-            if verbose:
-                print(f"\n  Iteration {iteration}/{self.max_retries}...")
-                if transformation_hints:
-                    print(f"    Applying {len(transformation_hints)} transformation hints")
-
-            # Stage 3: Synthesis with hints from previous iteration
-            synthesis_result = self.synthesizer.synthesize(
-                input_text,
-                semantic_content=semantic_content,
-                style_profile=self._style_profile,
-                transformation_hints=transformation_hints,
-                iteration=iteration - 1  # 0-indexed for synthesis
-            )
-
-            if not synthesis_result.output_text.strip():
-                if verbose:
-                    print("  WARNING: Empty output from synthesizer")
-                continue
-
-            # Stage 4: Verification with hint generation
-            verification = self.verifier.verify(
-                input_text=input_text,
-                output_text=synthesis_result.output_text,
-                input_semantics=semantic_content,
-                target_style=self._style_profile,
-                iteration=iteration,
-                previous_score=best_score
-            )
-
-            # Calculate current score
-            current_score = self._calculate_score(verification)
-            improvement = current_score - best_score
-            improvement_history.append(current_score)
-
-            if verbose:
-                print(f"  - Score: {current_score:.2%} (improvement: {improvement:+.1%})")
-                print(f"  - Semantic: {'PASS' if verification.semantic.passed else 'FAIL'} "
-                      f"(claims: {verification.semantic.claim_coverage:.0%})")
-                print(f"  - Style: {'PASS' if verification.style.passed else 'FAIL'} "
-                      f"(pattern coverage: {verification.style.pattern_coverage:.0%})")
-                print(f"  - Preservation: {'PASS' if verification.preservation.passed else 'FAIL'}")
-                if verification.transformation_hints:
-                    print(f"  - Generated {len(verification.transformation_hints)} hints for next iteration")
-
-            # Track best result
-            if current_score > best_score:
-                best_output = synthesis_result.output_text
-                best_verification = verification
-                best_score = current_score
-
-                # Get hints for next iteration
-                transformation_hints = verification.transformation_hints
-
-            # Check if passed
-            if verification.overall_passed:
-                if verbose:
-                    print(f"\n  SUCCESS on iteration {iteration}!")
-
-                return PipelineResult(
-                    success=True,
-                    output_text=synthesis_result.output_text,
-                    iterations=iteration,
-                    final_verification=verification,
-                    semantic_content=semantic_content,
-                    style_profile=self._style_profile,
-                    error=None,
-                    improvement_history=improvement_history,
-                    convergence_achieved=True
-                )
-
-            # Check for convergence (improvement plateau)
-            # BUT: Never stop if AI fingerprints are still detected
-            has_ai_fingerprints = any('AI FINGERPRINT' in issue or 'AI-typical' in issue
-                                      for issue in verification.style.issues)
-
-            if iteration >= self.min_iterations and len(improvement_history) >= 2:
-                recent_improvement = abs(improvement_history[-1] - improvement_history[-2])
-                if recent_improvement < self.convergence_threshold:
-                    if has_ai_fingerprints:
-                        if verbose:
-                            print(f"\n  ⚠️ Would converge but AI fingerprints still present - continuing...")
-                        # Force new hints focusing on AI patterns
-                        transformation_hints = [h for h in (verification.transformation_hints or [])
-                                               if 'AI' in h.issue or h.priority == 1]
-                    else:
-                        convergence_achieved = True
-                        if verbose:
-                            print(f"\n  CONVERGENCE reached (improvement: {recent_improvement:.1%} < threshold {self.convergence_threshold:.1%})")
-                        break
-
-            # Log issues for retry
-            if verbose and verification.recommendations:
-                print("  Issues to address:")
-                for rec in verification.recommendations[:3]:
-                    print(f"    - {rec}")
-                if transformation_hints:
-                    print("  Top hints for next iteration:")
-                    for hint in transformation_hints[:2]:
-                        print(f"    - {hint.issue}")
-
-        # Final cleanup pass - ensure no AI fingerprints remain
-        if best_output and self.synthesizer.ai_word_replacer:
-            final_output = self.synthesizer.ai_word_replacer.replace_ai_words(best_output)
-            if final_output != best_output:
-                if verbose:
-                    print("\n  [Final Pass] Removed remaining AI fingerprints")
-                best_output = final_output
-                # Re-verify after cleanup
-                best_verification = self.verifier.verify(
-                    input_text=input_text,
-                    output_text=best_output,
-                    input_semantics=semantic_content,
-                    target_style=self._style_profile,
-                    iteration=len(improvement_history) + 1,
-                    previous_score=best_score
-                )
-
-        # Return best result even if not perfect
-        if verbose:
-            print(f"\n  Returning best result after {len(improvement_history)} iterations")
-            print(f"  Final score: {best_score:.2%}")
-
-        return PipelineResult(
-            success=best_verification.overall_passed if best_verification else False,
-            output_text=best_output,
-            iterations=len(improvement_history),
-            final_verification=best_verification,
-            semantic_content=semantic_content,
-            style_profile=self._style_profile,
-            error=None if best_output else "Failed to generate valid output",
-            improvement_history=improvement_history,
-            convergence_achieved=convergence_achieved
-        )
-
-    def _transform_chunked_with_context(self, input_text: str,
-                                          semantic_content: SemanticContent,
-                                          verbose: bool) -> PipelineResult:
-        """Transform text paragraph by paragraph with full document context."""
+        Each paragraph is processed with:
+        - Full document context (the original text)
+        - Preceding transformed output (for consistency)
+        - Accumulated statistics (for overuse detection)
+        - Position awareness (for opening/closing style)
+        """
         paragraphs = [p.strip() for p in input_text.split('\n\n') if p.strip()]
 
         if verbose:
-            print(f"\n=== Chunked Mode: {len(paragraphs)} paragraphs ===")
+            print(f"\n=== Stage 3 & 4: Streaming Transform ({len(paragraphs)} paragraphs) ===")
             print(f"  - Document has {len(semantic_content.claims)} total claims")
-            print(f"  - Using pre-extracted semantics for context")
+            print(f"  - Context-aware processing enabled")
 
         full_document_semantics = semantic_content
 
@@ -458,6 +251,9 @@ class StyleTransferPipeline:
             # Pass accumulated hints from whole-document analysis
             doc_level_hints = accumulated_hints if accumulated_hints else None
 
+            # Position tracking for position-aware style checks
+            position = (i, len(paragraphs))
+
             # Transform this paragraph with full document context
             result = self._transform_paragraph_with_context(
                 paragraph=para,
@@ -465,6 +261,7 @@ class StyleTransferPipeline:
                 full_semantics=full_document_semantics,
                 preceding_output=preceding_output,
                 doc_level_hints=doc_level_hints,
+                position_in_document=position,
                 verbose=verbose
             )
 
@@ -535,8 +332,20 @@ class StyleTransferPipeline:
                                           full_semantics: SemanticContent,
                                           preceding_output: Optional[str],
                                           doc_level_hints: Optional[List[str]] = None,
+                                          position_in_document: Optional[Tuple[int, int]] = None,
                                           verbose: bool = False) -> PipelineResult:
-        """Transform a single paragraph with full document context and iterative refinement."""
+        """
+        Transform a single paragraph with full document context and iterative refinement.
+
+        Args:
+            paragraph: The paragraph to transform
+            full_document: The complete original document
+            full_semantics: Semantics extracted from the full document
+            preceding_output: Already-transformed preceding paragraphs
+            doc_level_hints: Document-level hints (e.g., avoid overused words)
+            position_in_document: (current_index, total_paragraphs) for position-aware checks
+            verbose: Print progress information
+        """
         # Extract paragraph-specific semantics
         para_semantics = self.semantic_extractor.extract(paragraph)
 
@@ -546,6 +355,9 @@ class StyleTransferPipeline:
         improvement_history = []
         transformation_hints = None
         convergence_achieved = False
+
+        # Store position for use in verification
+        self._current_position = position_in_document
 
         # Use fewer iterations per paragraph (we'll iterate on the whole document too)
         max_para_iterations = min(5, self.max_retries)
@@ -587,14 +399,22 @@ class StyleTransferPipeline:
                     print("    WARNING: Empty output from synthesizer")
                 continue
 
-            # Verify this paragraph with hint generation
+            # Build accumulated context for full-document statistical analysis
+            if preceding_output:
+                accumulated_text = preceding_output + "\n\n" + synthesis_result.output_text
+            else:
+                accumulated_text = synthesis_result.output_text
+
+            # Verify this paragraph with full document context
             verification = self.verifier.verify(
                 input_text=paragraph,
                 output_text=synthesis_result.output_text,
                 input_semantics=para_semantics,
                 target_style=self._style_profile,
                 iteration=iteration,
-                previous_score=best_score
+                previous_score=best_score,
+                accumulated_context=accumulated_text,
+                position_in_document=self._current_position  # Set by caller
             )
 
             # Calculate score and track improvement
@@ -738,10 +558,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python pipeline.py input/document.md                    # Basic usage
-  python pipeline.py input/document.md -o output/doc.md  # Custom output
-  python pipeline.py input/document.md --verbose         # Detailed progress
-  python pipeline.py input/document.md --chunked         # Process by paragraph
+  python humanizer.py input/document.md                    # Basic usage
+  python humanizer.py input/document.md -o output/doc.md   # Custom output
+  python humanizer.py input/document.md --verbose          # Detailed progress
+  python humanizer.py input/document.md -r 20              # More iterations
+
+Processing Mode:
+  Always uses streaming paragraph-by-paragraph processing for:
+  - Consistent output quality regardless of document length
+  - Context-aware statistical verification (detects overused words)
+  - Position-aware style hints (opening vs closing paragraphs)
 '''
     )
 
@@ -750,7 +576,6 @@ Examples:
     parser.add_argument('-c', '--config', help='Config file path (default: config.json)')
     parser.add_argument('-r', '--retries', type=int, default=None, help='Max retry attempts (overrides config.json, default: from config or 10)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
-    parser.add_argument('--chunked', action='store_true', help='Process paragraph by paragraph')
     parser.add_argument('--analyze-only', action='store_true', help='Only analyze input, no transformation')
     parser.add_argument('--json', action='store_true', help='Output results as JSON')
 
@@ -803,8 +628,7 @@ Examples:
 
     result = pipeline.transform(
         input_text,
-        verbose=args.verbose,
-        chunk_mode=args.chunked
+        verbose=args.verbose
     )
 
     # Output results

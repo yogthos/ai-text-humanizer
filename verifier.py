@@ -224,7 +224,9 @@ class Verifier:
                input_semantics: Optional[SemanticContent] = None,
                target_style: Optional[StyleProfile] = None,
                iteration: int = 0,
-               previous_score: float = 0.0) -> VerificationResult:
+               previous_score: float = 0.0,
+               accumulated_context: Optional[str] = None,
+               position_in_document: Optional[Tuple[int, int]] = None) -> VerificationResult:
         """
         Verify synthesis output against input and target style.
 
@@ -235,6 +237,8 @@ class Verifier:
             target_style: Target style profile (optional)
             iteration: Current iteration number (for tracking improvement)
             previous_score: Score from previous iteration
+            accumulated_context: Full transformed text so far (for statistical analysis)
+            position_in_document: Tuple of (paragraph_index, total_paragraphs) for position-aware checks
 
         Returns:
             VerificationResult with pass/fail, details, and transformation hints
@@ -245,7 +249,13 @@ class Verifier:
 
         # Run verification passes
         semantic_result = self._verify_semantics(input_text, output_text, input_semantics)
-        style_result = self._verify_style(output_text, target_style)
+
+        # Use accumulated context for statistical style checks if available
+        style_result = self._verify_style(
+            output_text, target_style,
+            accumulated_context=accumulated_context,
+            position_in_document=position_in_document
+        )
         preservation_result = self._verify_preservation(input_semantics, output_text)
 
         # Determine overall pass/fail
@@ -261,8 +271,11 @@ class Verifier:
         )
 
         # Generate transformation hints based on structural analysis
+        # Pass accumulated context for document-aware hints
         transformation_hints = self._generate_transformation_hints(
-            input_text, output_text, style_result, target_style
+            input_text, output_text, style_result, target_style,
+            accumulated_context=accumulated_context,
+            position_in_document=position_in_document
         )
 
         # Calculate overall improvement score
@@ -302,17 +315,23 @@ class Verifier:
                                         input_text: str,
                                         output_text: str,
                                         style_result: StyleVerification,
-                                        target_style: Optional[StyleProfile]) -> List[TransformationHint]:
+                                        target_style: Optional[StyleProfile],
+                                        accumulated_context: Optional[str] = None,
+                                        position_in_document: Optional[Tuple[int, int]] = None) -> List[TransformationHint]:
         """
         Generate FOCUSED transformation hints for iterative refinement.
 
         Key principle: Fewer, more specific hints work better than many generic ones.
         We prioritize:
         1. AI fingerprints (must be removed)
-        2. Overused words (statistical issue)
-        3. Specific sentence rewrites (not generic pattern suggestions)
+        2. Overused words (statistical issue - checked against full document)
+        3. Position-appropriate style (opening vs closing paragraphs)
+        4. Specific sentence rewrites (not generic pattern suggestions)
         """
         hints = []
+
+        # Use accumulated context for document-wide statistics
+        text_for_statistics = accumulated_context if accumulated_context else output_text
 
         # CRITICAL: AI fingerprints first - these must be addressed
         ai_patterns = self._detect_ai_patterns(output_text)
@@ -327,22 +346,24 @@ class Verifier:
                 priority=1
             ))
 
-        # STATISTICAL: Overused words (priority 1 - very specific and actionable)
+        # STATISTICAL: Overused words checked against FULL DOCUMENT
         if self._stats_initialized:
-            _, stat_metrics = self.style_stats.score_text(output_text)
+            _, stat_metrics = self.style_stats.score_text(text_for_statistics)
             if 'overused_markers' in stat_metrics:
                 for marker, ratio in stat_metrics['overused_markers'][:3]:
-                    hints.append(TransformationHint(
-                        sentence_index=-1,
-                        current_text=marker,
-                        structural_role="document",
-                        expected_patterns=[],
-                        issue=f"🔄 '{marker}' used {ratio:.1f}x too often",
-                        suggestion=f"Replace {int(ratio-1)} instances of '{marker}' with 'thus', 'as a result', or remove",
-                        priority=1
-                    ))
+                    # Check if this paragraph specifically uses the overused word
+                    if marker.lower() in output_text.lower():
+                        hints.append(TransformationHint(
+                            sentence_index=-1,
+                            current_text=marker,
+                            structural_role="document",
+                            expected_patterns=[],
+                            issue=f"🔄 '{marker}' overused in document ({ratio:.1f}x) - AVOID in this paragraph",
+                            suggestion=f"Do NOT use '{marker}' here. Use 'thus', 'as a result', 'accordingly', or omit entirely.",
+                            priority=1
+                        ))
 
-            # Top 3 worst sentences by statistical match
+            # Top 3 worst sentences in current output
             rejections = self.style_stats.get_rejection_sentences(output_text, threshold=0.4)
             for sent, score, sent_issues in rejections[:3]:
                 short_sent = sent[:60] + "..." if len(sent) > 60 else sent
@@ -354,6 +375,35 @@ class Verifier:
                     issue=f"📊 Rewrite needed ({score:.0%}): {sent_issues[0] if sent_issues else 'style mismatch'}",
                     suggestion="REWRITE: make longer with subordinate clauses, or shorter if too complex",
                     priority=2
+                ))
+
+        # POSITION-AWARE hints
+        if position_in_document:
+            para_idx, total_paras = position_in_document
+            position_ratio = para_idx / max(total_paras - 1, 1) if total_paras > 1 else 0.5
+
+            # Opening paragraph guidance
+            if position_ratio < 0.2:
+                hints.append(TransformationHint(
+                    sentence_index=-1,
+                    current_text="",
+                    structural_role="paragraph_opener",
+                    expected_patterns=["declarative statement", "thesis establishment"],
+                    issue=f"📍 This is paragraph {para_idx+1}/{total_paras} (opening section)",
+                    suggestion="Use strong declarative opening. Avoid 'However', 'Furthermore'. State the main point directly.",
+                    priority=3
+                ))
+
+            # Closing paragraph guidance
+            elif position_ratio > 0.8:
+                hints.append(TransformationHint(
+                    sentence_index=-1,
+                    current_text="",
+                    structural_role="paragraph_closer",
+                    expected_patterns=["conclusion", "synthesis", "final statement"],
+                    issue=f"📍 This is paragraph {para_idx+1}/{total_paras} (closing section)",
+                    suggestion="Use concluding tone: 'Therefore', 'Thus', 'In the final analysis'. Synthesize the argument.",
+                    priority=3
                 ))
 
         # STYLE: Only add these if we're really struggling
@@ -544,9 +594,23 @@ class Verifier:
 
     def _verify_style(self,
                       output_text: str,
-                      target_style: Optional[StyleProfile]) -> StyleVerification:
-        """Verify output matches target style."""
+                      target_style: Optional[StyleProfile],
+                      accumulated_context: Optional[str] = None,
+                      position_in_document: Optional[Tuple[int, int]] = None) -> StyleVerification:
+        """
+        Verify output matches target style with full document awareness.
+
+        Args:
+            output_text: The current paragraph/text being verified
+            target_style: Target style profile
+            accumulated_context: Full transformed document so far (for statistical checks)
+            position_in_document: (current_index, total) for position-aware checks
+        """
         issues = []
+
+        # Use accumulated context for statistical analysis if available
+        # This ensures we catch overuse patterns across the whole document
+        text_for_statistics = accumulated_context if accumulated_context else output_text
 
         # Analyze output style
         output_style = self.style_analyzer.analyze(output_text)
@@ -638,18 +702,20 @@ class Verifier:
         if discourse_marker_usage < 0.3:
             issues.append("Discourse marker usage differs from target style")
 
-        # NEW: Statistical style verification
+        # NEW: Statistical style verification using FULL DOCUMENT CONTEXT
         statistical_score = 1.0
         if self._stats_initialized:
-            stat_score, stat_metrics = self.style_stats.score_text(output_text)
+            # Use accumulated context for document-wide statistics
+            # This catches overuse patterns across the whole document
+            stat_score, stat_metrics = self.style_stats.score_text(text_for_statistics)
             statistical_score = stat_score
 
-            # Check for overused markers
+            # Check for overused markers (now across full document)
             if 'overused_markers' in stat_metrics and stat_metrics['overused_markers']:
                 for marker, ratio in stat_metrics['overused_markers']:
-                    issues.append(f"🔄 OVERUSED: '{marker}' used {ratio:.1f}x more than sample")
+                    issues.append(f"🔄 OVERUSED (document-wide): '{marker}' used {ratio:.1f}x more than sample")
 
-            # Get sentences that should be rejected
+            # Get sentences that should be rejected from current output only
             rejections = self.style_stats.get_rejection_sentences(output_text, threshold=0.35)
             if rejections:
                 for sent, score, sent_issues in rejections[:3]:  # Top 3 problematic
@@ -657,6 +723,27 @@ class Verifier:
                     issues.append(f"📊 Low statistical match ({score:.2f}): '{short_sent}'")
                     for issue in sent_issues[:2]:
                         issues.append(f"     → {issue}")
+
+        # Position-aware checks: opening vs middle vs closing paragraphs have different expectations
+        if position_in_document:
+            para_idx, total_paras = position_in_document
+            position_ratio = para_idx / max(total_paras - 1, 1) if total_paras > 1 else 0.5
+
+            # Opening paragraph (first 20%) should be more declarative
+            if position_ratio < 0.2:
+                # Check for weak openers that don't suit an opening paragraph
+                output_lower = output_text.lower()
+                weak_openers = ['however', 'furthermore', 'additionally', 'moreover']
+                if any(output_lower.strip().startswith(w) for w in weak_openers):
+                    issues.append(f"📍 Position: Opening paragraph starts with continuation word")
+
+            # Closing paragraph (last 20%) should have concluding tone
+            elif position_ratio > 0.8:
+                output_lower = output_text.lower()
+                concluding_signals = ['therefore', 'thus', 'hence', 'in conclusion', 'finally', 'in the end']
+                has_conclusion = any(s in output_lower for s in concluding_signals)
+                if not has_conclusion and total_paras > 3:
+                    issues.append(f"📍 Position: Final paragraph lacks concluding tone")
 
         # Overall style match (now includes pattern metrics and statistics)
         overall_match = (
