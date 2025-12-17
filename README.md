@@ -68,9 +68,6 @@ The project uses `config.json` for configuration. Here's the complete structure:
     "editor_model": "deepseek-chat",
     "critic_model": "deepseek-chat"
   },
-  "sample": {
-    "file": "styles/sample_sagan.txt"
-  },
   "atlas": {
     "persist_path": "atlas_cache/",
     "collection_name": "style_atlas",
@@ -94,9 +91,6 @@ The project uses `config.json` for configuration. Here's the complete structure:
     "style_threshold": 1.0,
     "hallucination_threshold": 0.1,
     "llm_style_threshold": 0.75
-  },
-  "vocabulary": {
-    "similarity_threshold": 0.6
   },
   "blend": {
     "authors": ["Sagan"],
@@ -128,10 +122,6 @@ The project uses `config.json` for configuration. Here's the complete structure:
   - Reduces latency by keeping models loaded between API calls
   - Format: number followed by unit (`s` for seconds, `m` for minutes, `h` for hours)
   - Default: `"10m"` (10 minutes)
-
-#### Sample Text
-
-- **sample.file**: Path to the sample text file that defines the target style (relative to project root, typically in `styles/` folder)
 
 #### Style Atlas Settings
 
@@ -166,11 +156,6 @@ The project uses `config.json` for configuration. Here's the complete structure:
 - **scorer.style_threshold**: Maximum KL divergence for style matching (default: `1.0`, lower is stricter)
 - **scorer.hallucination_threshold**: Maximum hallucination score (0-1) to pass (default: `0.1`, lower is stricter)
 - **scorer.llm_style_threshold**: Minimum LLM-based style match score (0-1) to pass (default: `0.75`)
-
-#### Vocabulary Settings
-
-- **vocabulary.similarity_threshold**: Minimum cosine similarity (0-1) for word clustering in vocabulary mapping (default: `0.6`)
-  - Lower values allow more word matches (e.g., `0.6` is more lenient than `0.7`)
 
 #### Style Blending Settings
 

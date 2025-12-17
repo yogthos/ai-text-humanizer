@@ -8,7 +8,24 @@ import json
 import re
 import requests
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set, TYPE_CHECKING
+
+# Initialize NLTK data if needed
+try:
+    import nltk
+    try:
+        nltk.data.find('tokenizers/punkt')
+        nltk.data.find('taggers/averaged_perceptron_tagger_eng')
+    except LookupError:
+        nltk.download('punkt', quiet=True)
+        nltk.download('averaged_perceptron_tagger_eng', quiet=True)
+except ImportError:
+    # NLTK not available, will use fallback logic
+    nltk = None
+
+if TYPE_CHECKING:
+    from src.atlas.builder import StyleAtlas
+    from src.atlas.navigator import StructureNavigator
 
 
 def _load_prompt_template(template_name: str) -> str:
@@ -148,6 +165,68 @@ def _call_ollama_api(
         raise RuntimeError(f"Ollama API request failed: {e}")
 
 
+def _detect_hallucinated_words(generated_text: str, original_text: str) -> Tuple[bool, List[str]]:
+    """Detect proper nouns and capitalized words in generated text that don't appear in original.
+
+    This is a "Hard Gate" to catch hallucinations before the LLM critic evaluates the text.
+    Prevents the LLM from inventing names, entities, or facts not in the original.
+
+    Args:
+        generated_text: The generated text to check.
+        original_text: The original input text.
+
+    Returns:
+        Tuple of (has_hallucinations, list_of_hallucinated_words)
+    """
+    if not original_text:
+        return False, []
+
+    # Use NLTK if available (more accurate), otherwise fallback to simple check
+    if nltk is not None:
+        try:
+            from nltk.tokenize import word_tokenize
+            from nltk.tag import pos_tag
+
+            gen_tokens = word_tokenize(generated_text)
+            orig_tokens = word_tokenize(original_text)
+
+            gen_pos = pos_tag(gen_tokens)
+            orig_words_lower = {w.lower() for w in orig_tokens}
+            orig_proper_nouns = {w for w in orig_tokens if w[0].isupper() and len(w) > 1}
+
+            hallucinated = []
+            for word, tag in gen_pos:
+                if tag == 'NNP' and word[0].isupper() and len(word) > 1:
+                    # Check if this proper noun appears in original
+                    if word not in orig_proper_nouns and word.lower() not in orig_words_lower:
+                        hallucinated.append(word)
+
+            return len(hallucinated) > 0, hallucinated
+        except Exception:
+            # NLTK failed, fall through to fallback
+            pass
+
+    # Fallback: simple check for capitalized words
+    gen_words = generated_text.split()
+    orig_words = original_text.split()
+    orig_lower = {w.lower() for w in orig_words}
+    orig_capitalized = {w for w in orig_words if w[0].isupper() and len(w) > 1}
+
+    hallucinated = []
+    for word in gen_words:
+        # Check for capitalized words that might be proper nouns
+        if word[0].isupper() and len(word) > 1:
+            # Remove punctuation for comparison
+            word_clean = word.rstrip('.,;:!?')
+            # Check if it's in original (exact match or lowercase match)
+            if word_clean not in orig_capitalized and word_clean.lower() not in orig_lower:
+                # Additional check: skip if it's likely a sentence start (first word of sentence)
+                # This is a heuristic - we're being strict to prevent hallucinations
+                hallucinated.append(word_clean)
+
+    return len(hallucinated) > 0, hallucinated
+
+
 def critic_evaluate(
     generated_text: str,
     structure_match: str,
@@ -191,6 +270,18 @@ def critic_evaluate(
         keep_alive = ollama_config.get("keep_alive", "10m")
     else:
         raise ValueError(f"Unsupported provider: {provider}")
+
+    # HARD GATE: Check for hallucinated words before LLM evaluation
+    # This deterministic check catches hallucinations that the LLM might miss
+    if original_text:
+        has_hallucinations, hallucinated_words = _detect_hallucinated_words(generated_text, original_text)
+        if has_hallucinations:
+            return {
+                "pass": False,
+                "feedback": f"CRITICAL: Text contains words that do not appear in original: {', '.join(hallucinated_words)}. Remove all words not present in original text.",
+                "score": 0.0,
+                "primary_failure_type": "meaning"
+            }
 
     # Load system prompt from template
     system_prompt = _load_prompt_template("critic_system.md")
@@ -633,7 +724,11 @@ def generate_with_critic(
     config_path: str = "config.json",
     max_retries: int = 3,
     min_score: float = 0.75,
-    use_fallback_structure: bool = False
+    use_fallback_structure: bool = False,
+    atlas: Optional['StyleAtlas'] = None,
+    target_cluster_id: Optional[int] = None,
+    structure_navigator: Optional['StructureNavigator'] = None,
+    similarity_threshold: float = 0.3
 ) -> Tuple[str, Dict[str, any]]:
     """Generate text with adversarial critic loop.
 
@@ -678,6 +773,10 @@ def generate_with_critic(
     current_structure = structure_match
     structure_dropped = use_fallback_structure
 
+    # Track tried structure matches
+    tried_structure_matches: Set[str] = set()
+    tried_structure_matches.add(structure_match)
+
     # Track separate counters for generation and editing
     current_text = None
     is_edited = False
@@ -699,6 +798,59 @@ def generate_with_critic(
             structure_dropped = True
             current_structure = None  # Signal to use fallback
             should_regenerate = True  # Force regeneration with new structure
+
+        # Structure Match Refresh: When convergence is failing, try alternative matches
+        should_refresh_structure = False
+        refresh_triggered = False
+
+        # Trigger conditions:
+        # 1. After 2+ attempts with very low score (< 0.5)
+        # 2. After 3+ attempts with score below good_enough_threshold
+        if generation_attempts >= 2 and best_score < 0.5:
+            should_refresh_structure = True
+            print(f"    🔄 Low score ({best_score:.3f}) after {generation_attempts} attempts. Triggering structure refresh...")
+        elif generation_attempts >= 3 and best_score < good_enough_threshold:
+            should_refresh_structure = True
+            print(f"    🔄 Score ({best_score:.3f}) below threshold after {generation_attempts} attempts. Triggering structure refresh...")
+
+        if should_refresh_structure and atlas and target_cluster_id is not None:
+            from src.atlas.navigator import find_structure_match
+            print(f"    🔄 Retrieving alternative structure match (excluding {len(tried_structure_matches)} tried matches)...")
+
+            # Try to get a different structure match with distance weighting
+            new_structure_match = None
+            max_refresh_attempts = 5
+            failed_structure = current_structure if current_structure else structure_match
+
+            for refresh_attempt in range(max_refresh_attempts):
+                candidate = find_structure_match(
+                    atlas,
+                    target_cluster_id,
+                    input_text=content_unit.original_text,
+                    length_tolerance=0.3,
+                    top_k=10,  # Get more candidates
+                    navigator=structure_navigator,
+                    exclude_texts=tried_structure_matches,  # Exclude tried matches
+                    prefer_different_from=failed_structure  # Prefer different structure
+                )
+
+                if candidate and candidate not in tried_structure_matches:
+                    new_structure_match = candidate
+                    tried_structure_matches.add(candidate)
+                    print(f"    ✓ Retrieved alternative structure match ({refresh_attempt + 1}): {candidate[:80]}...")
+                    break
+
+            if new_structure_match:
+                current_structure = new_structure_match
+                structure_dropped = False  # Reset fallback mode with new structure
+                should_regenerate = True
+                # Reset counters to give new structure a fair chance
+                generation_attempts = 0
+                feedback_history = []  # Clear feedback history for fresh start
+                refresh_triggered = True
+                print(f"    ✓ Switched to alternative structure match. Resetting generation counter.")
+            else:
+                print(f"    ⚠ No alternative structure matches available. Continuing with current structure.")
 
         # Phase 1: Generate (Generator Mode) - Only when needed
         if current_text is None or should_regenerate:

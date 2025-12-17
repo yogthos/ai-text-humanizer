@@ -341,12 +341,27 @@ def build_style_atlas(
     else:
         prefixed_ids = window_ids
 
-    collection.add(
-        ids=prefixed_ids,
-        embeddings=semantic_embeddings,
-        documents=texts,
-        metadatas=metadatas
-    )
+    # ChromaDB has a maximum batch size limit (typically around 5000-6000 items)
+    # Split into batches to avoid "Batch size exceeds max batch size" error
+    batch_size = 5000  # Safe batch size for ChromaDB
+    total_items = len(prefixed_ids)
+
+    for batch_start in range(0, total_items, batch_size):
+        batch_end = min(batch_start + batch_size, total_items)
+        batch_ids = prefixed_ids[batch_start:batch_end]
+        batch_embeddings = semantic_embeddings[batch_start:batch_end]
+        batch_documents = texts[batch_start:batch_end]
+        batch_metadatas = metadatas[batch_start:batch_end]
+
+        collection.add(
+            ids=batch_ids,
+            embeddings=batch_embeddings,
+            documents=batch_documents,
+            metadatas=batch_metadatas
+        )
+
+        if batch_end < total_items:
+            print(f"  Processed {batch_end}/{total_items} windows...")
 
     # Create cluster_id mapping using prefixed IDs
     cluster_ids = {prefixed_id: int(cluster_labels[idx])

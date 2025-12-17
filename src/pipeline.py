@@ -472,7 +472,11 @@ def process_text(
                                     situation_match=situation_match,
                                     config_path=config_path,
                                     max_retries=critic_max_retries,
-                                    min_score=adaptive_min_score  # Use adaptive threshold
+                                    min_score=adaptive_min_score,  # Use adaptive threshold
+                                    atlas=atlas,
+                                    target_cluster_id=current_cluster,
+                                    structure_navigator=structure_navigator,
+                                    similarity_threshold=similarity_threshold
                                 )
 
                                 score = critic_result.get("score", 0.0)
@@ -489,8 +493,33 @@ def process_text(
                                 # If score too low and we have more retries, continue
                                 if pipeline_attempt < critic_max_pipeline_retries:
                                     print(f"    ⚠ Score {score:.3f} below pipeline threshold {critic_min_pipeline_score}, retrying...")
-                                    # Optionally refresh structure/situation matches for next attempt
-                                    # (keeping same matches for now, but could refresh)
+                                    # Refresh structure/situation matches for next attempt
+                                    print(f"    🔄 Refreshing structure and situation matches at pipeline level...")
+
+                                    # Refresh structure match (only in single-author mode, blend mode uses different logic)
+                                    if not is_blend_mode:
+                                        if window_matches and unit_idx_in_chunk < len(window_matches):
+                                            _, structure_match = window_matches[unit_idx_in_chunk]
+                                            print(f"    Retrieved new structure match from window (rhythm): {structure_match[:80]}...")
+                                        else:
+                                            structure_match = find_structure_match(
+                                                atlas,
+                                                current_cluster,
+                                                input_text=content_unit.original_text,
+                                                length_tolerance=0.3,
+                                                navigator=structure_navigator
+                                            )
+                                            if structure_match:
+                                                print(f"    Retrieved new structure match (rhythm): {structure_match[:80]}...")
+
+                                    # Refresh situation match
+                                    situation_match = find_situation_match(
+                                        atlas,
+                                        content_unit.original_text,
+                                        similarity_threshold=similarity_threshold
+                                    )
+                                    if situation_match:
+                                        print(f"    Retrieved new situation match (vocabulary): {situation_match[:80]}...")
                                 else:
                                     # Last attempt, accept what we have but warn
                                     print(f"    ⚠ Final score {score:.3f} below pipeline threshold {critic_min_pipeline_score} after all retries")

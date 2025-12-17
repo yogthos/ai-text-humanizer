@@ -13,7 +13,7 @@ import random
 import math
 import json
 import numpy as np
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 from collections import defaultdict
 
 from src.atlas.builder import StyleAtlas
@@ -70,6 +70,31 @@ def is_valid_structural_template(text: str) -> bool:
             return False
 
     return True
+
+
+def _calculate_structural_distance(candidate: Dict, reference: str) -> float:
+    """Calculate structural distance between candidate and reference.
+
+    Returns a distance score (0.0 = identical, higher = more different).
+    Prefers candidates that are structurally different from failed ones.
+
+    Args:
+        candidate: Candidate dict with 'text' and 'word_count' keys.
+        reference: Reference text string to compare against.
+
+    Returns:
+        Distance score (0.0 to 1.0, where 1.0 is maximum difference).
+    """
+    # Calculate word count difference
+    ref_word_count = len(reference.split())
+    cand_word_count = candidate.get('word_count', len(candidate.get('text', '').split()))
+    word_diff = abs(cand_word_count - ref_word_count)
+
+    # Normalize to 0-1 range (assuming max difference of 50 words)
+    word_distance = min(word_diff / 50.0, 1.0)
+
+    # Could add sentence count difference, punctuation pattern, etc.
+    return word_distance
 
 
 class StructureNavigator:
@@ -474,7 +499,9 @@ def find_structure_match(
     input_text: str,
     length_tolerance: float = 0.3,
     top_k: int = 1,
-    navigator: Optional[StructureNavigator] = None
+    navigator: Optional[StructureNavigator] = None,
+    exclude_texts: Optional[Set[str]] = None,
+    prefer_different_from: Optional[str] = None
 ) -> Optional[str]:
     """Find a paragraph matching the target style cluster for rhythm/structure.
 
@@ -569,6 +596,10 @@ def find_structure_match(
         if not is_valid_structural_template(doc):
             continue
 
+        # Exclude tried matches (check early to avoid unnecessary computation)
+        if exclude_texts and doc in exclude_texts:
+            continue
+
         # Gaussian Length Penalty: Score candidates based on length similarity
         # score = 1.0 / (1.0 + abs(log(len_ratio)))
         # This gives a huge boost to exact matches and massive penalty to mismatches
@@ -580,6 +611,17 @@ def find_structure_match(
         # For now, we use length_penalty as the quality score
         # (In future, could multiply by vector_similarity if we have it)
         quality_score = length_penalty
+
+        # Distance weighting - prefer structurally different candidates
+        if prefer_different_from:
+            structural_distance = _calculate_structural_distance(
+                {'text': doc, 'word_count': cand_word_count},
+                prefer_different_from
+            )
+            # Boost candidates that are different (distance 0.5-1.0 get bonus)
+            # This helps when the original match was too short/long
+            if structural_distance > 0.3:
+                quality_score *= (1.0 + structural_distance * 0.5)  # Up to 50% bonus
 
         candidates.append((doc, len_ratio, cand_word_count))
         candidate_dicts.append({
