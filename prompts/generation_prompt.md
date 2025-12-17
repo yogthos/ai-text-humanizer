@@ -64,8 +64,5 @@ ABSOLUTE PRESERVATION REQUIREMENTS (MANDATORY):
 - DO NOT modify, paraphrase, or change any quoted text
 - These elements are non-negotiable and must appear in your output unchanged
 
-STRICT NEGATIVE CONSTRAINTS:
-Do not use these words: {banned_words}.
-
 OUTPUT:
 

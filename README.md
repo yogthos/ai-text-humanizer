@@ -51,11 +51,16 @@ python3 -m spacy download en_core_web_sm
 
 ## Configuration
 
-The project uses `config.json` for configuration. Here's the structure:
+The project uses `config.json` for configuration. Here's the complete structure:
 
 ```json
 {
   "provider": "deepseek",
+  "ollama": {
+    "url": "http://localhost:11434/api/generate",
+    "editor_model": "qwen3:32b",
+    "critic_model": "deepseek-r1:8b"
+  },
   "deepseek": {
     "api_key": "your-api-key-here",
     "api_url": "https://api.deepseek.com/v1/chat/completions",
@@ -63,25 +68,57 @@ The project uses `config.json` for configuration. Here's the structure:
     "critic_model": "deepseek-chat"
   },
   "sample": {
-    "file": "prompts/sample_mao.txt"
+    "file": "prompts/sample_sagan.txt"
   },
   "atlas": {
     "persist_path": "atlas_cache/",
-    "num_clusters": 5
+    "num_clusters": 5,
+    "similarity_threshold": 0.3
+  },
+  "critic": {
+    "min_score": 0.75,
+    "min_pipeline_score": 0.6,
+    "max_retries": 5,
+    "max_pipeline_retries": 2
   }
 }
 ```
 
 ### Configuration Options
 
+#### Provider Settings
+
 - **provider**: LLM provider to use (`"deepseek"` or `"ollama"`)
+
+#### DeepSeek Configuration
+
 - **deepseek.api_key**: Your DeepSeek API key (get one at https://platform.deepseek.com)
-- **deepseek.api_url**: DeepSeek API endpoint (usually the default)
+- **deepseek.api_url**: DeepSeek API endpoint (default: `"https://api.deepseek.com/v1/chat/completions"`)
 - **deepseek.editor_model**: Model for text generation (default: `"deepseek-chat"`)
 - **deepseek.critic_model**: Model for critic evaluation (default: `"deepseek-chat"`)
-- **sample.file**: Path to the sample text file that defines the target style
-- **atlas.persist_path**: Directory to cache/load Style Atlas (optional)
-- **atlas.num_clusters**: Number of K-means clusters for style grouping (default: 5)
+
+#### Ollama Configuration (Alternative Provider)
+
+- **ollama.url**: Ollama API endpoint (default: `"http://localhost:11434/api/generate"`)
+- **ollama.editor_model**: Model name for text generation (e.g., `"qwen3:32b"`)
+- **ollama.critic_model**: Model name for critic evaluation (e.g., `"deepseek-r1:8b"`)
+
+#### Sample Text
+
+- **sample.file**: Path to the sample text file that defines the target style (relative to project root)
+
+#### Style Atlas Settings
+
+- **atlas.persist_path**: Directory to cache/load Style Atlas (optional, speeds up subsequent runs)
+- **atlas.num_clusters**: Number of K-means clusters for style grouping (default: `5`, recommended: 3-7)
+- **atlas.similarity_threshold**: Minimum similarity score (0-1) for situation match retrieval (default: `0.3`, lower = more matches)
+
+#### Critic Settings
+
+- **critic.min_score**: Minimum score (0-1) required for critic to accept generated text (default: `0.75`)
+- **critic.min_pipeline_score**: Minimum score (0-1) for pipeline-level acceptance (default: `0.6`, more lenient than min_score)
+- **critic.max_retries**: Maximum retry attempts per sentence within critic loop (default: `5`)
+- **critic.max_pipeline_retries**: Maximum retry attempts at pipeline level when score is below threshold (default: `2`)
 
 ### Getting an API Key
 
@@ -110,6 +147,9 @@ python3 restyle.py input/small.md -o output/small.md --sample prompts/custom_sam
 # Cache the Style Atlas for faster subsequent runs
 python3 restyle.py input/small.md -o output/small.md --atlas-cache atlas_data/
 
+# Clear ChromaDB when switching to a different sample text
+python3 restyle.py input/small.md -o output/small.md --clear-db
+
 # Adjust retry settings
 python3 restyle.py input/small.md -o output/small.md --max-retries 5
 
@@ -123,8 +163,9 @@ python3 restyle.py input/small.md -o output/small.md -v
 - `-o, --output`: Output file path (required)
 - `-s, --sample`: Sample text file defining target style (optional, uses config.json default)
 - `-c, --config`: Configuration file path (default: `config.json`)
-- `--max-retries`: Maximum retry attempts per sentence (default: 3)
+- `--max-retries`: Maximum retry attempts per sentence (default: 3, overrides config.json)
 - `--atlas-cache`: Path to directory for persisting/loading Style Atlas (optional)
+- `--clear-db`: Clear ChromaDB collection before building atlas (use when switching sample texts)
 - `-v, --verbose`: Enable verbose output
 
 ### Python API
@@ -175,7 +216,13 @@ text-style-transfer/
 ├── tests/                      # Test files
 ├── input/                      # Input text files
 ├── output/                     # Generated output files
-├── prompts/                    # Sample style files
+├── prompts/                    # Sample style files and prompt templates
+│   ├── sample_*.txt           # Sample style text files
+│   ├── generator_system.md    # Generator system prompt template
+│   ├── generator_examples.md  # Generator examples template
+│   ├── generation_prompt.md   # Generation prompt template
+│   ├── critic_system.md       # Critic system prompt template
+│   └── critic_user.md         # Critic user prompt template
 ├── config.json                 # Configuration file
 ├── requirements.txt            # Python dependencies
 └── restyle.py                 # CLI entry point
@@ -250,17 +297,28 @@ flowchart TD
 
 4. **Dual RAG Retrieval**:
    - **Situation Match**: Queries ChromaDB by semantic similarity to find paragraphs about similar topics (vocabulary grounding)
+     - Uses configurable `similarity_threshold` (default: 0.3) to filter matches
    - **Structure Match**: Queries ChromaDB by cluster ID and filters by length ratio (0.7x-1.5x) to find rhythm/structure examples
+     - Uses stochastic selection with history tracking to prevent repetition
+     - Prefers candidates with better length matches
 
 5. **Constrained Generation**: Uses LLM with RAG-based prompts that:
    - Explicitly separate vocabulary guidance (from situation match) and structure guidance (from structure match)
+   - Include detailed structure analysis (punctuation, clauses, voice, complexity)
    - Include length constraints to prevent expansion (1:1 sentence mapping)
-   - Prohibit "AI slop" words and hallucination
+   - Preserve citations `[^number]` and direct quotations exactly
+   - Use low temperature (0.1) for precise structure matching
+   - Load prompts from markdown templates for easy customization
 
 6. **Adversarial Validation**:
    - Critic LLM evaluates generated text against both structure and situation matches
-   - Provides specific feedback on vocabulary and structure mismatches
-   - Retries up to 3 times with feedback until quality threshold is met
+   - Provides specific, actionable feedback formatted as numbered action items
+   - Accumulates feedback across retry attempts for cumulative hints
+   - Two-level retry system:
+     - **Critic-level retries**: Up to `critic.max_retries` attempts per sentence
+     - **Pipeline-level retries**: Up to `critic.max_pipeline_retries` attempts when score is below threshold
+   - Adaptive threshold adjustment when structure matches are poor quality
+   - Enforces minimum score thresholds with `ConvergenceError` if not met
 
 ## Testing
 
@@ -297,6 +355,46 @@ Note: Some tests require a valid API key in `config.json` and will be skipped if
 
 See `requirements.txt` for complete list and versions.
 
+## Prompt Templates
+
+The system uses markdown template files in the `prompts/` directory for all LLM prompts. This makes it easy to customize prompts without modifying code.
+
+### Generator Prompts
+
+- **`prompts/generator_system.md`**: System message defining the generator's role and directives
+  - Template variable: `{author_name}` - Target author name
+- **`prompts/generator_examples.md`**: Examples section added to system message
+  - Shows good vs bad examples of style transfer
+  - Demonstrates structure matching requirements
+- **`prompts/generation_prompt.md`**: Main generation prompt template
+  - Template variables:
+    - `{structure_match}` - Structural reference text
+    - `{structure_instructions}` - Formatted structure analysis
+    - `{situation_match_label}` - Label for situational reference
+    - `{situation_match_content}` - Situational reference content
+    - `{vocab_block}` - Global vocabulary injection block
+    - `{input_text}` - Original input text
+    - `{input_word_count}` - Input word count
+    - `{target_word_count}` - Target output word count
+    - `{avg_sentence_len}` - Average sentence length from structure match
+
+### Critic Prompts
+
+- **`prompts/critic_system.md`**: System message for the critic evaluator
+  - Defines evaluation criteria and output format
+- **`prompts/critic_user.md`**: User prompt template for critic evaluation
+  - Template variables:
+    - `{structure_section}` - Structural reference section
+    - `{situation_section}` - Situational reference section
+    - `{original_section}` - Original text section (if provided)
+    - `{generated_text}` - Generated text to evaluate
+    - `{preservation_checks}` - Conditional preservation requirements
+    - `{preservation_instruction}` - Conditional preservation instructions
+
+### Customizing Prompts
+
+To customize prompts, edit the corresponding markdown file in `prompts/`. The system will automatically load the updated templates on the next run. Template variables use Python's `.format()` syntax with curly braces `{variable_name}`.
+
 ## Troubleshooting
 
 ### API Key Issues
@@ -319,6 +417,8 @@ If you see ChromaDB errors:
 - Ensure Python 3.12+ is being used (required for ChromaDB compatibility)
 - Try rebuilding the virtual environment: `python3.12 -m venv venv`
 - Check that `onnxruntime` is installed (required dependency)
+- If switching between different sample texts, use `--clear-db` to clear old embeddings
+- If ChromaDB collection is corrupted, delete the `atlas_cache/` directory and rebuild
 
 ### Import Errors
 
@@ -328,9 +428,13 @@ Make sure you're running from the project root directory and the virtual environ
 
 The pipeline includes retry mechanisms, but if output quality is consistently low:
 - Try a longer or more representative sample text
-- Increase `max_retries` (default: 3)
+- Adjust critic thresholds in `config.json`:
+  - Lower `critic.min_score` (default: 0.75) to be more lenient
+  - Increase `critic.max_retries` (default: 5) for more attempts
+- Lower `atlas.similarity_threshold` (default: 0.3) to get more situation matches
 - Ensure the sample text has sufficient variety in style
-- Check that the Style Atlas is being built correctly (check logs)
+- Check that the Style Atlas is being built correctly (check logs with `-v`)
+- Review prompt templates in `prompts/` - they may need adjustment for your use case
 
 ### Length Expansion Issues
 
