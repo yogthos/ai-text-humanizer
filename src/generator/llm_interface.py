@@ -76,6 +76,62 @@ def _call_deepseek_api(
         raise RuntimeError(f"API request failed: {e}")
 
 
+def _call_ollama_api(
+    system_prompt: str,
+    user_prompt: str,
+    api_url: str,
+    model: str,
+    keep_alive: str = "10m"
+) -> str:
+    """Call Ollama API to generate text.
+
+    Args:
+        system_prompt: System prompt for the LLM.
+        user_prompt: User prompt with the request.
+        api_url: Ollama API URL (should be /api/chat endpoint).
+        model: Model name to use.
+        keep_alive: How long to keep model in memory (e.g., "10m", "5m", "-1" for infinite).
+
+    Returns:
+        Generated text response.
+    """
+    # Convert /api/generate to /api/chat if needed
+    if api_url.endswith("/api/generate"):
+        api_url = api_url.replace("/api/generate", "/api/chat")
+    elif not api_url.endswith("/api/chat"):
+        # If neither, assume it's a base URL and append /api/chat
+        api_url = api_url.rstrip("/") + "/api/chat"
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "options": {
+            "temperature": 0.1,  # Very low temperature for precise structure matching
+            "num_predict": 200  # Max tokens
+        },
+        "keep_alive": keep_alive  # Keep model in VRAM to avoid reload latency
+    }
+
+    try:
+        response = requests.post(api_url, headers=headers, json=data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+
+        if "message" in result and "content" in result["message"]:
+            return result["message"]["content"].strip()
+        else:
+            raise ValueError(f"Unexpected API response: {result}")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Ollama API request failed: {e}")
+
+
 def generate_sentence(
     content_unit: ContentUnit,
     structure_match: str,
@@ -119,6 +175,11 @@ def generate_sentence(
 
         if not api_key or not api_url:
             raise ValueError("DeepSeek API key or URL not found in config")
+    elif provider == "ollama":
+        ollama_config = config.get("ollama", {})
+        api_url = ollama_config.get("url", "http://localhost:11434/api/chat")
+        model = ollama_config.get("editor_model", "mistral-nemo")
+        keep_alive = ollama_config.get("keep_alive", "10m")
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
@@ -198,7 +259,12 @@ def generate_sentence(
             user_prompt += "\n\nCRITICAL: The length constraint above is a hard requirement. You MUST follow the exact word count instruction."
 
     # Call API
-    generated_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model)
+    if provider == "deepseek":
+        generated_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model)
+    elif provider == "ollama":
+        generated_text = _call_ollama_api(system_prompt, user_prompt, api_url, model, keep_alive)
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
 
     # Parse CoT response if hint was provided (retry mode)
     if hint:

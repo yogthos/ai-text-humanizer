@@ -5,15 +5,19 @@ This module provides functions to:
 2. Predict next style cluster
 3. Retrieve style reference paragraphs from ChromaDB
 4. Stochastic selection with history tracking to prevent repetition
+5. Sliding window retrieval for contextual rhythm matching
 """
 
 import re
 import random
+import math
+import json
 import numpy as np
 from typing import Dict, Optional, Tuple, List
 from collections import defaultdict
 
 from src.atlas.builder import StyleAtlas
+from src.analyzer.style_metrics import get_style_vector
 
 
 def is_valid_structural_template(text: str) -> bool:
@@ -328,6 +332,142 @@ def find_situation_match(
     return None
 
 
+def retrieve_window_match(
+    atlas: StyleAtlas,
+    input_sentences: List[str],
+    target_cluster_id: Optional[int] = None,
+    similarity_threshold: float = 0.3
+) -> Optional[List[Tuple[str, str]]]:
+    """Retrieve a matching window and "zip" skeletons onto input sentences.
+
+    This implements the "Zipper" method: retrieves a window of 3 sentences
+    from the sample that matches the flow of the input, then maps each
+    skeleton (sentence template) to each input sentence.
+
+    Args:
+        atlas: StyleAtlas containing ChromaDB collection.
+        input_sentences: List of input sentence strings (typically 3).
+        target_cluster_id: Optional target cluster ID to filter by.
+        similarity_threshold: Minimum similarity threshold for matching.
+
+    Returns:
+        List of tuples (input_sentence, skeleton_template) if match found,
+        or None if no suitable window found.
+    """
+    if not input_sentences:
+        return None
+
+    if not hasattr(atlas, '_collection'):
+        try:
+            if hasattr(atlas, '_client'):
+                atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
+            else:
+                return None
+        except:
+            return None
+
+    collection = atlas._collection
+
+    # Combine input into a block to find a "Flow Match"
+    input_block = " ".join(input_sentences)
+    input_word_count = len(input_block.split())
+
+    # Generate style vector for the input block
+    input_style_vec = get_style_vector(input_block)
+
+    # Query for matching windows by semantic similarity
+    try:
+        # Get all documents first
+        all_results = collection.get()
+
+        if not all_results['ids'] or len(all_results['ids']) == 0:
+            return None
+
+        # Filter and score candidates
+        candidates = []
+        for idx, window_id in enumerate(all_results['ids']):
+            metadata = all_results['metadatas'][idx] if all_results['metadatas'] else {}
+
+            # Filter by cluster if specified
+            if target_cluster_id is not None:
+                cluster_id = metadata.get('cluster_id')
+                if cluster_id != target_cluster_id:
+                    continue
+
+            # Get window text and skeletons
+            window_text = all_results['documents'][idx] if all_results['documents'] else None
+            if not window_text:
+                continue
+
+            # Parse skeletons from metadata (stored as JSON string)
+            skeletons_json = metadata.get('skeletons', '[]')
+            try:
+                skeletons = json.loads(skeletons_json)
+            except (json.JSONDecodeError, TypeError):
+                # Fallback: if skeletons not available, skip this window
+                continue
+
+            if not skeletons or len(skeletons) == 0:
+                continue
+
+            # Calculate length similarity
+            window_word_count = metadata.get('word_count', len(window_text.split()))
+            if input_word_count > 0:
+                len_ratio = window_word_count / input_word_count
+            else:
+                len_ratio = 1.0
+
+            # Apply hard cap: only consider windows within 0.5x to 2.0x length
+            if len_ratio < 0.5 or len_ratio > 2.0:
+                continue
+
+            # Calculate Gaussian length penalty
+            if len_ratio > 0:
+                length_penalty = 1.0 / (1.0 + abs(math.log(len_ratio)))
+            else:
+                length_penalty = 0.0
+
+            # For now, use length penalty as quality score
+            # (Could enhance with semantic similarity if needed)
+            quality_score = length_penalty
+
+            candidates.append({
+                'id': window_id,
+                'text': window_text,
+                'skeletons': skeletons,
+                'word_count': window_word_count,
+                'len_ratio': len_ratio,
+                'quality_score': quality_score,
+                'metadata': metadata
+            })
+
+        if not candidates:
+            return None
+
+        # Sort by quality score (Gaussian length penalty)
+        candidates.sort(key=lambda x: x.get('quality_score', 0.0), reverse=True)
+
+        # Select best matching window
+        best_window = candidates[0]
+        skeletons = best_window['skeletons']
+
+        # The Zipper: Map skeletons to input sentences
+        # If input has N sentences and window has M skeletons, map 1:1 up to min(N, M)
+        mapped_pairs = []
+        for i, input_sent in enumerate(input_sentences):
+            if i < len(skeletons):
+                mapped_pairs.append((input_sent, skeletons[i]))
+            else:
+                # If more input sentences than skeletons, use last skeleton
+                mapped_pairs.append((input_sent, skeletons[-1]))
+
+        return mapped_pairs
+
+    except Exception as e:
+        # Collection might not exist or be empty
+        return None
+
+
 def find_structure_match(
     atlas: StyleAtlas,
     target_cluster_id: int,
@@ -420,92 +560,61 @@ def find_structure_match(
         else:
             sent_ratio = 1.0
 
-        # Accept candidates within tolerance (0.7x to 1.5x)
-        # But prefer candidates closer to 1.0x (exact match)
-        min_ratio = 1.0 - length_tolerance
-        max_ratio = 1.0 + length_tolerance
+        # Hard Cap: Only consider candidates within 0.5x to 2.0x length
+        # This prevents "Procrustean Bed" problem where we try to force incompatible lengths
+        if len_ratio < 0.5 or len_ratio > 2.0:
+            continue
 
-        if min_ratio <= len_ratio <= max_ratio:
-            # Filter out invalid structural templates (titles, headers, fragments)
-            if is_valid_structural_template(doc):
-                candidates.append((doc, len_ratio, cand_word_count))
-                # Create candidate dict for navigator with quality score
-                # Quality score: 1.0 for perfect match, decreases as ratio deviates
-                quality_score = 1.0 / (abs(len_ratio - 1.0) + 0.1)  # Higher score = better match
-                candidate_dicts.append({
-                    'id': para_id,
-                    'text': doc,
-                    'word_count': cand_word_count,
-                    'len_ratio': len_ratio,
-                    'quality_score': quality_score
-                })
+        # Filter out invalid structural templates (titles, headers, fragments)
+        if not is_valid_structural_template(doc):
+            continue
+
+        # Gaussian Length Penalty: Score candidates based on length similarity
+        # score = 1.0 / (1.0 + abs(log(len_ratio)))
+        # This gives a huge boost to exact matches and massive penalty to mismatches
+        if len_ratio > 0:
+            length_penalty = 1.0 / (1.0 + abs(math.log(len_ratio)))
+        else:
+            length_penalty = 0.0
+
+        # For now, we use length_penalty as the quality score
+        # (In future, could multiply by vector_similarity if we have it)
+        quality_score = length_penalty
+
+        candidates.append((doc, len_ratio, cand_word_count))
+        candidate_dicts.append({
+            'id': para_id,
+            'text': doc,
+            'word_count': cand_word_count,
+            'len_ratio': len_ratio,
+            'quality_score': quality_score
+        })
+
+    # Hard Cap: If no candidates exist within 0.5x to 2.0x length, return None
+    # Do not force a bad match
+    if not candidate_dicts:
+        return None
 
     # If navigator is provided, use stochastic selection
     if navigator:
-        # If we have length-matched candidates, use those (preferred)
-        if candidate_dicts:
-            # Sort by how close len_ratio is to 1.0
-            candidate_dicts.sort(key=lambda x: abs(x.get('len_ratio', 1.0) - 1.0))
-            top_candidates = candidate_dicts[:10]
-        else:
-            # No length-matched candidates, but we still want to use navigator
-            # Get all candidates from the cluster (without length filtering)
-            all_cluster_candidates = []
-            for idx, para_id in enumerate(all_results['ids']):
-                metadata = all_results['metadatas'][idx] if all_results['metadatas'] else {}
-                cluster_id = metadata.get('cluster_id')
-                if cluster_id == target_cluster_id:
-                    doc = all_results['documents'][idx] if all_results['documents'] else None
-                    if doc and is_valid_structural_template(doc):
-                        cand_word_count = metadata.get('word_count', len(doc.split()))
-                        all_cluster_candidates.append({
-                            'id': para_id,
-                            'text': doc,
-                            'word_count': cand_word_count,
-                            'len_ratio': cand_word_count / input_word_count if input_word_count > 0 else 1.0
-                        })
-
-            # Sort by length similarity to input
-            all_cluster_candidates.sort(key=lambda x: abs(x.get('word_count', 0) - input_word_count))
-            top_candidates = all_cluster_candidates[:10]
+        # Sort by quality_score (Gaussian length penalty) - higher is better
+        candidate_dicts.sort(key=lambda x: x.get('quality_score', 0.0), reverse=True)
+        top_candidates = candidate_dicts[:10]
 
         if top_candidates:
             selected = navigator.select_template(top_candidates, input_word_count)
             if selected:
                 return selected.get('text')
-            # Fallback if navigator returns None
-            if top_candidates:
-                return top_candidates[0].get('text')
+            # Fallback if navigator returns None - use best quality score
+            return top_candidates[0].get('text')
 
-    # If we have length-matched candidates (and no navigator or navigator failed), return the one closest to 1.0 ratio
-    if candidates:
-        best_match = min(candidates, key=lambda x: abs(x[1] - 1.0))
-        return best_match[0]
+    # If we have candidates (and no navigator or navigator failed), return the one with best quality score
+    if candidate_dicts:
+        # Sort by quality_score (Gaussian length penalty) - higher is better
+        candidate_dicts.sort(key=lambda x: x.get('quality_score', 0.0), reverse=True)
+        return candidate_dicts[0].get('text')
 
-    # Fallback: If no length match, return the shortest candidate to avoid expansion
-    # Re-filter to get all cluster matches
-    matching_paragraphs = []
-    matching_metadata = []
-    for idx, para_id in enumerate(all_results['ids']):
-        metadata = all_results['metadatas'][idx] if all_results['metadatas'] else {}
-        cluster_id = metadata.get('cluster_id')
-        if cluster_id == target_cluster_id:
-            doc = all_results['documents'][idx] if all_results['documents'] else None
-            if doc and is_valid_structural_template(doc):
-                matching_paragraphs.append(doc)
-                matching_metadata.append(metadata)
-
-    if matching_paragraphs:
-        # Find shortest by word count
-        shortest_idx = 0
-        shortest_word_count = float('inf')
-        for idx, meta in enumerate(matching_metadata):
-            word_count = meta.get('word_count', len(matching_paragraphs[idx].split()))
-            if word_count < shortest_word_count:
-                shortest_word_count = word_count
-                shortest_idx = idx
-        return matching_paragraphs[shortest_idx]
-
+    # No candidates found within acceptable length range
     return None
 
 

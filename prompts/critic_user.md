@@ -8,6 +8,10 @@ GENERATED TEXT (to evaluate):
 --- TASK ---
 Evaluate the GENERATED TEXT against the HIERARCHY:
 1. SEMANTIC SAFETY: Does it preserve the original meaning? (Highest Priority)
+   - CRITICAL: Check that ALL facts, concepts, details, and information from the Original Text are present in the Generated Text
+   - If the Original Text contains multiple facts/concepts, verify ALL are present
+   - If any facts, concepts, or details are missing, this is a CRITICAL FAILURE - mark "pass": false and "primary_failure_type": "meaning"
+   - Examples: If original mentions "biological cycle", "stars", "logical trap", "container problem", "fractal model", "Mandelbrot set" - ALL must appear in output
 2. STRUCTURAL RIGIDITY: Does it match the syntax/length/punctuation of the STRUCTURAL REFERENCE? (Second Priority)
 3. VOCABULARY FLAVOR: Does it use the word choices/tone of the SITUATIONAL REFERENCE? (Third Priority)
 

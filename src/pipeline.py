@@ -23,6 +23,7 @@ from src.atlas import (
     predict_next_cluster,
     find_situation_match,
     find_structure_match,
+    retrieve_window_match,
     StructureNavigator,
     StyleBlender
 )
@@ -316,201 +317,267 @@ def process_text(
 
             print(f"  Current style cluster: {current_cluster}")
 
-            # Process each sentence in paragraph
+            # Process sentences in chunks of 3 (sliding window approach)
             para_output = []
+            window_size = 3
 
-            for unit_idx, content_unit in enumerate(para_units):
-                print(f"  Processing sentence {unit_idx + 1}/{len(para_units)}")
-                print(f"    Original: {content_unit.original_text[:80]}...")
+            # Process in chunks
+            for chunk_start in range(0, len(para_units), window_size):
+                chunk_units = para_units[chunk_start:chunk_start + window_size]
+                chunk_sentences = [unit.original_text for unit in chunk_units]
 
-                # Retrieve dual RAG references (blend mode vs single-author mode)
-                if is_blend_mode and style_blender and len(blend_authors) >= 2:
-                    # Blend mode: use StyleBlender to find bridge texts
-                    author_a = blend_authors[0]
-                    author_b = blend_authors[1]
+                print(f"  Processing chunk {chunk_start // window_size + 1} ({len(chunk_sentences)} sentences)")
 
-                    # Get blended structure match (bridge text)
-                    structure_match = style_blender.retrieve_blended_template(
-                        author_a=author_a,
-                        author_b=author_b,
-                        blend_ratio=final_blend_ratio
-                    )
-
-                    # For situation match, still use semantic similarity (could be enhanced later)
-                    situation_match = find_situation_match(
+                # Retrieve window match (The "Zipper" method)
+                window_matches = None
+                if not is_blend_mode:
+                    # Single-author mode: use window retrieval
+                    window_matches = retrieve_window_match(
                         atlas,
-                        content_unit.original_text,
+                        chunk_sentences,
+                        target_cluster_id=current_cluster,
                         similarity_threshold=similarity_threshold
                     )
-                else:
-                    # Single-author mode: use existing retrieval
-                    situation_match = find_situation_match(
-                        atlas,
-                        content_unit.original_text,
-                        similarity_threshold=similarity_threshold
-                    )
+                    if window_matches:
+                        print(f"    Retrieved window match with {len(window_matches)} skeletons")
 
-                    structure_match = find_structure_match(
-                        atlas,
-                        current_cluster,
-                        input_text=content_unit.original_text,
-                        length_tolerance=0.3,
-                        navigator=structure_navigator
-                    )
+                # Process each sentence in the chunk
+                for unit_idx_in_chunk, content_unit in enumerate(chunk_units):
+                    unit_idx = chunk_start + unit_idx_in_chunk
+                    print(f"  Processing sentence {unit_idx + 1}/{len(para_units)}")
+                    print(f"    Original: {content_unit.original_text[:80]}...")
 
-                if situation_match:
-                    print(f"    Retrieved situation match (vocabulary): {situation_match[:80]}...")
-                else:
-                    print(f"    ⚠ No situation match found (similarity < {similarity_threshold}). Using structure match only.")
+                    # Initialize structure_match and situation_match
+                    structure_match = None
+                    situation_match = None
 
-                if structure_match:
-                    print(f"    Retrieved structure match (rhythm): {structure_match[:80]}...")
-                else:
-                    print(f"    ⚠ No structure match found for cluster {current_cluster}. Cannot proceed.")
-                    para_output.append(content_unit.original_text)
-                    generated_text_so_far.append(content_unit.original_text)
-                    continue
+                    # Retrieve dual RAG references (blend mode vs single-author mode)
+                    if is_blend_mode and style_blender and len(blend_authors) >= 2:
+                        # Blend mode: use StyleBlender to find bridge texts
+                        author_a = blend_authors[0]
+                        author_b = blend_authors[1]
 
-                # Determine vocabulary list
-                if is_blend_mode and style_blender and len(blend_authors) >= 2:
-                    # Blend mode: get hybrid vocabulary
-                    author_a = blend_authors[0]
-                    author_b = blend_authors[1]
-                    global_vocab_list = style_blender.get_hybrid_vocab(
-                        author_a=author_a,
-                        author_b=author_b,
-                        ratio=final_blend_ratio
-                    )
-                else:
-                    # Single-author mode: vocabulary comes from situation matches
-                    # Global vocabulary injection is optional (can be empty)
-                    global_vocab_list = []
+                        # Get blended structure match (bridge text)
+                        structure_match = style_blender.retrieve_blended_template(
+                            author_a=author_a,
+                            author_b=author_b,
+                            blend_ratio=final_blend_ratio
+                        )
 
-                # Calculate adaptive threshold based on structure match quality
-                # If structure match is very different from input, lower the threshold
-                input_word_count = len(content_unit.original_text.split())
-                structure_word_count = len(structure_match.split()) if structure_match else input_word_count
-                length_ratio = structure_word_count / input_word_count if input_word_count > 0 else 1.0
-
-                # If length ratio is very different (>2x or <0.5x), lower the threshold
-                adaptive_min_score = critic_min_score
-                if length_ratio > 2.0 or length_ratio < 0.5:
-                    # Structure match is very different, be more lenient
-                    adaptive_min_score = max(0.6, critic_min_score - 0.15)
-                    print(f"    ⚠ Structure match length ratio {length_ratio:.2f} is very different, lowering threshold to {adaptive_min_score:.2f}")
-                elif length_ratio > 1.5 or length_ratio < 0.67:
-                    # Structure match is moderately different, slightly lower threshold
-                    adaptive_min_score = max(0.65, critic_min_score - 0.1)
-                    print(f"    ⚠ Structure match length ratio {length_ratio:.2f} is different, adjusting threshold to {adaptive_min_score:.2f}")
-
-                # Generate with critic loop and pipeline-level retries
-                generated = None
-                critic_result = None
-                final_score = 0.0
-
-                try:
-                    # Pipeline-level retry loop
-                    for pipeline_attempt in range(critic_max_pipeline_retries + 1):
-                        try:
-                            # Determine author names for prompt (for blend mode)
-                            author_names = None
-                            if is_blend_mode and len(blend_authors) >= 2:
-                                author_names = blend_authors
-
-                            generated, critic_result = generate_with_critic(
-                                generate_fn=lambda cu, struct_match, sit_match, cfg, **kwargs: generate_sentence(
-                                    cu, struct_match, sit_match, cfg,
-                                    global_vocab_list=global_vocab_list,
-                                    author_names=author_names,
-                                    blend_ratio=final_blend_ratio if is_blend_mode else None,
-                                    **kwargs
-                                ),
-                                content_unit=content_unit,
-                                structure_match=structure_match,
-                                situation_match=situation_match,
-                                config_path=config_path,
-                                max_retries=critic_max_retries,
-                                min_score=adaptive_min_score  # Use adaptive threshold
+                        # For situation match, still use semantic similarity (could be enhanced later)
+                        situation_match = find_situation_match(
+                            atlas,
+                            content_unit.original_text,
+                            similarity_threshold=similarity_threshold
+                        )
+                    else:
+                        # Single-author mode: use window retrieval if available
+                        if window_matches and unit_idx_in_chunk < len(window_matches):
+                            # Use skeleton from window match (The "Zipper")
+                            _, structure_match = window_matches[unit_idx_in_chunk]
+                            print(f"    Retrieved structure match from window (rhythm): {structure_match[:80]}...")
+                        else:
+                            # Fallback to single sentence retrieval if window match failed
+                            structure_match = find_structure_match(
+                                atlas,
+                                current_cluster,
+                                input_text=content_unit.original_text,
+                                length_tolerance=0.3,
+                                navigator=structure_navigator
                             )
 
-                            score = critic_result.get("score", 0.0)
-                            final_score = score
+                        # Situation match for vocabulary
+                        situation_match = find_situation_match(
+                            atlas,
+                            content_unit.original_text,
+                            similarity_threshold=similarity_threshold
+                        )
 
-                            # Log attempt
-                            if pipeline_attempt > 0:
-                                print(f"    Pipeline retry {pipeline_attempt}: Score {score:.3f}")
+                    if situation_match:
+                        print(f"    Retrieved situation match (vocabulary): {situation_match[:80]}...")
+                    else:
+                        print(f"    ⚠ No situation match found (similarity < {similarity_threshold}). Using structure match only.")
 
-                            # Check if score is acceptable for pipeline
-                            if score >= critic_min_pipeline_score:
-                                break  # Good enough, proceed
+                    if structure_match:
+                        print(f"    Retrieved structure match (rhythm): {structure_match[:80]}...")
+                    else:
+                        # Fallback: Generate synthetic template instruction
+                        # If no template exists within acceptable length range, create a synthetic one
+                        input_word_count = len(content_unit.original_text.split())
+                        cluster_style_desc = f"cluster {current_cluster} style" if current_cluster is not None else "target style"
+                        structure_match = f"Create a sentence of approximately {input_word_count} words using {cluster_style_desc} syntax."
+                        print(f"    ⚠ No structure match found for cluster {current_cluster}. Using synthetic template: {structure_match}")
 
-                            # If score too low and we have more retries, continue
-                            if pipeline_attempt < critic_max_pipeline_retries:
-                                print(f"    ⚠ Score {score:.3f} below pipeline threshold {critic_min_pipeline_score}, retrying...")
-                                # Optionally refresh structure/situation matches for next attempt
-                                # (keeping same matches for now, but could refresh)
-                            else:
-                                # Last attempt, accept what we have but warn
-                                print(f"    ⚠ Final score {score:.3f} below pipeline threshold {critic_min_pipeline_score} after all retries")
+                    # Determine vocabulary list
+                    if is_blend_mode and style_blender and len(blend_authors) >= 2:
+                        # Blend mode: get hybrid vocabulary
+                        author_a = blend_authors[0]
+                        author_b = blend_authors[1]
+                        global_vocab_list = style_blender.get_hybrid_vocab(
+                            author_a=author_a,
+                            author_b=author_b,
+                            ratio=final_blend_ratio
+                        )
+                    else:
+                        # Single-author mode: vocabulary comes from situation matches
+                        # Global vocabulary injection is optional (can be empty)
+                        global_vocab_list = []
 
-                        except ConvergenceError as e:
-                            # Critic loop failed to converge
-                            if pipeline_attempt < critic_max_pipeline_retries:
-                                print(f"    ⚠ Critic convergence failed: {e}")
-                                print(f"    Retrying at pipeline level (attempt {pipeline_attempt + 1}/{critic_max_pipeline_retries + 1})...")
-                                continue
-                            else:
-                                # No more retries, raise the error
-                                raise
+                    # Calculate adaptive threshold based on structure match quality
+                    # If structure match is very different from input, lower the threshold
+                    input_word_count = len(content_unit.original_text.split())
+                    structure_word_count = len(structure_match.split()) if structure_match else input_word_count
+                    length_ratio = structure_word_count / input_word_count if input_word_count > 0 else 1.0
 
-                    # Log final result
-                    passed = critic_result.get("pass", False) if critic_result else False
-                    print(f"    Generated: {generated}")
-                    print(f"    Critic score: {final_score:.3f} (pass: {passed})")
+                    # If length ratio is very different (>2x or <0.5x), lower the threshold
+                    adaptive_threshold_base = critic_config.get("adaptive_threshold_base", 0.6)
+                    adaptive_threshold_moderate = critic_config.get("adaptive_threshold_moderate", 0.65)
+                    adaptive_threshold_penalty_high = critic_config.get("adaptive_threshold_penalty_high", 0.15)
+                    adaptive_threshold_penalty_moderate = critic_config.get("adaptive_threshold_penalty_moderate", 0.1)
 
-                    if not passed:
-                        feedback = critic_result.get("feedback", "") if critic_result else ""
-                        if feedback:
-                            print(f"    Critic feedback: {feedback[:100]}...")
+                    adaptive_min_score = critic_min_score
+                    if length_ratio > 2.0 or length_ratio < 0.5:
+                        # Structure match is very different, be more lenient
+                        adaptive_min_score = max(adaptive_threshold_base, critic_min_score - adaptive_threshold_penalty_high)
+                        print(f"    ⚠ Structure match length ratio {length_ratio:.2f} is very different, lowering threshold to {adaptive_min_score:.2f}")
+                    elif length_ratio > 1.5 or length_ratio < 0.67:
+                        # Structure match is moderately different, slightly lower threshold
+                        adaptive_min_score = max(adaptive_threshold_moderate, critic_min_score - adaptive_threshold_penalty_moderate)
+                        print(f"    ⚠ Structure match length ratio {length_ratio:.2f} is different, adjusting threshold to {adaptive_min_score:.2f}")
 
-                    # Warn if score is still low
-                    if final_score < critic_min_pipeline_score:
-                        print(f"    ⚠ WARNING: Final score {final_score:.3f} is below pipeline threshold {critic_min_pipeline_score}")
+                    # Generate with critic loop and pipeline-level retries
+                    generated = None
+                    critic_result = None
+                    final_score = 0.0
 
-                    para_output.append(generated)
-                    generated_text_so_far.append(generated)
+                    try:
+                        # Pipeline-level retry loop
+                        for pipeline_attempt in range(critic_max_pipeline_retries + 1):
+                            try:
+                                # Determine author names for prompt (for blend mode)
+                                author_names = None
+                                if is_blend_mode and len(blend_authors) >= 2:
+                                    author_names = blend_authors
 
-                    # Print final score summary before moving to next sentence
-                    print(f"    ✓ Final score: {final_score:.3f} (pass: {passed})")
+                                generated, critic_result = generate_with_critic(
+                                    generate_fn=lambda cu, struct_match, sit_match, cfg, **kwargs: generate_sentence(
+                                        cu, struct_match, sit_match, cfg,
+                                        global_vocab_list=global_vocab_list,
+                                        author_names=author_names,
+                                        blend_ratio=final_blend_ratio if is_blend_mode else None,
+                                        **kwargs
+                                    ),
+                                    content_unit=content_unit,
+                                    structure_match=structure_match,
+                                    situation_match=situation_match,
+                                    config_path=config_path,
+                                    max_retries=critic_max_retries,
+                                    min_score=adaptive_min_score  # Use adaptive threshold
+                                )
 
-                    # Add blank line before next sentence for readability
-                    if unit_idx < len(para_units) - 1:
-                        print()
+                                score = critic_result.get("score", 0.0)
+                                final_score = score
 
-                except ConvergenceError as e:
-                    print(f"    ✗ CRITICAL: Failed to converge after all retries: {e}")
-                    # Use original text as fallback
-                    para_output.append(content_unit.original_text)
-                    generated_text_so_far.append(content_unit.original_text)
-                    print(f"    ⚠ Using original text due to convergence failure")
+                                # Log attempt
+                                if pipeline_attempt > 0:
+                                    print(f"    Pipeline retry {pipeline_attempt}: Score {score:.3f}")
 
-                except Exception as e:
-                    print(f"    ⚠ Generation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Fallback: use original text
-                    para_output.append(content_unit.original_text)
-                    generated_text_so_far.append(content_unit.original_text)
+                                # Check if score is acceptable for pipeline
+                                if score >= critic_min_pipeline_score:
+                                    break  # Good enough, proceed
 
-            # Combine paragraph sentences
+                                # If score too low and we have more retries, continue
+                                if pipeline_attempt < critic_max_pipeline_retries:
+                                    print(f"    ⚠ Score {score:.3f} below pipeline threshold {critic_min_pipeline_score}, retrying...")
+                                    # Optionally refresh structure/situation matches for next attempt
+                                    # (keeping same matches for now, but could refresh)
+                                else:
+                                    # Last attempt, accept what we have but warn
+                                    print(f"    ⚠ Final score {score:.3f} below pipeline threshold {critic_min_pipeline_score} after all retries")
+
+                            except ConvergenceError as e:
+                                # Critic loop failed to converge
+                                if pipeline_attempt < critic_max_pipeline_retries:
+                                    print(f"    ⚠ Critic convergence failed: {e}")
+                                    print(f"    Retrying at pipeline level (attempt {pipeline_attempt + 1}/{critic_max_pipeline_retries + 1})...")
+                                    continue
+                                else:
+                                    # No more retries, raise the error
+                                    raise
+
+                        # Log final result
+                        passed = critic_result.get("pass", False) if critic_result else False
+                        print(f"    Generated: {generated}")
+                        print(f"    Critic score: {final_score:.3f} (pass: {passed})")
+
+                        if not passed:
+                            feedback = critic_result.get("feedback", "") if critic_result else ""
+                            if feedback:
+                                print(f"    Critic feedback: {feedback[:100]}...")
+
+                        # Warn if score is still low
+                        if final_score < critic_min_pipeline_score:
+                            print(f"    ⚠ WARNING: Final score {final_score:.3f} is below pipeline threshold {critic_min_pipeline_score}")
+
+                        para_output.append(generated)
+                        generated_text_so_far.append(generated)
+
+                        # Write sentence immediately to output file
+                        if output_handle:
+                            # Add space before sentence if not first in paragraph
+                            if unit_idx > 0:
+                                output_handle.write(" ")
+                            output_handle.write(generated)
+                            output_handle.flush()  # Ensure immediate write
+
+                        # Print final score summary before moving to next sentence
+                        print(f"    ✓ Final score: {final_score:.3f} (pass: {passed})")
+
+                        # Add blank line before next sentence for readability
+                        if unit_idx < len(para_units) - 1:
+                            print()
+
+                    except ConvergenceError as e:
+                        print(f"    ✗ CRITICAL: Failed to converge after all retries: {e}")
+                        # Use original text as fallback
+                        fallback_text = content_unit.original_text
+                        para_output.append(fallback_text)
+                        generated_text_so_far.append(fallback_text)
+
+                        # Write fallback text immediately to output file
+                        if output_handle:
+                            # Add space before sentence if not first in paragraph
+                            if unit_idx > 0:
+                                output_handle.write(" ")
+                            output_handle.write(fallback_text)
+                            output_handle.flush()  # Ensure immediate write
+
+                        print(f"    ⚠ Using original text due to convergence failure")
+
+                    except Exception as e:
+                        print(f"    ⚠ Generation failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        # Fallback: use original text
+                        fallback_text = content_unit.original_text
+                        para_output.append(fallback_text)
+                        generated_text_so_far.append(fallback_text)
+
+                        # Write fallback text immediately to output file
+                        if output_handle:
+                            # Add space before sentence if not first in paragraph
+                            if unit_idx > 0:
+                                output_handle.write(" ")
+                            output_handle.write(fallback_text)
+                            output_handle.flush()  # Ensure immediate write
+
+            # Combine paragraph sentences (for return value)
             para_text = " ".join(para_output)
             final_output.append(para_text)
 
-            # Write to file if provided
-            if output_handle:
-                output_handle.write(para_text)
-                if para_idx < len(paragraphs_content) - 1:
-                    output_handle.write("\n\n")
+            # Add paragraph break if not last paragraph (sentences already written)
+            if output_handle and para_idx < len(paragraphs_content) - 1:
+                output_handle.write("\n\n")
                 output_handle.flush()
 
             # Update current cluster based on generated text

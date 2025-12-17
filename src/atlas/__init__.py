@@ -6,6 +6,7 @@ from src.atlas.navigator import (
     predict_next_cluster,
     find_situation_match,
     find_structure_match,
+    retrieve_window_match,
     StructureNavigator
 )
 from src.atlas.blender import StyleBlender
@@ -20,6 +21,7 @@ __all__ = [
     'predict_next_cluster',
     'find_situation_match',
     'find_structure_match',
+    'retrieve_window_match',
     'StructureNavigator',
     'StyleBlender',
 ]

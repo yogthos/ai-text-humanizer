@@ -116,6 +116,54 @@ def _chunk_into_paragraphs(text: str) -> List[str]:
     return paragraphs
 
 
+def _chunk_into_windows(sentences: List[str], window_size: int = 3, stride: int = 1) -> List[Dict]:
+    """Create overlapping windows of sentences to capture flow.
+
+    Creates sliding windows to preserve contextual rhythm and cadence.
+    Each window contains multiple sentences that flow together.
+
+    Args:
+        sentences: List of sentence strings.
+        window_size: Number of sentences per window (default: 3).
+        stride: Step size for sliding window (default: 1 for overlapping).
+
+    Returns:
+        List of window dictionaries with:
+        - "text": Combined text of all sentences in window
+        - "skeletons": List of individual sentence texts (structural templates)
+        - "avg_length": Average word count per sentence in window
+    """
+    windows = []
+
+    # Filter out empty sentences
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if len(sentences) < window_size:
+        # If we have fewer sentences than window size, create a single window with all sentences
+        combined_text = " ".join(sentences)
+        avg_length = sum(len(s.split()) for s in sentences) / len(sentences) if sentences else 0
+        windows.append({
+            "text": combined_text,
+            "skeletons": sentences,  # Individual sentences as structural templates
+            "avg_length": avg_length
+        })
+        return windows
+
+    # Create overlapping windows
+    for i in range(0, len(sentences) - window_size + 1, stride):
+        window_sentences = sentences[i : i + window_size]
+        combined_text = " ".join(window_sentences)
+        avg_length = sum(len(s.split()) for s in window_sentences) / window_size
+
+        windows.append({
+            "text": combined_text,
+            "skeletons": window_sentences,  # Individual sentences as structural templates
+            "avg_length": avg_length
+        })
+
+    return windows
+
+
 def build_style_atlas(
     sample_text: str,
     num_clusters: int = 5,
@@ -174,7 +222,7 @@ def build_style_atlas(
             metadata={"description": "Style Atlas for text style transfer"}
         )
 
-    # Chunk into paragraphs
+    # Chunk into paragraphs first, then extract sentences for windows
     paragraphs = _chunk_into_paragraphs(sample_text)
 
     if not paragraphs:
@@ -183,72 +231,101 @@ def build_style_atlas(
     # Initialize models
     embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    # Process each paragraph
-    paragraph_ids = []
-    semantic_embeddings = []
-    style_vectors = []
-    texts = []
-    metadatas = []
-
-    # Import NLTK for accurate counting
+    # Import NLTK for accurate counting and sentence tokenization
     try:
         from nltk.tokenize import word_tokenize, sent_tokenize
         nltk_available = True
     except ImportError:
         nltk_available = False
 
-    for idx, paragraph in enumerate(paragraphs):
-        para_id = f"para_{idx}"
-        paragraph_ids.append(para_id)
-        texts.append(paragraph)
+    # Extract all sentences from paragraphs and create sliding windows
+    all_sentences = []
+    for paragraph in paragraphs:
+        if nltk_available:
+            para_sentences = sent_tokenize(paragraph)
+        else:
+            # Fallback: split by sentence-ending punctuation
+            para_sentences = []
+            for sent in paragraph.split('.'):
+                sent = sent.strip()
+                if sent:
+                    para_sentences.append(sent + '.')
+            if not para_sentences:
+                para_sentences = [paragraph]
+        all_sentences.extend([s.strip() for s in para_sentences if s.strip()])
 
-        # Generate semantic embedding
-        semantic_emb = embedding_model.encode(paragraph, normalize_embeddings=True)
+    if not all_sentences:
+        raise ValueError("Sample text contains no sentences")
+
+    # Create sliding windows of 3 sentences
+    windows = _chunk_into_windows(all_sentences, window_size=3, stride=1)
+
+    if not windows:
+        raise ValueError("Failed to create sliding windows from sentences")
+
+    # Process each window
+    window_ids = []
+    semantic_embeddings = []
+    style_vectors = []
+    texts = []
+    metadatas = []
+
+    for idx, window in enumerate(windows):
+        window_id = f"window_{idx}"
+        window_ids.append(window_id)
+
+        # Use combined text for embedding and style vector
+        combined_text = window["text"]
+        texts.append(combined_text)
+
+        # Generate semantic embedding from combined window text
+        semantic_emb = embedding_model.encode(combined_text, normalize_embeddings=True)
         semantic_embeddings.append(semantic_emb.tolist())
 
-        # Generate style vector
-        style_vec = get_style_vector(paragraph)
+        # Generate style vector from combined window text
+        style_vec = get_style_vector(combined_text)
         style_vectors.append(style_vec)
 
         # Calculate length metadata
         if nltk_available:
-            word_count = len(word_tokenize(paragraph))
-            sentence_count = len(sent_tokenize(paragraph))
+            word_count = len(word_tokenize(combined_text))
+            sentence_count = len(window["skeletons"])
         else:
-            # Fallback to simple counting
-            word_count = len(paragraph.split())
-            sentence_count = paragraph.count('.') + paragraph.count('!') + paragraph.count('?')
-            if sentence_count == 0:
-                sentence_count = 1  # At least one sentence
+            word_count = len(combined_text.split())
+            sentence_count = len(window["skeletons"])
+
+        # Store skeletons (individual sentences) as JSON string in metadata
+        # ChromaDB doesn't support lists, so we'll store as JSON string
+        import json
+        skeletons_json = json.dumps(window["skeletons"])
 
         metadata_entry = {
-            "paragraph_idx": idx,
+            "window_idx": idx,
             "word_count": word_count,
-            "sentence_count": sentence_count
+            "sentence_count": sentence_count,
+            "skeletons": skeletons_json,  # JSON string of sentence list
+            "avg_length": int(window["avg_length"])
         }
 
         # Add author_id if provided
         if author_id:
             metadata_entry["author_id"] = author_id
 
-        # Note: We don't store style_vec in metadata because ChromaDB doesn't allow lists
-        # Style vectors will be recomputed from document text when needed (e.g., in StyleBlender)
-
         metadatas.append(metadata_entry)
 
     # Run K-means clustering on style vectors (before storing, so we can add cluster_id to metadata)
     style_matrix = np.array(style_vectors)
 
-    if len(paragraphs) < num_clusters:
-        # Not enough paragraphs for requested clusters
-        num_clusters = len(paragraphs)
+    if len(windows) < num_clusters:
+        # Not enough windows for requested clusters
+        num_clusters = len(windows)
 
     if num_clusters > 0:
         kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
         cluster_labels = kmeans.fit_predict(style_matrix)
         cluster_centers = kmeans.cluster_centers_
     else:
-        cluster_labels = np.zeros(len(paragraphs), dtype=int)
+        cluster_labels = np.zeros(len(windows), dtype=int)
         cluster_centers = np.array([style_vectors[0]]) if style_vectors else np.array([])
 
     # Add cluster_id to metadata before storing
@@ -259,10 +336,10 @@ def build_style_atlas(
     # If collection already exists and we're adding an author, we need unique IDs
     # Use author_id prefix if provided to avoid conflicts
     if author_id:
-        # Prefix paragraph IDs with author_id to ensure uniqueness
-        prefixed_ids = [f"{author_id}_{para_id}" for para_id in paragraph_ids]
+        # Prefix window IDs with author_id to ensure uniqueness
+        prefixed_ids = [f"{author_id}_{window_id}" for window_id in window_ids]
     else:
-        prefixed_ids = paragraph_ids
+        prefixed_ids = window_ids
 
     collection.add(
         ids=prefixed_ids,

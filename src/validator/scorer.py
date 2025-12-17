@@ -318,15 +318,15 @@ def score_output(
     original_input: str,
     target_style_profile: StyleProfile,
     target_template: list,
-    meaning_threshold: float = 0.85,
-    style_threshold: float = 1.0,  # KL divergence threshold
+    meaning_threshold: Optional[float] = None,
+    style_threshold: Optional[float] = None,
     structure_required: bool = True,
     original_entities: List[str] = None,
     original_content_words: List[str] = None,
-    hallucination_threshold: float = 0.1,  # Maximum allowed hallucination score
+    hallucination_threshold: Optional[float] = None,
     sample_text: Optional[str] = None,  # Sample text for LLM style evaluation
     config_path: str = "config.json",
-    llm_style_threshold: float = 0.75  # Minimum LLM style match score
+    llm_style_threshold: Optional[float] = None
 ) -> Tuple[float, Dict[str, float], bool, Dict[str, any]]:
     """Score generated output on multiple metrics.
 
@@ -359,6 +359,19 @@ def score_output(
         - Boolean indicating if all thresholds are met
         - Dictionary with diagnostic information (hallucinations, LLM feedback, etc.)
     """
+    # Load config for threshold defaults
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    scorer_config = config.get("scorer", {})
+    if meaning_threshold is None:
+        meaning_threshold = scorer_config.get("meaning_threshold", 0.85)
+    if style_threshold is None:
+        style_threshold = scorer_config.get("style_threshold", 1.0)
+    if hallucination_threshold is None:
+        hallucination_threshold = scorer_config.get("hallucination_threshold", 0.1)
+    if llm_style_threshold is None:
+        llm_style_threshold = scorer_config.get("llm_style_threshold", 0.75)
+
     # Metric 1: Meaning preservation
     meaning_score = _calculate_bertscore(generated_text, original_input)
     meaning_pass = meaning_score >= meaning_threshold

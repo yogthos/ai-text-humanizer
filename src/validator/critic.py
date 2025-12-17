@@ -33,8 +33,20 @@ def _load_config(config_path: str = "config.json") -> Dict:
         return json.load(f)
 
 
-def _call_deepseek_api(system_prompt: str, user_prompt: str, api_key: str, api_url: str, model: str) -> str:
-    """Call DeepSeek API for critic evaluation."""
+def _call_deepseek_api(system_prompt: str, user_prompt: str, api_key: str, api_url: str, model: str, require_json: bool = True) -> str:
+    """Call DeepSeek API for critic evaluation or text generation.
+
+    Args:
+        system_prompt: System prompt for the LLM.
+        user_prompt: User prompt with the request.
+        api_key: DeepSeek API key.
+        api_url: DeepSeek API URL.
+        model: Model name to use.
+        require_json: If True, request JSON format (for critic). If False, plain text (for generation/editing).
+
+    Returns:
+        LLM response text.
+    """
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}"
@@ -47,14 +59,93 @@ def _call_deepseek_api(system_prompt: str, user_prompt: str, api_key: str, api_u
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.3,
-        "response_format": {"type": "json_object"}
     }
 
-    response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-    response.raise_for_status()
+    # Only add JSON format requirement for critic evaluation
+    if require_json:
+        payload["response_format"] = {"type": "json_object"}
+    else:
+        # For text generation/editing, add max_tokens instead
+        payload["max_tokens"] = 200
 
-    result = response.json()
-    return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+    # FIX 3: Validate model name for DeepSeek API
+    valid_deepseek_models = ["deepseek-chat", "deepseek-coder", "deepseek-reasoner", "deepseek-chat-v3"]
+    if model not in valid_deepseek_models:
+        print(f"    ⚠ Warning: Model '{model}' may not be valid for DeepSeek API. Valid models: {valid_deepseek_models}")
+
+    try:
+        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+
+        result = response.json()
+        return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 400:
+            error_detail = e.response.text
+            raise RuntimeError(f"DeepSeek API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
+        raise
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"DeepSeek API request failed: {e}")
+
+
+def _call_ollama_api(
+    system_prompt: str,
+    user_prompt: str,
+    api_url: str,
+    model: str,
+    keep_alive: str = "10m"
+) -> str:
+    """Call Ollama API for critic evaluation.
+
+    Args:
+        system_prompt: System prompt for the LLM.
+        user_prompt: User prompt with the request.
+        api_url: Ollama API URL (should be /api/chat endpoint).
+        model: Model name to use.
+        keep_alive: How long to keep model in memory (e.g., "10m", "5m", "-1" for infinite).
+
+    Returns:
+        LLM response text (should be JSON for critic).
+    """
+    # Convert /api/generate to /api/chat if needed
+    if api_url.endswith("/api/generate"):
+        api_url = api_url.replace("/api/generate", "/api/chat")
+    elif not api_url.endswith("/api/chat"):
+        # If neither, assume it's a base URL and append /api/chat
+        api_url = api_url.rstrip("/") + "/api/chat"
+
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    # For critic, we need JSON output, so add format instruction to system prompt
+    enhanced_system_prompt = system_prompt + "\n\nIMPORTANT: You must respond with valid JSON only. No additional text or explanation."
+
+    data = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": enhanced_system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "options": {
+            "temperature": 0.3,
+            "num_predict": 300  # Max tokens for critic response
+        },
+        "format": "json",  # Request JSON format
+        "keep_alive": keep_alive  # Keep model in VRAM to avoid reload latency
+    }
+
+    try:
+        response = requests.post(api_url, headers=headers, json=data, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+
+        if "message" in result and "content" in result["message"]:
+            return result["message"]["content"].strip()
+        else:
+            raise ValueError(f"Unexpected API response: {result}")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"Ollama API request failed: {e}")
 
 
 def critic_evaluate(
@@ -93,6 +184,11 @@ def critic_evaluate(
 
         if not api_key or not api_url:
             raise ValueError("DeepSeek API key or URL not found in config")
+    elif provider == "ollama":
+        ollama_config = config.get("ollama", {})
+        api_url = ollama_config.get("url", "http://localhost:11434/api/chat")
+        model = ollama_config.get("critic_model", "qwen3:8b")
+        keep_alive = ollama_config.get("keep_alive", "10m")
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
@@ -116,15 +212,21 @@ SITUATIONAL REFERENCE: Not provided (no similar topic found in corpus).
 
     if original_text:
         original_section = f"""
-ORIGINAL TEXT (for reference preservation check):
+ORIGINAL TEXT (for content preservation check):
 "{original_text}"
 """
         preservation_checks = """
 - CRITICAL: All [^number] style citation references from Original Text must be preserved exactly
-- CRITICAL: All direct quotations (text in quotes) from Original Text must be preserved exactly"""
+- CRITICAL: All direct quotations (text in quotes) from Original Text must be preserved exactly
+- CRITICAL: ALL facts, concepts, details, and information from Original Text must be preserved in Generated Text
+- If Original Text contains multiple facts/concepts, ALL must appear in Generated Text
+- If any facts, concepts, or details are missing, this is a CRITICAL FAILURE"""
         preservation_instruction = """
 
-CRITICAL: Check that all [^number] citations and direct quotations from Original Text are preserved exactly in Generated Text. If any are missing or modified, this is a critical failure."
+CRITICAL: Check that:
+1. All [^number] citations and direct quotations from Original Text are preserved exactly in Generated Text
+2. ALL facts, concepts, details, and information from Original Text are present in Generated Text
+If any citations, quotations, facts, concepts, or details are missing or modified, this is a critical failure. Mark "pass": false and "primary_failure_type": "meaning"."
 """
     else:
         original_section = ""
@@ -146,7 +248,12 @@ CRITICAL: Check that all [^number] citations and direct quotations from Original
 
     try:
         # Call API
-        response_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model)
+        if provider == "deepseek":
+            response_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model, require_json=True)
+        elif provider == "ollama":
+            response_text = _call_ollama_api(system_prompt, user_prompt, api_url, model, keep_alive)
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
 
         # Parse JSON response
         try:
@@ -166,7 +273,11 @@ CRITICAL: Check that all [^number] citations and direct quotations from Original
 
         # Ensure required fields
         if "pass" not in result:
-            result["pass"] = result.get("score", 0.5) >= 0.75
+            # Load fallback threshold from config
+            config = _load_config(config_path)
+            critic_config = config.get("critic", {})
+            fallback_threshold = critic_config.get("fallback_pass_threshold", 0.75)
+            result["pass"] = result.get("score", 0.5) >= fallback_threshold
         if "feedback" not in result:
             result["feedback"] = "No specific feedback provided."
         if "score" not in result:
@@ -243,6 +354,11 @@ def apply_surgical_fix(
 
         if not api_key or not api_url:
             raise ValueError("DeepSeek API key or URL not found in config")
+    elif provider == "ollama":
+        ollama_config = config.get("ollama", {})
+        api_url = ollama_config.get("url", "http://localhost:11434/api/chat")
+        model = ollama_config.get("editor_model", "mistral-nemo")
+        keep_alive = ollama_config.get("keep_alive", "10m")
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
@@ -259,8 +375,17 @@ Apply ONLY this change. Keep everything else exactly the same.
 
 Output the edited text only, without any explanation or commentary."""
 
-    # Call API
-    response_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model)
+    # FIX 3: Call API with require_json=False for surgical fixes (plain text, not JSON)
+    if provider == "deepseek":
+        # Validate model name before calling
+        valid_deepseek_models = ["deepseek-chat", "deepseek-coder", "deepseek-reasoner", "deepseek-chat-v3"]
+        if model not in valid_deepseek_models:
+            print(f"    ⚠ Warning: Model '{model}' may not be valid for DeepSeek API. Using anyway...")
+        response_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model, require_json=False)
+    elif provider == "ollama":
+        response_text = _call_ollama_api(system_prompt, user_prompt, api_url, model, keep_alive)
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")
 
     # Clean up response (remove quotes if present)
     edited_text = response_text.strip()
@@ -276,11 +401,11 @@ def _check_length_gate(
     min_ratio: float = 0.6,
     max_ratio: float = 1.5
 ) -> Optional[Dict[str, any]]:
-    """Hard gate: Check length before LLM evaluation.
+    """Hard gate: Check length before LLM evaluation with fuzzy tolerance.
 
     Calculates word count ratio between generated and structural reference.
-    If length is way off, fail immediately with specific math to save tokens
-    and provide mathematically precise feedback.
+    Uses "Fuzzy" Word Counting with relative tolerance to allow minor deviations.
+    Only fails if length is way off to save tokens and provide precise feedback.
 
     Args:
         generated_text: Generated text to check.
@@ -302,10 +427,15 @@ def _check_length_gate(
         # Can't compare against empty reference
         return None
 
-    len_ratio = gen_len / ref_len
+    # Fuzzy Word Counting: Allow Margin of Error relative to length
+    # tolerance = max(3, target_len * 0.2)
+    # If output is within target ± tolerance, PASS the length check
+    tolerance = max(3, ref_len * 0.2)
+    min_acceptable = ref_len - tolerance
+    max_acceptable = ref_len + tolerance
 
-    # Check if length is way off
-    if len_ratio > max_ratio:
+    # Check if length is way off (outside fuzzy tolerance)
+    if gen_len > max_acceptable:
         words_to_delete = gen_len - ref_len
         return {
             "pass": False,
@@ -313,7 +443,7 @@ def _check_length_gate(
             "score": 0.0,
             "primary_failure_type": "structure"
         }
-    elif len_ratio < min_ratio:
+    elif gen_len < min_acceptable:
         words_to_add = ref_len - gen_len
         return {
             "pass": False,
@@ -322,7 +452,7 @@ def _check_length_gate(
             "primary_failure_type": "structure"
         }
 
-    # Length is acceptable
+    # Length is acceptable (within fuzzy tolerance)
     return None
 
 
@@ -458,20 +588,17 @@ def _is_specific_edit_instruction(feedback: str) -> bool:
 
     feedback_lower = feedback.lower()
 
-    # Check for edit verbs that indicate specific edits
-    edit_verbs = ['remove', 'change', 'add', 'replace', 'delete', 'fix', 'correct', 'insert']
+    # Expanded list of edit verbs
+    edit_verbs = [
+        'remove', 'delete', 'cut',
+        'replace', 'change', 'substitute', 'swap',
+        'insert', 'add',
+        'fix', 'correct'
+    ]
     has_edit_verb = any(verb in feedback_lower for verb in edit_verbs)
 
     if not has_edit_verb:
         return False
-
-    # Check for specific elements mentioned (punctuation, words, phrases)
-    specific_elements = [
-        'dash', 'comma', 'period', 'semicolon', 'colon', 'quote', 'quotation',
-        'word', 'phrase', 'sentence', 'punctuation', 'capitalization',
-        'apostrophe', 'hyphen', 'parenthesis', 'bracket'
-    ]
-    has_specific_element = any(element in feedback_lower for element in specific_elements)
 
     # Check for structural rewrite indicators (these suggest regeneration, not editing)
     structural_indicators = [
@@ -481,8 +608,9 @@ def _is_specific_edit_instruction(feedback: str) -> bool:
     ]
     has_structural_indicator = any(indicator in feedback_lower for indicator in structural_indicators)
 
-    # It's a specific edit if it has edit verbs and specific elements, but not structural indicators
-    return has_edit_verb and (has_specific_element or not has_structural_indicator)
+    # If it has edit verbs and NO structural indicators, treat as specific edit
+    # The Editor LLM is smart enough to handle even if specific elements aren't mentioned
+    return not has_structural_indicator
 
 
 def generate_with_critic(
@@ -514,6 +642,14 @@ def generate_with_critic(
         - generated_text: Best generated text
         - critic_result: Final critic evaluation result
     """
+    # Load config for defaults
+    config = _load_config(config_path)
+    critic_config = config.get("critic", {})
+    if max_retries is None:
+        max_retries = critic_config.get("max_retries", 5)
+    if min_score is None:
+        min_score = critic_config.get("min_score", 0.75)
+
     if not structure_match:
         # No structure match, cannot proceed
         generated = content_unit.original_text
@@ -539,7 +675,9 @@ def generate_with_critic(
     # Main loop: Generate -> Critique -> Edit
     # Allow up to max_retries generations and max_edit_attempts edits per generation
     max_total_attempts = max_retries * (1 + max_edit_attempts)
+    total_attempts = 0  # Unified counter for all attempts (generations + edits)
     for attempt in range(max_total_attempts):
+        total_attempts += 1
         # Smart Retreat: After 2 generation attempts, drop strict structural constraint
         if generation_attempts == 2 and not structure_dropped:
             print("    ⚠ Dropping strict structural constraint (Fallback Mode)")
@@ -604,14 +742,20 @@ def generate_with_critic(
         feedback = critic_result.get("feedback", "")
         is_specific_edit = _is_specific_edit_instruction(feedback)
 
+        # Phase 1: Add diagnostic logging
+        print(f"    DEBUG: Feedback classified as: {'SURGICAL EDIT' if is_specific_edit else 'FULL REGENERATION'}")
+        print(f"    DEBUG: Feedback content: '{feedback[:80]}...'")
+        print(f"    DEBUG: Current score: {score:.3f}, Edit attempts: {edit_attempts}/{max_edit_attempts}, Generation attempts: {generation_attempts}/{max_retries}")
+
         # Check if last edit improved the score (only check if we've already edited)
         edit_improved = False
         if is_edited and last_score_before_edit is not None and score > last_score_before_edit:
             edit_improved = True
 
         # Edit Mode: If feedback is specific edit and score is decent, apply edit
-        if (is_specific_edit and score > 0.5 and edit_attempts < max_edit_attempts and
-            generation_attempts < max_retries):  # Don't edit if we've exhausted generation attempts
+        # FIX 2: Allow surgical edits even after max generation attempts
+        # We only stop if edit attempts are exhausted
+        if (is_specific_edit and score > 0.5 and edit_attempts < max_edit_attempts):
             # If we've already edited and it didn't improve, regenerate instead
             if edit_attempts > 0 and not edit_improved and last_score_before_edit is not None:
                 # Editing didn't help, regenerate
@@ -624,6 +768,7 @@ def generate_with_critic(
             else:
                 # Try editing
                 try:
+                    print(f"    → Attempting surgical fix (attempt {edit_attempts + 1}/{max_edit_attempts})...")
                     last_score_before_edit = score  # Track score before editing
                     # Apply surgical fix
                     edited_text = apply_surgical_fix(
@@ -631,21 +776,39 @@ def generate_with_critic(
                         feedback,
                         config_path=config_path
                     )
-                    current_text = edited_text
-                    is_edited = True
-                    edit_attempts += 1
-                    # Continue loop to re-critique the edited version
-                    continue
+
+                    # Validate the edit actually changed something
+                    if edited_text and edited_text != current_text:
+                        current_text = edited_text
+                        is_edited = True
+                        edit_attempts += 1
+                        print(f"    ✓ Surgical fix applied, re-evaluating...")
+                        # Continue loop to re-critique the edited version
+                        continue
+                    else:
+                        print("    ⚠ Surgical fix returned identical text. Falling back to regeneration.")
+                        should_regenerate = True
+                        edit_attempts += 1  # Count as attempt even if no change
+                        if feedback:
+                            feedback_history.append(feedback)
                 except Exception as e:
                     # If surgical fix fails, fall back to regeneration
+                    print(f"    ⚠ Surgical fix failed: {e}. Falling back to regeneration.")
                     should_regenerate = True
-                    edit_attempts = 0
+                    edit_attempts += 1  # Count failed edit as attempt
                     last_score_before_edit = None
                     is_edited = False
                     if feedback:
                         feedback_history.append(feedback)
         else:
             # Regenerate Mode: Feedback is not specific edit or editing exhausted
+            print(f"    → Regenerating with feedback (generation attempt {generation_attempts + 1}/{max_retries})...")
+
+            # FIX 1: Hard stop to prevent zombie loop
+            if generation_attempts >= max_retries:
+                print(f"    ⚠ Max generation attempts ({max_retries}) reached. Stopping loop to prevent infinite retry.")
+                break
+
             should_regenerate = True
             edit_attempts = 0  # Reset edit attempts
             last_score_before_edit = None
@@ -653,8 +816,9 @@ def generate_with_critic(
             if feedback:
                 feedback_history.append(feedback)
 
-            # Check if we've exhausted generation attempts
-            if generation_attempts >= max_retries:
+            # Additional safety: Detect repetitive feedback loop
+            if len(feedback_history) >= 3 and feedback_history[-1] == feedback_history[-3]:
+                print("    ⚠ Detected repetitive feedback loop. Breaking.")
                 break
 
     # Enforce minimum score - raise exception if not met
@@ -666,5 +830,6 @@ def generate_with_critic(
         )
 
     # Return best result if it meets threshold
+    print(f"    DEBUG: Loop completed. Total attempts: {total_attempts}, Best score: {best_score:.3f}")
     return best_text or generated, best_result or {"pass": False, "feedback": "Max retries reached", "score": best_score}
 

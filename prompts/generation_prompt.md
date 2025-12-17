@@ -1,9 +1,9 @@
-### STRUCTURAL REFERENCE (COPY THIS RHYTHM EXACTLY)
+### STRUCTURAL REFERENCE (MATCH THIS RHYTHM)
 
 Reference Text:
 "{structure_match}"
 
-CRITICAL: You must match ALL of these structural features:
+CRITICAL: You must match these structural features:
 {structure_instructions}
 
 - Average sentence length: ~{avg_sentence_len} words
@@ -11,6 +11,13 @@ CRITICAL: You must match ALL of these structural features:
 - Match the clause structure and complexity
 - Match the voice (active vs passive)
 - Match the rhythm and pacing of the reference
+
+ELASTIC CONSTRAINT: You are allowed to contract or expand the Structural Reference to fit ALL Input Content. Match the RHYTHM, not the exact word count.
+- CRITICAL: Structure must adapt to accommodate ALL content from the input
+- NEVER omit content to fit structure - always expand structure to preserve all facts, concepts, and details
+- If the input contains more content than the reference, you MUST expand the structure to include all content
+- If the input is short and the template is complex, you may pad using vocabulary from the Situational Reference, but maintain the structural rhythm (punctuation, clauses, voice) of the reference
+- The structure is flexible - the content is NOT
 
 DO NOT simplify the structure. If the reference has multiple clauses, dashes, or complex punctuation, your output must too.
 
@@ -45,13 +52,22 @@ STRUCTURE MATCHING REQUIREMENTS (MOST CRITICAL):
 - Match the exact punctuation pattern from the Structural Reference (commas, dashes, semicolons, parentheses, asterisks)
 - Match the clause count and complexity (simple, compound, complex)
 - Match the voice (active vs passive)
-- Match the sentence length (within 20% of the Structural Reference's word count)
+- Match the rhythm and pacing (within ~20% word count tolerance is acceptable - focus on rhythm, not exact count)
 - If the Structural Reference uses dashes, you MUST use dashes
 - If the Structural Reference uses semicolons, you MUST use semicolons
 - If the Structural Reference has parenthetical elements, you MUST include similar structure
 - DO NOT simplify: if the reference is complex, your output must be complex too
+- ACCORDION RULE: If input is short and template is long, you may expand using Situational Reference vocabulary while maintaining the structural rhythm
 
-CRITICAL CONSTRAINTS:
+CRITICAL CONSTRAINTS (NON-NEGOTIABLE):
+- PRESERVE ALL CONTENT: Every fact, concept, detail, and piece of information from the input MUST appear in the output
+- DO NOT omit facts, concepts, or details to match structure - expand the structure to fit all content instead
+- If the input contains multiple facts (e.g., "biological cycle", "stars", "logical trap"), ALL must appear in output
+- If the input explains a concept (e.g., "container problem", "fractal model"), the explanation must be preserved
+- If the input mentions entities, relationships, or explanations, ALL must be preserved
+- DO NOT simplify or summarize - preserve the full content
+- DO NOT truncate or shorten content to match structure length
+- Structure should adapt to fit ALL content, never omit content to fit structure
 - DO NOT add any new entities, locations, facts, people, or information not in the original
 - DO NOT invent names, places, dates, or events
 - Only use words and concepts that exist in the original text

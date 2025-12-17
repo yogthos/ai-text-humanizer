@@ -123,6 +123,22 @@ The project uses `config.json` for configuration. Here's the complete structure:
 - **critic.min_pipeline_score**: Minimum score (0-1) for pipeline-level acceptance (default: `0.6`, more lenient than min_score)
 - **critic.max_retries**: Maximum retry attempts per sentence within critic loop (default: `5`)
 - **critic.max_pipeline_retries**: Maximum retry attempts at pipeline level when score is below threshold (default: `2`)
+- **critic.fallback_pass_threshold**: Fallback threshold (0-1) used when critic response doesn't include pass field (default: `0.75`)
+- **critic.adaptive_threshold_base**: Base threshold (0-1) for adaptive scoring when structure match length is very different (default: `0.6`)
+- **critic.adaptive_threshold_moderate**: Moderate threshold (0-1) for adaptive scoring when structure match length is moderately different (default: `0.65`)
+- **critic.adaptive_threshold_penalty_high**: Penalty amount (0-1) subtracted from min_score when structure match is very different (default: `0.15`)
+- **critic.adaptive_threshold_penalty_moderate**: Penalty amount (0-1) subtracted from min_score when structure match is moderately different (default: `0.1`)
+
+#### Scorer Settings
+
+- **scorer.meaning_threshold**: Minimum meaning preservation score (0-1) to pass (default: `0.85`)
+- **scorer.style_threshold**: Maximum KL divergence for style matching (default: `1.0`, lower is stricter)
+- **scorer.hallucination_threshold**: Maximum hallucination score (0-1) to pass (default: `0.1`, lower is stricter)
+- **scorer.llm_style_threshold**: Minimum LLM-based style match score (0-1) to pass (default: `0.75`)
+
+#### Vocabulary Settings
+
+- **vocabulary.similarity_threshold**: Minimum cosine similarity (0-1) for word clustering in vocabulary mapping (default: `0.7`)
 
 #### Style Blending Settings
 
@@ -437,6 +453,7 @@ python3 tests/test_atlas.py
 python3 tests/test_semantic.py
 python3 tests/test_llm_interface.py
 python3 tests/test_validator.py
+python3 tests/test_pipeline_sentence_processing.py
 ```
 
 Or run them all at once:
@@ -445,6 +462,9 @@ Or run them all at once:
 source venv/bin/activate
 for test in tests/test_*.py; do python3 "$test"; done
 ```
+
+**Regression Tests:**
+- `test_pipeline_sentence_processing.py`: Ensures all input sentences are processed and generated (prevents indentation bug where generation logic was outside the sentence loop)
 
 Note: Some tests require a valid API key in `config.json` and will be skipped if unavailable.
 

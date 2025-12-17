@@ -21,7 +21,15 @@ Use a mix of these words to flavor the text, drawing from both authors:
 
 Rewrite the 'Input Text' using the structure of the 'Hybrid Template' and vocabulary from the 'Composite Vocabulary'.
 
-CRITICAL CONSTRAINTS:
+CRITICAL CONSTRAINTS (NON-NEGOTIABLE):
+- PRESERVE ALL CONTENT: Every fact, concept, detail, and piece of information from the input MUST appear in the output
+- DO NOT omit facts, concepts, or details to match structure - expand the structure to fit all content instead
+- If the input contains multiple facts (e.g., "biological cycle", "stars", "logical trap"), ALL must appear in output
+- If the input explains a concept (e.g., "container problem", "fractal model"), the explanation must be preserved
+- If the input mentions entities, relationships, or explanations, ALL must be preserved
+- DO NOT simplify or summarize - preserve the full content
+- DO NOT truncate or shorten content to match structure length
+- Structure should adapt to fit ALL content, never omit content to fit structure
 - DO NOT add any new entities, locations, facts, people, or information not in the original
 - DO NOT invent names, places, dates, or events
 - Only use words and concepts that exist in the original text
