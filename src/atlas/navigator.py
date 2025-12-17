@@ -61,12 +61,17 @@ class StructureNavigator:
 
         # 2. Score Candidates (Distance from ideal length)
         # We prefer candidates closer to input_length, but allow variance
+        # Use quality_score if available, otherwise calculate from length difference
         scored_candidates = []
         for cand in available_candidates:
-            word_count = cand.get('word_count', len(cand.get('text', '').split()))
-            len_diff = abs(word_count - input_length)
-            # Inverse score: lower diff = higher score
-            score = 1.0 / (len_diff + 1.0)
+            # Prefer quality_score if available (from structure match analysis)
+            if 'quality_score' in cand:
+                score = cand['quality_score']
+            else:
+                word_count = cand.get('word_count', len(cand.get('text', '').split()))
+                len_diff = abs(word_count - input_length)
+                # Inverse score: lower diff = higher score
+                score = 1.0 / (len_diff + 1.0)
             scored_candidates.append((cand, score))
 
         # 3. Weighted Random Selection (The "Temperature")
@@ -363,17 +368,21 @@ def find_structure_match(
             sent_ratio = 1.0
 
         # Accept candidates within tolerance (0.7x to 1.5x)
+        # But prefer candidates closer to 1.0x (exact match)
         min_ratio = 1.0 - length_tolerance
         max_ratio = 1.0 + length_tolerance
 
         if min_ratio <= len_ratio <= max_ratio:
             candidates.append((doc, len_ratio, cand_word_count))
-            # Create candidate dict for navigator
+            # Create candidate dict for navigator with quality score
+            # Quality score: 1.0 for perfect match, decreases as ratio deviates
+            quality_score = 1.0 / (abs(len_ratio - 1.0) + 0.1)  # Higher score = better match
             candidate_dicts.append({
                 'id': para_id,
                 'text': doc,
                 'word_count': cand_word_count,
-                'len_ratio': len_ratio
+                'len_ratio': len_ratio,
+                'quality_score': quality_score
             })
 
     # If navigator is provided, use stochastic selection

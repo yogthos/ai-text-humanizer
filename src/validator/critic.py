@@ -7,7 +7,24 @@ a reference style paragraph to detect style mismatches and "AI slop".
 import json
 import re
 import requests
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def _load_prompt_template(template_name: str) -> str:
+    """Load a prompt template from the prompts directory.
+
+    Args:
+        template_name: Name of the template file (e.g., 'critic_system.md')
+
+    Returns:
+        Template content as string.
+    """
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    template_path = prompts_dir / template_name
+    if not template_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {template_path}")
+    return template_path.read_text().strip()
 
 
 def _load_config(config_path: str = "config.json") -> Dict:
@@ -79,35 +96,14 @@ def critic_evaluate(
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
-    # Build system prompt
-    system_prompt = """You are a style critic evaluating text style transfer quality.
+    # Load system prompt from template
+    system_prompt = _load_prompt_template("critic_system.md")
 
-Your task is to compare generated text against dual references:
-1. STRUCTURAL REFERENCE: For evaluating sentence structure, rhythm, and pacing
-2. SITUATIONAL REFERENCE: For evaluating vocabulary choices and word tone (if provided)
-
-Determine:
-1. Does the generated text match the structural reference's sentence structure and rhythm?
-2. Does it match the vocabulary complexity and word choice (from situational reference if available)?
-3. Does it avoid "AI words" (delve, underscore, testament, etc.)?
-4. Does it match the average sentence length?
-5. Does it match the punctuation style and density?
-6. CRITICAL: Are ALL [^number] style citation references from the original text preserved exactly?
-7. CRITICAL: Are ALL direct quotations from the original text preserved exactly?
-
-Output your evaluation as JSON with:
-- "pass": boolean (true if style matches well, false if needs improvement)
-- "feedback": string (specific, actionable feedback formatted as numbered action items, e.g., "1. Make sentences shorter to match reference. 2. Use more direct vocabulary. 3. Match the punctuation style.")
-- "score": float (0.0 to 1.0, where 1.0 is perfect style match)
-
-IMPORTANT: Format your feedback as specific, actionable steps the generator can take. Prioritize the most critical issues first. Be strict but fair. Focus on structural and stylistic elements, not just meaning."""
-
-    # Build user prompt
+    # Build sections for user prompt
     structure_section = f"""STRUCTURAL REFERENCE (for rhythm/structure):
 "{structure_match}"
 """
 
-    situation_section = ""
     if situation_match:
         situation_section = f"""
 SITUATIONAL REFERENCE (for vocabulary):
@@ -118,40 +114,35 @@ SITUATIONAL REFERENCE (for vocabulary):
 SITUATIONAL REFERENCE: Not provided (no similar topic found in corpus).
 """
 
-    # Build original text section for reference preservation check
-    original_section = ""
     if original_text:
         original_section = f"""
 ORIGINAL TEXT (for reference preservation check):
 "{original_text}"
 """
-
-    user_prompt = f"""Compare the generated text against these references:
-
-{structure_section}{situation_section}{original_section}
-GENERATED TEXT (to evaluate):
-"{generated_text}"
-
-Evaluate whether the generated text matches:
-- STRUCTURE: Sentence structure and rhythm from Structural Reference
-- VOCABULARY: Word choice and tone from Situational Reference (if provided)
-- Average sentence length
-- Punctuation style and density
-- Absence of "AI words" (delve, underscore, testament, etc.)"""
-
-    if original_text:
-        user_prompt += """
+        preservation_checks = """
 - CRITICAL: All [^number] style citation references from Original Text must be preserved exactly
 - CRITICAL: All direct quotations (text in quotes) from Original Text must be preserved exactly"""
+        preservation_instruction = """
 
-    user_prompt += """
+CRITICAL: Check that all [^number] citations and direct quotations from Original Text are preserved exactly in Generated Text. If any are missing or modified, this is a critical failure."
+"""
+    else:
+        original_section = ""
+        preservation_checks = ""
+        preservation_instruction = ""
 
-Output JSON with "pass", "feedback", and "score" fields.
-If vocabulary doesn't match, mention it. If structure doesn't match, mention it."""
+    # Load and format user prompt template
+    template = _load_prompt_template("critic_user.md")
+    user_prompt = template.format(
+        structure_section=structure_section,
+        situation_section=situation_section,
+        original_section=original_section,
+        generated_text=generated_text,
+        preservation_checks=preservation_checks,
+        preservation_instruction=preservation_instruction
+    )
 
-    if original_text:
-        user_prompt += """
-If any references or quotations are missing, this is a CRITICAL FAILURE and "pass" must be false."""
+    # Note: preservation_instruction already includes the critical failure message if original_text is provided
 
     try:
         # Call API

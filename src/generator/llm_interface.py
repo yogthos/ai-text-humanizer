@@ -58,7 +58,7 @@ def _call_deepseek_api(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.3,  # Lower temperature for more deterministic, less creative output
+        "temperature": 0.1,  # Very low temperature for precise structure matching
         "max_tokens": 200
     }
 
@@ -125,9 +125,12 @@ def generate_sentence(
     system_prompt = assembler.build_system_message()
 
     # Add examples to system prompt
-    system_prompt += "\n\n"
-    system_prompt += "BAD EXAMPLE: Original 'The cat sat' → Generated 'Einstein's cat sat in New York' (WRONG - added Einstein and New York)\n"
-    system_prompt += "GOOD EXAMPLE: Original 'The cat sat' → Generated 'The feline rested' (CORRECT - preserved meaning, changed style)"
+    from pathlib import Path
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    examples_path = prompts_dir / "generator_examples.md"
+    if examples_path.exists():
+        examples = examples_path.read_text().strip()
+        system_prompt += "\n\n" + examples
 
     # Extract style metrics from structure_match
     style_vec = get_style_vector(structure_match)

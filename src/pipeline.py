@@ -273,6 +273,23 @@ def process_text(
                 sentiment_key = sentiment.lower() if sentiment else 'neutral'
                 global_vocab_list = global_vocab_dict.get(sentiment_key, global_vocab_dict.get('neutral', []))
 
+                # Calculate adaptive threshold based on structure match quality
+                # If structure match is very different from input, lower the threshold
+                input_word_count = len(content_unit.original_text.split())
+                structure_word_count = len(structure_match.split()) if structure_match else input_word_count
+                length_ratio = structure_word_count / input_word_count if input_word_count > 0 else 1.0
+
+                # If length ratio is very different (>2x or <0.5x), lower the threshold
+                adaptive_min_score = critic_min_score
+                if length_ratio > 2.0 or length_ratio < 0.5:
+                    # Structure match is very different, be more lenient
+                    adaptive_min_score = max(0.6, critic_min_score - 0.15)
+                    print(f"    ⚠ Structure match length ratio {length_ratio:.2f} is very different, lowering threshold to {adaptive_min_score:.2f}")
+                elif length_ratio > 1.5 or length_ratio < 0.67:
+                    # Structure match is moderately different, slightly lower threshold
+                    adaptive_min_score = max(0.65, critic_min_score - 0.1)
+                    print(f"    ⚠ Structure match length ratio {length_ratio:.2f} is different, adjusting threshold to {adaptive_min_score:.2f}")
+
                 # Generate with critic loop and pipeline-level retries
                 generated = None
                 critic_result = None
@@ -291,7 +308,7 @@ def process_text(
                                 situation_match=situation_match,
                                 config_path=config_path,
                                 max_retries=critic_max_retries,
-                                min_score=critic_min_score
+                                min_score=adaptive_min_score  # Use adaptive threshold
                             )
 
                             score = critic_result.get("score", 0.0)
