@@ -68,7 +68,8 @@ def process_text(
     config_path: str = "config.json",
     max_retries: int = 3,
     output_file: Optional[str] = None,
-    atlas_cache_path: Optional[str] = None
+    atlas_cache_path: Optional[str] = None,
+    clear_db: bool = False
 ) -> List[str]:
     """Process input text through Style Atlas pipeline.
 
@@ -90,6 +91,20 @@ def process_text(
     atlas_config = config.get("atlas", {})
     num_clusters = atlas_config.get("num_clusters", 5)
     similarity_threshold = atlas_config.get("similarity_threshold", 0.3)
+    collection_name = atlas_config.get("collection_name", "style_atlas")
+
+    # Clear ChromaDB if requested
+    if clear_db:
+        from src.atlas.builder import clear_chromadb_collection
+        print("Clearing ChromaDB collection...")
+        cleared = clear_chromadb_collection(
+            collection_name=collection_name,
+            persist_directory=atlas_cache_path
+        )
+        if cleared:
+            print("  ✓ Cleared ChromaDB collection")
+        else:
+            print("  ⚠ Collection did not exist (nothing to clear)")
 
     # Phase 1: Build or load Style Atlas
     print("Phase 1: Building Style Atlas...")
@@ -112,6 +127,7 @@ def process_text(
         atlas = build_style_atlas(
             sample_text,
             num_clusters=num_clusters,
+            collection_name=collection_name,
             persist_directory=persist_dir
         )
         print(f"  ✓ Built atlas with {len(atlas.cluster_ids)} paragraphs, {atlas.num_clusters} clusters")
@@ -285,7 +301,8 @@ def run_pipeline(
     config_path: str = "config.json",
     output_file: Optional[str] = None,
     max_retries: int = 3,
-    atlas_cache_path: Optional[str] = None
+    atlas_cache_path: Optional[str] = None,
+    clear_db: bool = False
 ) -> List[str]:
     """Run the Style Atlas pipeline with file I/O.
 
@@ -298,6 +315,7 @@ def run_pipeline(
         output_file: Optional path to save output.
         max_retries: Maximum number of retries per generation.
         atlas_cache_path: Optional path to cache Style Atlas.
+        clear_db: Whether to clear ChromaDB collection before building atlas.
 
     Returns:
         List of generated paragraphs.
@@ -327,7 +345,8 @@ def run_pipeline(
         config_path=config_path,
         max_retries=max_retries,
         output_file=output_file,
-        atlas_cache_path=atlas_cache_path
+        atlas_cache_path=atlas_cache_path,
+        clear_db=clear_db
     )
 
     return output

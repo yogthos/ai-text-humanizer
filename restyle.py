@@ -78,6 +78,12 @@ Examples:
         help='Enable verbose output'
     )
 
+    parser.add_argument(
+        '--clear-db',
+        action='store_true',
+        help='Clear ChromaDB collection before building atlas (use when switching sample texts)'
+    )
+
     args = parser.parse_args()
 
     # Validate input file exists
@@ -113,6 +119,8 @@ Examples:
         print(f"Max retries: {args.max_retries}")
         if args.atlas_cache:
             print(f"Atlas cache: {args.atlas_cache}")
+        if args.clear_db:
+            print(f"Clear DB: enabled")
         print()
 
     try:
@@ -123,7 +131,8 @@ Examples:
             config_path=args.config,
             output_file=args.output,
             max_retries=args.max_retries,
-            atlas_cache_path=args.atlas_cache
+            atlas_cache_path=args.atlas_cache,
+            clear_db=args.clear_db
         )
 
         if args.verbose:

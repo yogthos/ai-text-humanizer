@@ -29,6 +29,42 @@ except ImportError:
 from src.analyzer.style_metrics import get_style_vector
 
 
+def clear_chromadb_collection(
+    collection_name: str = "style_atlas",
+    persist_directory: Optional[str] = None
+) -> bool:
+    """Clear/delete a ChromaDB collection.
+
+    Args:
+        collection_name: Name of the collection to clear (default: "style_atlas").
+        persist_directory: Directory where ChromaDB is persisted (if None, uses in-memory).
+
+    Returns:
+        True if collection was cleared, False if it didn't exist.
+    """
+    if not CHROMADB_AVAILABLE:
+        return False
+
+    try:
+        # Initialize ChromaDB client
+        if persist_directory:
+            client = chromadb.PersistentClient(path=persist_directory)
+        else:
+            client = chromadb.Client(Settings(anonymized_telemetry=False))
+
+        # Try to get and delete the collection
+        try:
+            collection = client.get_collection(name=collection_name)
+            client.delete_collection(name=collection_name)
+            return True
+        except:
+            # Collection doesn't exist
+            return False
+    except Exception as e:
+        print(f"Warning: Failed to clear ChromaDB collection: {e}")
+        return False
+
+
 @dataclass
 class StyleAtlas:
     """Container for Style Atlas data."""
