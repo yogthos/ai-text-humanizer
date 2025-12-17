@@ -21,7 +21,8 @@ from src.atlas import (
     load_atlas,
     build_cluster_markov,
     predict_next_cluster,
-    retrieve_style_reference
+    find_situation_match,
+    find_structure_match
 )
 from src.generator.llm_interface import generate_sentence
 from src.validator.critic import generate_with_critic
@@ -88,7 +89,6 @@ def process_text(
 
     atlas_config = config.get("atlas", {})
     num_clusters = atlas_config.get("num_clusters", 5)
-    use_semantic_filter = atlas_config.get("use_semantic_filter", True)
 
     # Phase 1: Build or load Style Atlas
     print("Phase 1: Building Style Atlas...")
@@ -185,27 +185,40 @@ def process_text(
                 print(f"  Processing sentence {unit_idx + 1}/{len(para_units)}")
                 print(f"    Original: {content_unit.original_text[:80]}...")
 
-                # Retrieve style reference for this cluster
-                style_reference = retrieve_style_reference(
+                # Retrieve dual RAG references
+                situation_match = find_situation_match(
                     atlas,
-                    current_cluster,
-                    input_text=content_unit.original_text if use_semantic_filter else None,
-                    use_semantic_filter=use_semantic_filter
+                    content_unit.original_text,
+                    similarity_threshold=0.5
                 )
 
-                if style_reference:
-                    print(f"    Retrieved style reference: {style_reference[:80]}...")
+                structure_match = find_structure_match(
+                    atlas,
+                    current_cluster
+                )
+
+                if situation_match:
+                    print(f"    Retrieved situation match (vocabulary): {situation_match[:80]}...")
                 else:
-                    print(f"    ⚠ No style reference found for cluster {current_cluster}")
+                    print(f"    ⚠ No situation match found (similarity < 0.5). Using structure match only.")
+
+                if structure_match:
+                    print(f"    Retrieved structure match (rhythm): {structure_match[:80]}...")
+                else:
+                    print(f"    ⚠ No structure match found for cluster {current_cluster}. Cannot proceed.")
+                    para_output.append(content_unit.original_text)
+                    generated_text_so_far.append(content_unit.original_text)
+                    continue
 
                 # Generate with critic loop
                 try:
                     generated, critic_result = generate_with_critic(
-                        generate_fn=lambda cu, ref, cfg, hint=None: generate_sentence(
-                            cu, ref, cfg, hint=hint
+                        generate_fn=lambda cu, struct_match, sit_match, cfg, hint=None: generate_sentence(
+                            cu, struct_match, sit_match, cfg, hint=hint
                         ),
                         content_unit=content_unit,
-                        style_reference=style_reference,
+                        structure_match=structure_match,
+                        situation_match=situation_match,
                         config_path=config_path,
                         max_retries=max_retries
                     )
@@ -223,6 +236,13 @@ def process_text(
 
                     para_output.append(generated)
                     generated_text_so_far.append(generated)
+
+                    # Print final score summary before moving to next sentence
+                    print(f"    ✓ Final score: {score:.3f} (pass: {passed})")
+
+                    # Add blank line before next sentence for readability
+                    if unit_idx < len(para_units) - 1:
+                        print()
 
                 except Exception as e:
                     print(f"    ⚠ Generation failed: {e}")

@@ -11,6 +11,8 @@ from typing import Dict, List, Optional
 import requests
 
 from src.models import ContentUnit
+from src.generator.prompt_builder import PromptAssembler
+from src.analyzer.style_metrics import get_style_vector
 
 
 def _load_config(config_path: str = "config.json") -> Dict:
@@ -75,21 +77,26 @@ def _call_deepseek_api(
 
 def generate_sentence(
     content_unit: ContentUnit,
-    style_reference: Optional[str] = None,
+    structure_match: str,
+    situation_match: Optional[str] = None,
     config_path: str = "config.json",
-    hint: Optional[str] = None
+    hint: Optional[str] = None,
+    target_author_name: str = "Target Author"
 ) -> str:
-    """Generate a sentence using LLM with style reference.
+    """Generate a sentence using LLM with dual RAG references.
 
     Generates a sentence that:
     - Preserves the EXACT semantic meaning from content_unit
-    - Matches the sentence structure, rhythm, and vocabulary complexity of style_reference
+    - Matches the sentence structure and rhythm of structure_match
+    - Uses vocabulary tone from situation_match (if available)
 
     Args:
         content_unit: ContentUnit containing SVO triples, entities, and original text.
-        style_reference: Reference paragraph to mimic in style (structure, rhythm, vocabulary).
+        structure_match: Reference paragraph for rhythm/structure (required).
+        situation_match: Reference paragraph for vocabulary grounding (optional).
         config_path: Path to configuration file.
         hint: Optional hint/feedback from previous attempt to improve generation.
+        target_author_name: Name of target author for persona (default: "Target Author").
 
     Returns:
         Generated sentence string.
@@ -109,95 +116,54 @@ def generate_sentence(
     else:
         raise ValueError(f"Unsupported provider: {provider}")
 
-    # Build system prompt with strong anti-hallucination constraints and style matching
-    system_prompt_parts = [
-        "You are a constrained text re-writer. CRITICAL RULES:",
-        "1. Preserve the EXACT meaning from the original sentence",
-        "2. DO NOT add any new entities, locations, facts, people, or information not in the original",
-        "3. DO NOT invent names, places, dates, or events",
-        "4. Only use words and concepts that exist in the original text",
-        "5. Match the sentence structure, rhythm, and vocabulary complexity of the reference paragraph EXACTLY",
-        "6. Generate ONLY the rewritten sentence, nothing else (no explanations, no notes)",
-        "",
-        "BAD EXAMPLE: Original 'The cat sat' → Generated 'Einstein's cat sat in New York' (WRONG - added Einstein and New York)",
-        "GOOD EXAMPLE: Original 'The cat sat' → Generated 'The feline rested' (CORRECT - preserved meaning, changed style)"
-    ]
+    # Initialize prompt assembler
+    assembler = PromptAssembler(target_author_name=target_author_name)
 
-    if style_reference:
-        system_prompt_parts.append("")
-        system_prompt_parts.append("STYLE REFERENCE (match this paragraph's structure, rhythm, and vocabulary complexity):")
-        system_prompt_parts.append(f'"{style_reference}"')
-        system_prompt_parts.append("")
-        system_prompt_parts.append("Your output should:")
-        system_prompt_parts.append("- Match the average sentence length of the reference")
-        system_prompt_parts.append("- Match the punctuation style and density")
-        system_prompt_parts.append("- Match the vocabulary complexity and word choice")
-        system_prompt_parts.append("- Match the sentence structure and rhythm")
+    # Build system prompt using PromptAssembler
+    system_prompt = assembler.build_system_message()
 
-    system_prompt = "\n".join(system_prompt_parts)
+    # Add examples to system prompt
+    system_prompt += "\n\n"
+    system_prompt += "BAD EXAMPLE: Original 'The cat sat' → Generated 'Einstein's cat sat in New York' (WRONG - added Einstein and New York)\n"
+    system_prompt += "GOOD EXAMPLE: Original 'The cat sat' → Generated 'The feline rested' (CORRECT - preserved meaning, changed style)"
 
-    # Extract meaning from content unit
-    svo_triples = content_unit.svo_triples
-    entities = content_unit.entities
-    content_words = content_unit.content_words or []
+    # Extract style metrics from structure_match
+    style_vec = get_style_vector(structure_match)
+    words = structure_match.split()
+    sentences = structure_match.count('.') + structure_match.count('!') + structure_match.count('?')
+    if sentences > 0:
+        avg_sentence_len = len(words) / sentences
+    else:
+        avg_sentence_len = len(words)
 
-    # Format meaning with full phrases
-    meaning_parts = []
-    if svo_triples:
-        for svo in svo_triples:
-            if svo:
-                subject, verb, obj = svo
-                meaning_parts.append(f"Subject: {subject}, Verb: {verb}, Object: {obj}")
+    style_metrics = {'avg_sentence_len': avg_sentence_len}
 
-    meaning_str = "\n".join(meaning_parts) if meaning_parts else "No specific SVO structure provided."
+    # Build user prompt using PromptAssembler
+    user_prompt = assembler.build_generation_prompt(
+        input_text=content_unit.original_text,
+        situation_match=situation_match,
+        structure_match=structure_match,
+        style_metrics=style_metrics
+    )
 
-    # Build user prompt with all constraints
-    user_prompt_parts = [
-        "Rewrite the following sentence while preserving its EXACT meaning:",
-        f"Original: {content_unit.original_text}",
-        "",
-        "CRITICAL: DO NOT add any new information, entities, locations, or facts not in the original.",
-        "",
-        "Requirements:",
-        f"1. Meaning to preserve: {meaning_str}",
-    ]
+    # Add entity preservation if needed
+    if content_unit.entities:
+        user_prompt += "\n\n"
+        user_prompt += f"IMPORTANT: Preserve these entities exactly (DO NOT add others): {', '.join(content_unit.entities)}"
 
-    # Add content words list to help preserve all concepts
-    req_num = 2
-    if content_words:
-        # Limit to most important words (avoid too long lists)
-        important_words = content_words[:20]  # First 20 content words
-        user_prompt_parts.append(f"{req_num}. Key concepts to include: {', '.join(important_words)}")
-        req_num += 1
-
-    if entities:
-        user_prompt_parts.append(f"{req_num}. Preserve these entities exactly (DO NOT add others): {', '.join(entities)}")
-        req_num += 1
-
-    # Add style reference requirement
-    if style_reference:
-        user_prompt_parts.append("")
-        user_prompt_parts.append("STYLE REQUIREMENT: Match the sentence structure, rhythm, and vocabulary complexity of this reference:")
-        user_prompt_parts.append(f'"{style_reference}"')
-        user_prompt_parts.append("")
-        user_prompt_parts.append("Specifically match:")
-        user_prompt_parts.append("- Average sentence length")
-        user_prompt_parts.append("- Punctuation style and density")
-        user_prompt_parts.append("- Vocabulary complexity and word choice")
-        user_prompt_parts.append("- Sentence structure and rhythm")
-
-    user_prompt_parts.append("")
-    user_prompt_parts.append("Remember: Only use words and concepts from the original. Do not invent anything new.")
+    # Add content words hint if needed
+    if content_unit.content_words:
+        important_words = content_unit.content_words[:20]
+        user_prompt += "\n"
+        user_prompt += f"Key concepts to include: {', '.join(important_words)}"
 
     # Add hint from previous attempt if provided (for retries)
     if hint:
-        user_prompt_parts.append("")
-        user_prompt_parts.append("IMPORTANT FEEDBACK FROM PREVIOUS ATTEMPT:")
-        user_prompt_parts.append(hint)
-        user_prompt_parts.append("")
-        user_prompt_parts.append("Please address the feedback above in your rewrite.")
-
-    user_prompt = "\n".join(user_prompt_parts)
+        user_prompt += "\n\n"
+        user_prompt += "IMPORTANT FEEDBACK FROM PREVIOUS ATTEMPT:\n"
+        user_prompt += hint
+        user_prompt += "\n\n"
+        user_prompt += "Please address the feedback above in your rewrite."
 
     # Call API
     generated_text = _call_deepseek_api(system_prompt, user_prompt, api_key, api_url, model)

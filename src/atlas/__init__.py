@@ -1,7 +1,12 @@
 """Style Atlas module for ChromaDB-based style retrieval."""
 
 from src.atlas.builder import StyleAtlas, build_style_atlas, save_atlas, load_atlas
-from src.atlas.navigator import build_cluster_markov, predict_next_cluster, retrieve_style_reference
+from src.atlas.navigator import (
+    build_cluster_markov,
+    predict_next_cluster,
+    find_situation_match,
+    find_structure_match
+)
 
 __all__ = [
     'StyleAtlas',
@@ -10,6 +15,7 @@ __all__ = [
     'load_atlas',
     'build_cluster_markov',
     'predict_next_cluster',
-    'retrieve_style_reference',
+    'find_situation_match',
+    'find_structure_match',
 ]
 

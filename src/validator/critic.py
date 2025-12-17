@@ -41,17 +41,19 @@ def _call_deepseek_api(system_prompt: str, user_prompt: str, api_key: str, api_u
 
 def critic_evaluate(
     generated_text: str,
-    reference_text: str,
+    structure_match: str,
+    situation_match: Optional[str] = None,
     config_path: str = "config.json"
 ) -> Dict[str, any]:
-    """Evaluate generated text against reference style paragraph.
+    """Evaluate generated text against dual RAG references.
 
-    Uses an LLM to compare the generated text with the reference text
-    and check for style mismatches, AI words, and other quality issues.
+    Uses an LLM to compare the generated text with structure_match (for rhythm)
+    and situation_match (for vocabulary) to check for style mismatches.
 
     Args:
         generated_text: The generated text to evaluate.
-        reference_text: The reference style paragraph to compare against.
+        structure_match: Reference paragraph for rhythm/structure evaluation.
+        situation_match: Optional reference paragraph for vocabulary evaluation.
         config_path: Path to configuration file.
 
     Returns:
@@ -77,38 +79,55 @@ def critic_evaluate(
     # Build system prompt
     system_prompt = """You are a style critic evaluating text style transfer quality.
 
-Your task is to compare generated text against a reference style paragraph and determine:
-1. Does the generated text match the reference's sentence structure and rhythm?
-2. Does it match the vocabulary complexity and word choice?
+Your task is to compare generated text against dual references:
+1. STRUCTURAL REFERENCE: For evaluating sentence structure, rhythm, and pacing
+2. SITUATIONAL REFERENCE: For evaluating vocabulary choices and word tone (if provided)
+
+Determine:
+1. Does the generated text match the structural reference's sentence structure and rhythm?
+2. Does it match the vocabulary complexity and word choice (from situational reference if available)?
 3. Does it avoid "AI words" (delve, underscore, testament, etc.)?
 4. Does it match the average sentence length?
 5. Does it match the punctuation style and density?
 
 Output your evaluation as JSON with:
 - "pass": boolean (true if style matches well, false if needs improvement)
-- "feedback": string (specific, actionable feedback on what to improve)
+- "feedback": string (specific, actionable feedback on what to improve, mentioning which aspect failed)
 - "score": float (0.0 to 1.0, where 1.0 is perfect style match)
 
 Be strict but fair. Focus on structural and stylistic elements, not just meaning."""
 
     # Build user prompt
-    user_prompt = f"""Compare these two texts:
+    structure_section = f"""STRUCTURAL REFERENCE (for rhythm/structure):
+"{structure_match}"
+"""
 
-REFERENCE STYLE PARAGRAPH (target style):
-"{reference_text}"
+    situation_section = ""
+    if situation_match:
+        situation_section = f"""
+SITUATIONAL REFERENCE (for vocabulary):
+"{situation_match}"
+"""
+    else:
+        situation_section = """
+SITUATIONAL REFERENCE: Not provided (no similar topic found in corpus).
+"""
 
+    user_prompt = f"""Compare the generated text against these references:
+
+{structure_section}{situation_section}
 GENERATED TEXT (to evaluate):
 "{generated_text}"
 
-Evaluate whether the generated text matches the reference style in:
-- Sentence structure and rhythm
+Evaluate whether the generated text matches:
+- STRUCTURE: Sentence structure and rhythm from Structural Reference
+- VOCABULARY: Word choice and tone from Situational Reference (if provided)
 - Average sentence length
 - Punctuation style and density
-- Vocabulary complexity
-- Word choice and phrasing
 - Absence of "AI words" (delve, underscore, testament, etc.)
 
-Output JSON with "pass", "feedback", and "score" fields."""
+Output JSON with "pass", "feedback", and "score" fields.
+If vocabulary doesn't match, mention it. If structure doesn't match, mention it."""
 
     try:
         # Call API
@@ -158,7 +177,8 @@ Output JSON with "pass", "feedback", and "score" fields."""
 def generate_with_critic(
     generate_fn,
     content_unit,
-    style_reference: Optional[str],
+    structure_match: str,
+    situation_match: Optional[str] = None,
     config_path: str = "config.json",
     max_retries: int = 3,
     min_score: float = 0.75
@@ -169,9 +189,10 @@ def generate_with_critic(
     if the style doesn't match well enough.
 
     Args:
-        generate_fn: Function to generate text (takes content_unit, style_reference, hint).
+        generate_fn: Function to generate text (takes content_unit, structure_match, situation_match, hint).
         content_unit: ContentUnit to generate from.
-        style_reference: Reference style paragraph.
+        structure_match: Reference paragraph for rhythm/structure (required).
+        situation_match: Optional reference paragraph for vocabulary.
         config_path: Path to configuration file.
         max_retries: Maximum number of retry attempts (default: 3).
         min_score: Minimum critic score to accept (default: 0.75).
@@ -181,10 +202,10 @@ def generate_with_critic(
         - generated_text: Best generated text
         - critic_result: Final critic evaluation result
     """
-    if not style_reference:
-        # No reference, just generate once
-        generated = generate_fn(content_unit, style_reference, config_path)
-        return generated, {"pass": True, "feedback": "No reference provided", "score": 1.0}
+    if not structure_match:
+        # No structure match, cannot proceed
+        generated = content_unit.original_text
+        return generated, {"pass": False, "feedback": "No structure match provided", "score": 0.0}
 
     best_text = None
     best_score = 0.0
@@ -193,10 +214,10 @@ def generate_with_critic(
 
     for attempt in range(max_retries):
         # Generate with hint from previous attempt
-        generated = generate_fn(content_unit, style_reference, config_path, hint=hint)
+        generated = generate_fn(content_unit, structure_match, situation_match, config_path, hint=hint)
 
         # Evaluate with critic
-        critic_result = critic_evaluate(generated, style_reference, config_path)
+        critic_result = critic_evaluate(generated, structure_match, situation_match, config_path)
         score = critic_result.get("score", 0.0)
 
         # Track best result

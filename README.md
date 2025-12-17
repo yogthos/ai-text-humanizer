@@ -1,22 +1,24 @@
 # Text Style Transfer Pipeline
 
-A sophisticated text style transfer system that transforms input text to match the style of a sample text while preserving semantic meaning. The pipeline uses a multi-phase approach combining statistical analysis, semantic extraction, and LLM-based generation with validation and retry mechanisms.
+A sophisticated text style transfer system that transforms input text to match the style of a sample text while preserving semantic meaning. The pipeline uses a **Style Atlas** architecture with RAG-based dual retrieval, combining semantic embeddings, style clustering, and LLM-based generation with adversarial validation.
 
 ## Overview
 
-The system implements a "Symphony Pipeline" with five main components:
+The system implements a **Style Atlas Pipeline** with the following components:
 
-- **The Composer (Input)**: Extracts semantic meaning from input text
-- **The Theorist (Analyzer)**: Analyzes sample text to extract style characteristics
-- **The Conductor (Planner)**: Plans sentence structure based on context and style
-- **The Musician (LLM)**: Generates style-transferred text using constraints
-- **The Critic (Validator)**: Scores output and retries if quality is insufficient
+- **Style Atlas Builder**: Builds a dual-vector index (semantic + style) from sample text using ChromaDB
+- **Style Navigator**: Uses Markov chains to predict style cluster transitions and retrieves relevant references
+- **Dual RAG Retrieval**:
+  - **Situation Match**: Finds semantically similar paragraphs for vocabulary grounding
+  - **Structure Match**: Finds paragraphs matching target style cluster with length constraints
+- **Prompt Assembler**: Constructs constrained prompts that separate vocabulary and structure guidance
+- **Adversarial Critic**: LLM-based evaluator that provides feedback for iterative refinement
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8 or higher
+- Python 3.12 or higher (required for ChromaDB compatibility)
 - pip (Python package manager)
 
 ### Setup
@@ -39,7 +41,12 @@ pip install -r requirements.txt
 
 4. Download required NLTK data (done automatically on first run, but can be done manually):
 ```bash
-python3 -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger_eng'); nltk.download('vader_lexicon')"
+python3 -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger_eng')"
+```
+
+5. Download spaCy model (optional, for better dependency parsing):
+```bash
+python3 -m spacy download en_core_web_sm
 ```
 
 ## Configuration
@@ -57,6 +64,10 @@ The project uses `config.json` for configuration. Here's the structure:
   },
   "sample": {
     "file": "prompts/sample_mao.txt"
+  },
+  "atlas": {
+    "persist_path": "atlas_cache/",
+    "num_clusters": 5
   }
 }
 ```
@@ -67,7 +78,10 @@ The project uses `config.json` for configuration. Here's the structure:
 - **deepseek.api_key**: Your DeepSeek API key (get one at https://platform.deepseek.com)
 - **deepseek.api_url**: DeepSeek API endpoint (usually the default)
 - **deepseek.editor_model**: Model for text generation (default: `"deepseek-chat"`)
+- **deepseek.critic_model**: Model for critic evaluation (default: `"deepseek-chat"`)
 - **sample.file**: Path to the sample text file that defines the target style
+- **atlas.persist_path**: Directory to cache/load Style Atlas (optional)
+- **atlas.num_clusters**: Number of K-means clusters for style grouping (default: 5)
 
 ### Getting an API Key
 
@@ -93,8 +107,11 @@ With additional options:
 # Specify a custom sample file
 python3 restyle.py input/small.md -o output/small.md --sample prompts/custom_sample.txt
 
-# Adjust retry and threshold settings
-python3 restyle.py input/small.md -o output/small.md --max-retries 5 --score-threshold 0.8
+# Cache the Style Atlas for faster subsequent runs
+python3 restyle.py input/small.md -o output/small.md --atlas-cache atlas_data/
+
+# Adjust retry settings
+python3 restyle.py input/small.md -o output/small.md --max-retries 5
 
 # Enable verbose output
 python3 restyle.py input/small.md -o output/small.md -v
@@ -107,28 +124,12 @@ python3 restyle.py input/small.md -o output/small.md -v
 - `-s, --sample`: Sample text file defining target style (optional, uses config.json default)
 - `-c, --config`: Configuration file path (default: `config.json`)
 - `--max-retries`: Maximum retry attempts per sentence (default: 3)
-- `--score-threshold`: Minimum score to accept output (default: 0.75)
+- `--atlas-cache`: Path to directory for persisting/loading Style Atlas (optional)
 - `-v, --verbose`: Enable verbose output
-
-### Alternative: Using the Helper Script
-
-You can also use the simpler helper script:
-
-```bash
-source venv/bin/activate
-python3 run_pipeline.py input/small.md output/small.md
-```
 
 ### Python API
 
 Use the Python API directly:
-
-```bash
-source venv/bin/activate
-python3 -c "from src.pipeline import run_pipeline; run_pipeline(input_file='input/small.md', output_file='output/small.md')"
-```
-
-### Programmatic Usage
 
 ```python
 from src.pipeline import run_pipeline, process_text
@@ -136,7 +137,8 @@ from src.pipeline import run_pipeline, process_text
 # Using file paths
 output = run_pipeline(
     input_file="input/small.md",
-    output_file="output/small.md"
+    output_file="output/small.md",
+    atlas_persist_path="atlas_cache/"
 )
 
 # Using text directly
@@ -145,7 +147,8 @@ sample_text = "Your style sample text here."
 output = process_text(
     input_text=input_text,
     sample_text=sample_text,
-    config_path="config.json"
+    config_path="config.json",
+    atlas_cache_path="atlas_cache/"
 )
 ```
 
@@ -154,55 +157,62 @@ output = process_text(
 ```
 text-style-transfer/
 ├── src/
-│   ├── models.py              # Data structures (StyleProfile, ContentUnit)
+│   ├── models.py              # Data structures (ContentUnit)
 │   ├── analyzer/
-│   │   ├── vocabulary.py       # Vocabulary mapping
-│   │   └── structure.py        # Markov models for structure
+│   │   ├── style_metrics.py   # Style vector extraction
+│   │   └── structure.py        # Sentence type classification
+│   ├── atlas/
+│   │   ├── builder.py         # Style Atlas construction
+│   │   └── navigator.py       # Cluster navigation and RAG retrieval
 │   ├── ingestion/
-│   │   └── semantic.py         # Semantic meaning extraction
-│   ├── planner/
-│   │   └── flow.py             # Template selection
+│   │   └── semantic.py        # Semantic meaning extraction
 │   ├── generator/
-│   │   └── llm_interface.py    # LLM generation
+│   │   ├── llm_interface.py   # LLM generation
+│   │   └── prompt_builder.py  # RAG-based prompt assembly
 │   ├── validator/
-│   │   └── scorer.py           # Output scoring
-│   └── pipeline.py             # Main pipeline with feedback loop
-├── tests/                       # Test files
-├── input/                       # Input text files
-├── output/                      # Generated output files
+│   │   └── critic.py          # Adversarial critic evaluation
+│   └── pipeline.py            # Main pipeline orchestration
+├── tests/                      # Test files
+├── input/                      # Input text files
+├── output/                     # Generated output files
 ├── prompts/                    # Sample style files
-├── config.json                  # Configuration file
-├── requirements.txt             # Python dependencies
-└── run_pipeline.py              # Convenience script
+├── config.json                 # Configuration file
+├── requirements.txt            # Python dependencies
+└── restyle.py                 # CLI entry point
 ```
 
 ## How It Works
 
-1. **Style Analysis**: Analyzes the sample text to extract:
-   - Vocabulary mappings (generic → style-specific synonyms)
-   - POS tag transition probabilities
-   - Sentence type flow patterns
+1. **Style Atlas Construction**:
+   - Chunks sample text into paragraphs
+   - Generates dual embeddings: semantic (sentence-transformers) and style (deterministic metrics)
+   - Stores in ChromaDB with metadata (word count, sentence count, cluster ID)
+   - Runs K-means clustering on style vectors to group paragraphs into style clusters
 
 2. **Meaning Extraction**: Parses input text to extract:
    - Subject-Verb-Object triples
    - Named entities
-   - Sentiment polarity
+   - Content words
+   - Paragraph and sentence position metadata
 
-3. **Structure Planning**: Selects appropriate sentence templates based on:
-   - Previous sentence structure
-   - Input sentiment
-   - Statistical patterns from sample text
+3. **Style Navigation**:
+   - Builds Markov chain from cluster sequence in sample text
+   - Predicts next style cluster based on current generated text
+   - Determines appropriate style state for each input segment
 
-4. **Constrained Generation**: Uses LLM to generate text that:
-   - Preserves semantic meaning
-   - Follows the planned structure
-   - Uses style-specific vocabulary
+4. **Dual RAG Retrieval**:
+   - **Situation Match**: Queries ChromaDB by semantic similarity to find paragraphs about similar topics (vocabulary grounding)
+   - **Structure Match**: Queries ChromaDB by cluster ID and filters by length ratio (0.7x-1.5x) to find rhythm/structure examples
 
-5. **Validation & Retry**: Scores output on:
-   - Meaning preservation (BERTScore-like similarity)
-   - Style matching (POS distribution)
-   - Structure adherence
-   - Retries up to 3 times if score is below threshold
+5. **Constrained Generation**: Uses LLM with RAG-based prompts that:
+   - Explicitly separate vocabulary guidance (from situation match) and structure guidance (from structure match)
+   - Include length constraints to prevent expansion (1:1 sentence mapping)
+   - Prohibit "AI slop" words and hallucination
+
+6. **Adversarial Validation**:
+   - Critic LLM evaluates generated text against both structure and situation matches
+   - Provides specific feedback on vocabulary and structure mismatches
+   - Retries up to 3 times with feedback until quality threshold is met
 
 ## Testing
 
@@ -211,10 +221,8 @@ Run all tests:
 ```bash
 source venv/bin/activate
 python3 tests/test_models.py
-python3 tests/test_vocabulary.py
-python3 tests/test_structure.py
+python3 tests/test_atlas.py
 python3 tests/test_semantic.py
-python3 tests/test_flow.py
 python3 tests/test_llm_interface.py
 python3 tests/test_validator.py
 ```
@@ -231,10 +239,13 @@ Note: Some tests require a valid API key in `config.json` and will be skipped if
 ## Dependencies
 
 - **nltk**: Natural language processing and tokenization
-- **numpy**: Numerical computations for Markov models
-- **scikit-learn**: Machine learning utilities
-- **sentence-transformers**: Semantic similarity calculations
+- **numpy**: Numerical computations
+- **scikit-learn**: K-means clustering and machine learning utilities
+- **sentence-transformers**: Semantic embeddings
+- **chromadb**: Vector database for RAG retrieval
+- **spacy**: Dependency parsing (optional, with fallback)
 - **requests**: HTTP requests for API calls
+- **pydantic-settings**: Configuration management
 
 See `requirements.txt` for complete list and versions.
 
@@ -251,8 +262,15 @@ If you see API errors:
 
 If you see NLTK resource errors:
 ```bash
-python3 -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger_eng'); nltk.download('vader_lexicon')"
+python3 -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords'); nltk.download('averaged_perceptron_tagger_eng')"
 ```
+
+### ChromaDB Issues
+
+If you see ChromaDB errors:
+- Ensure Python 3.12+ is being used (required for ChromaDB compatibility)
+- Try rebuilding the virtual environment: `python3.12 -m venv venv`
+- Check that `onnxruntime` is installed (required dependency)
 
 ### Import Errors
 
@@ -262,8 +280,16 @@ Make sure you're running from the project root directory and the virtual environ
 
 The pipeline includes retry mechanisms, but if output quality is consistently low:
 - Try a longer or more representative sample text
-- Adjust `score_threshold` in `process_text()` (default: 0.75)
 - Increase `max_retries` (default: 3)
+- Ensure the sample text has sufficient variety in style
+- Check that the Style Atlas is being built correctly (check logs)
+
+### Length Expansion Issues
+
+If output is much longer than input:
+- The length-constrained retrieval should prevent this
+- Check that the atlas was built with length metadata (rebuild if needed)
+- Verify that structure matches are being filtered by length ratio
 
 ## License
 
@@ -272,4 +298,3 @@ The pipeline includes retry mechanisms, but if output quality is consistently lo
 ## Contributing
 
 [Add contribution guidelines here]
-

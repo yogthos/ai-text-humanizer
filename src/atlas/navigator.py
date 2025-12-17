@@ -114,30 +114,27 @@ def predict_next_cluster(
     return index_to_cluster.get(next_idx, current_cluster)
 
 
-def retrieve_style_reference(
+def find_situation_match(
     atlas: StyleAtlas,
-    target_cluster_id: int,
-    input_text: Optional[str] = None,
-    use_semantic_filter: bool = True,
+    input_text: str,
+    similarity_threshold: float = 0.5,
     top_k: int = 1
 ) -> Optional[str]:
-    """Retrieve a style reference paragraph from ChromaDB.
+    """Find a semantically similar paragraph for vocabulary grounding.
 
-    Queries ChromaDB for paragraphs in the target cluster, optionally
-    filtering by semantic similarity to input text.
+    Queries ChromaDB by semantic similarity only (ignores cluster).
+    Returns a paragraph if similarity is above threshold, else None.
 
     Args:
         atlas: StyleAtlas containing ChromaDB collection.
-        target_cluster_id: Target cluster ID to retrieve from.
-        input_text: Optional input text for semantic filtering.
-        use_semantic_filter: Whether to filter by semantic similarity (default: True).
+        input_text: Input text to find similar paragraphs for.
+        similarity_threshold: Minimum similarity score (0-1, default: 0.5).
         top_k: Number of results to return (default: 1).
 
     Returns:
-        Reference paragraph text, or None if not found.
+        Most similar paragraph text, or None if no match above threshold.
     """
     if not hasattr(atlas, '_collection'):
-        # Collection not available, try to get it
         try:
             if hasattr(atlas, '_client'):
                 atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
@@ -148,67 +145,95 @@ def retrieve_style_reference(
 
     collection = atlas._collection
 
-    # Build query
-    if use_semantic_filter and input_text:
-        # Query by semantic similarity
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_embedding = model.encode(input_text, normalize_embeddings=True)
+    # Query by semantic similarity
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    query_embedding = model.encode(input_text, normalize_embeddings=True)
 
-        # Get all documents and filter by cluster
-        results = collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=len(atlas.cluster_ids)  # Get all, then filter
-        )
+    # Query ChromaDB for similar paragraphs
+    results = collection.query(
+        query_embeddings=[query_embedding.tolist()],
+        n_results=top_k
+    )
 
-        # Filter by cluster_id
-        filtered_ids = []
-        filtered_distances = []
-        filtered_documents = []
+    if not results['ids'] or len(results['ids'][0]) == 0:
+        return None
 
-        if results['ids'] and len(results['ids'][0]) > 0:
-            for idx, para_id in enumerate(results['ids'][0]):
-                metadata = results['metadatas'][0][idx] if results['metadatas'] else {}
-                cluster_id = metadata.get('cluster_id')
-                if cluster_id == target_cluster_id:
-                    filtered_ids.append(para_id)
-                    if results['distances']:
-                        filtered_distances.append(results['distances'][0][idx])
-                    if results['documents']:
-                        filtered_documents.append(results['documents'][0][idx])
+    # Check similarity (ChromaDB returns distances, convert to similarity)
+    # Distance is typically 1 - cosine_similarity, so similarity = 1 - distance
+    if results['distances'] and len(results['distances'][0]) > 0:
+        # ChromaDB may return distances or similarities depending on configuration
+        # For normalized embeddings, distance = 1 - similarity
+        distance = results['distances'][0][0]
+        # If distance is in [0, 2] range, convert: similarity = 1 - distance/2
+        # If distance is already similarity-like, use directly
+        if distance <= 1.0:
+            similarity = 1.0 - distance
+        else:
+            # Distance might be squared or in different range
+            similarity = max(0.0, 1.0 - (distance / 2.0))
 
-        # Sort by distance and take top_k
-        if filtered_ids:
-            if filtered_distances:
-                sorted_indices = sorted(range(len(filtered_distances)),
-                                       key=lambda i: filtered_distances[i])
-                top_indices = sorted_indices[:top_k]
-                return filtered_documents[top_indices[0]] if filtered_documents else None
-            else:
-                return filtered_documents[0] if filtered_documents else None
-    else:
-        # Query by cluster_id metadata filter
-        # ChromaDB doesn't support metadata filtering directly in query,
-        # so we get all and filter
-        all_results = collection.get()
-
-        if not all_results['ids']:
+        if similarity < similarity_threshold:
             return None
 
-        # Filter by cluster_id
-        matching_paragraphs = []
-        for idx, para_id in enumerate(all_results['ids']):
-            metadata = all_results['metadatas'][idx] if all_results['metadatas'] else {}
-            cluster_id = metadata.get('cluster_id')
-            if cluster_id == target_cluster_id:
-                doc = all_results['documents'][idx] if all_results['documents'] else None
-                if doc:
-                    matching_paragraphs.append(doc)
-
-        if matching_paragraphs:
-            # Return first matching paragraph (or random if we want variety)
-            import random
-            return random.choice(matching_paragraphs[:top_k])
+    # Return the most similar document
+    if results['documents'] and len(results['documents'][0]) > 0:
+        return results['documents'][0][0]
 
     return None
+
+
+def find_structure_match(
+    atlas: StyleAtlas,
+    target_cluster_id: int,
+    top_k: int = 1
+) -> Optional[str]:
+    """Find a paragraph matching the target style cluster for rhythm/structure.
+
+    Queries ChromaDB by cluster_id only (ignores semantic similarity).
+    Returns a paragraph from the target cluster.
+
+    Args:
+        atlas: StyleAtlas containing ChromaDB collection.
+        target_cluster_id: Target cluster ID to retrieve from.
+        top_k: Number of results to return (default: 1).
+
+    Returns:
+        A paragraph from the target cluster, or None if not found.
+    """
+    if not hasattr(atlas, '_collection'):
+        try:
+            if hasattr(atlas, '_client'):
+                atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
+            else:
+                return None
+        except:
+            return None
+
+    collection = atlas._collection
+
+    # Get all documents and filter by cluster_id
+    all_results = collection.get()
+
+    if not all_results['ids']:
+        return None
+
+    # Filter by cluster_id
+    matching_paragraphs = []
+    for idx, para_id in enumerate(all_results['ids']):
+        metadata = all_results['metadatas'][idx] if all_results['metadatas'] else {}
+        cluster_id = metadata.get('cluster_id')
+        if cluster_id == target_cluster_id:
+            doc = all_results['documents'][idx] if all_results['documents'] else None
+            if doc:
+                matching_paragraphs.append(doc)
+
+    if matching_paragraphs:
+        # Return random selection for variety
+        import random
+        return random.choice(matching_paragraphs[:top_k])
+
+    return None
+
+
 
