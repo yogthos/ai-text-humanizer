@@ -2617,48 +2617,45 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
 
         # Step 2: Retrieve complex/long style examples
         # For paragraph fusion, we want LONG examples (ignore length mismatch filters)
-        complexity_min_length = self.paragraph_fusion_config.get("complexity_filter_min_length", 50)
         num_examples = self.paragraph_fusion_config.get("num_style_examples", 5)
+        retrieval_pool_size = self.paragraph_fusion_config.get("retrieval_pool_size", 20)
 
         if verbose:
-            print(f"  Retrieving {num_examples} complex style examples (min length: {complexity_min_length} chars)...")
+            print(f"  Retrieving {retrieval_pool_size} examples for complexity filtering...")
 
         # Get examples using existing method (will use 4-tier fallback)
         from src.atlas.rhetoric import RhetoricalType, RhetoricalClassifier
         classifier = RhetoricalClassifier()
         rhetorical_type = classifier.classify_heuristic(paragraph)
 
-        # Retrieve examples (get more than needed to filter by complexity)
+        # Retrieve examples (wide net - don't filter by input length)
         raw_examples = atlas.get_examples_by_rhetoric(
             rhetorical_type,
-            top_k=num_examples * 3,  # Get more to filter
+            top_k=retrieval_pool_size,  # Wide net for complexity filtering
             author_name=author_name,
-            query_text=paragraph
+            query_text=None  # Don't filter by input length
         )
 
         if not raw_examples:
             # Fallback: try any examples from author
             raw_examples = atlas.get_examples_by_rhetoric(
                 RhetoricalType.OBSERVATION,
-                top_k=num_examples * 3,
+                top_k=retrieval_pool_size,
                 author_name=author_name,
-                query_text=paragraph
+                query_text=None  # Don't filter by input length
             )
 
-        # Filter by complexity (length) - we want LONG examples
-        complex_examples = []
-        for ex in raw_examples:
-            if len(ex) >= complexity_min_length:
-                complex_examples.append(ex)
-            if len(complex_examples) >= num_examples:
-                break
-
-        # If we don't have enough complex examples, use what we have
-        if not complex_examples:
-            complex_examples = raw_examples[:num_examples] if raw_examples else []
+        # Filter by complexity (word count, sentence count, structure)
+        complex_examples = self._select_complex_examples(
+            raw_examples,
+            min_words=self.paragraph_fusion_config.get("min_word_count", 30),
+            min_sentences=self.paragraph_fusion_config.get("min_sentence_count", 2),
+            top_k=num_examples,
+            verbose=verbose
+        )
 
         if verbose:
-            print(f"  Retrieved {len(complex_examples)} complex examples")
+            print(f"  Selected {len(complex_examples)} complex examples after filtering")
 
         # Step 3: Extract style DNA if not provided
         if not style_dna:
@@ -2710,4 +2707,161 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
             if verbose:
                 print(f"  ✗ Paragraph fusion failed: {e}, using fallback")
             return paragraph  # Fallback to original
+
+    def _count_words(self, text: str) -> int:
+        """Count words in text.
+
+        Args:
+            text: Text string.
+
+        Returns:
+            Word count.
+        """
+        return len(text.split())
+
+    def _count_sentences(self, text: str) -> int:
+        """Count sentences in text.
+
+        Uses sentence-ending punctuation (. ! ?) to count sentences.
+
+        Args:
+            text: Text string.
+
+        Returns:
+            Sentence count.
+        """
+        # Count sentence-ending punctuation
+        sentence_endings = text.count('.') + text.count('!') + text.count('?')
+        # If no punctuation, treat as single sentence
+        return max(1, sentence_endings)
+
+    def _count_clauses(self, text: str) -> int:
+        """Count clauses as proxy for complexity.
+
+        Counts commas and conjunctions as indicators of clause density.
+
+        Args:
+            text: Text string.
+
+        Returns:
+            Approximate clause count.
+        """
+        # Count commas (often indicate clauses)
+        comma_count = text.count(',')
+        # Count common conjunctions
+        conjunctions = ['and', 'but', 'or', 'nor', 'for', 'so', 'yet', 'because', 'although', 'while']
+        conjunction_count = sum(text.lower().count(conj) for conj in conjunctions)
+        # Return approximate clause count (commas + conjunctions + 1 base clause)
+        return comma_count + conjunction_count + 1
+
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate Jaccard similarity between two texts.
+
+        Uses token overlap (intersection over union) for fast deduplication.
+        Formula: len(set(a) & set(b)) / len(set(a) | set(b))
+
+        Args:
+            text1: First text string.
+            text2: Second text string.
+
+        Returns:
+            Similarity score 0.0-1.0 (1.0 = identical).
+        """
+        tokens1 = set(text1.lower().split())
+        tokens2 = set(text2.lower().split())
+
+        if not tokens1 or not tokens2:
+            return 0.0
+
+        intersection = len(tokens1 & tokens2)
+        union = len(tokens1 | tokens2)
+
+        return intersection / union if union > 0 else 0.0
+
+    def _select_complex_examples(
+        self,
+        examples: List[str],
+        min_words: int = 30,
+        min_sentences: int = 2,
+        top_k: int = 5,
+        verbose: bool = False
+    ) -> List[str]:
+        """Select complex examples based on word count, sentence count, and structure.
+
+        Filters examples to find the most complex, dense paragraphs that can serve
+        as "expansion templates" for paragraph fusion.
+
+        Args:
+            examples: List of raw example strings from ChromaDB.
+            min_words: Minimum word count threshold (default: 30).
+            min_sentences: Minimum sentence count threshold (default: 2).
+            top_k: Number of examples to return (default: 5).
+            verbose: Whether to print debug information.
+
+        Returns:
+            List of top K complex examples, sorted by length (descending).
+        """
+        if not examples:
+            return []
+
+        # Step 1: Word Count Filter
+        word_filtered = []
+        for ex in examples:
+            word_count = self._count_words(ex)
+            if word_count >= min_words:
+                word_filtered.append((ex, word_count))
+
+        if verbose:
+            print(f"    Word filter ({min_words}+ words): {len(word_filtered)}/{len(examples)} passed")
+
+        if not word_filtered:
+            # If no examples meet word threshold, return empty
+            return []
+
+        # Step 2: Sentence Count Filter
+        sentence_filtered = []
+        for ex, word_count in word_filtered:
+            sentence_count = self._count_sentences(ex)
+            if sentence_count >= min_sentences:
+                sentence_filtered.append((ex, word_count, sentence_count))
+
+        if verbose:
+            print(f"    Sentence filter ({min_sentences}+ sentences): {len(sentence_filtered)}/{len(word_filtered)} passed")
+
+        if not sentence_filtered:
+            # If no examples meet sentence threshold, return empty
+            return []
+
+        # Step 3: Sort by Length (Descending) - CRITICAL: This gives model "expansion permission"
+        # Sort by word count descending to prioritize longest, most complex examples
+        sentence_filtered.sort(key=lambda x: x[1], reverse=True)
+
+        # Step 4: Deduplication (Remove similar examples, keep longer one)
+        unique_examples = []
+        for ex, word_count, sentence_count in sentence_filtered:
+            is_duplicate = False
+            for existing_ex, _, _ in unique_examples:
+                similarity = self._calculate_text_similarity(ex, existing_ex)
+                if similarity > 0.8:  # >80% token overlap = near duplicate
+                    is_duplicate = True
+                    if verbose:
+                        print(f"    Deduplication: Skipping duplicate (similarity: {similarity:.2f})")
+                    break
+
+            if not is_duplicate:
+                unique_examples.append((ex, word_count, sentence_count))
+
+        if verbose:
+            print(f"    Deduplication: {len(unique_examples)} unique examples from {len(sentence_filtered)} candidates")
+
+        # Step 5: Return Top K (already sorted by length descending)
+        result = [ex for ex, _, _ in unique_examples[:top_k]]
+
+        if verbose:
+            if result:
+                avg_words = sum(self._count_words(ex) for ex in result) / len(result)
+                avg_sentences = sum(self._count_sentences(ex) for ex in result) / len(result)
+                print(f"    Selected {len(result)} examples (avg: {avg_words:.1f} words, {avg_sentences:.1f} sentences)")
+
+        return result
 

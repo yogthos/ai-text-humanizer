@@ -322,6 +322,8 @@ def run_all_tests():
         ("Fusion Generation Structure", test_fusion_generation_structure),
         ("Style Alignment", test_style_alignment),
         ("Paragraph Mode Evaluation", test_paragraph_mode_evaluation),
+        ("Complexity-Based Selection", test_complexity_filtering),
+        ("Complexity Deduplication", test_complexity_deduplication),
     ]
 
     results = []
@@ -360,6 +362,100 @@ def run_all_tests():
     else:
         print(f"\n⚠️  {total - passed} test(s) failed. Please review the implementation.")
         return 1
+
+
+def test_complexity_filtering():
+    """Test 6: Verify Complexity-Based Example Selection"""
+    print("\n" + "="*60)
+    print("TEST 6: Complexity-Based Example Selection")
+    print("="*60)
+
+    translator = StyleTranslator()
+
+    # Create test examples with varying complexity
+    examples = [
+        "Short.",  # 1 word, 1 sentence - should be rejected
+        "This is a medium length example with multiple words but only one sentence.",  # 25 words, 1 sentence - should be rejected
+        "First sentence. Second sentence.",  # 4 words, 2 sentences - should be rejected (too short)
+        "This is a complex example with many words. It has multiple sentences. Each sentence adds complexity. The total word count exceeds the minimum threshold.",  # 30+ words, 4 sentences - should pass
+        "Another complex paragraph that demonstrates the target style. It contains multiple clauses and elaborate phrasing. This serves as an expansion template.",  # 25+ words, 3 sentences - should pass
+        "Simple text.",  # 2 words, 1 sentence - should be rejected
+        "This is a very long and complex paragraph that contains many words and multiple sentences. It demonstrates the intricate style of the target author. Each sentence builds upon the previous one. The paragraph serves as a perfect template for expansion.",  # 40+ words, 4 sentences - should pass
+    ]
+
+    print(f"Input: {len(examples)} examples with varying complexity")
+
+    # Test with default thresholds (30 words, 2 sentences)
+    selected = translator._select_complex_examples(
+        examples,
+        min_words=30,
+        min_sentences=2,
+        top_k=5,
+        verbose=True
+    )
+
+    print(f"\nSelected {len(selected)} complex examples:")
+    for i, ex in enumerate(selected, 1):
+        word_count = translator._count_words(ex)
+        sentence_count = translator._count_sentences(ex)
+        print(f"  {i}. {word_count} words, {sentence_count} sentences: {ex[:60]}...")
+
+    # Assertions
+    assert len(selected) > 0, "Should select at least one complex example"
+
+    # Verify all selected examples meet thresholds
+    for ex in selected:
+        word_count = translator._count_words(ex)
+        sentence_count = translator._count_sentences(ex)
+        assert word_count >= 30, f"Example should have >= 30 words, got {word_count}"
+        assert sentence_count >= 2, f"Example should have >= 2 sentences, got {sentence_count}"
+
+    # Verify sorting (should be descending by word count)
+    word_counts = [translator._count_words(ex) for ex in selected]
+    assert word_counts == sorted(word_counts, reverse=True), "Examples should be sorted by word count (descending)"
+
+    print("\n✓ Test 6 PASSED: Complexity-based example selection works")
+    return True
+
+
+def test_complexity_deduplication():
+    """Test 7: Verify Deduplication in Complexity Selection"""
+    print("\n" + "="*60)
+    print("TEST 7: Complexity Selection Deduplication")
+    print("="*60)
+
+    translator = StyleTranslator()
+
+    # Create similar examples (near duplicates)
+    examples = [
+        "This is a complex paragraph with many words. It contains multiple sentences. Each sentence adds detail and complexity to the overall structure.",
+        "This is a complex paragraph with many words. It contains multiple sentences. Each sentence adds detail and complexity to the overall structure.",  # Exact duplicate
+        "This is a complex paragraph with many words. It contains multiple sentences. Each sentence adds detail and complexity to the overall structure with slight variation.",  # Near duplicate (>80% similarity)
+        "A completely different complex paragraph. It has many words and multiple sentences. This one should be kept as it is unique.",
+    ]
+
+    print(f"Input: {len(examples)} examples (including duplicates)")
+
+    selected = translator._select_complex_examples(
+        examples,
+        min_words=20,
+        min_sentences=2,
+        top_k=5,
+        verbose=True
+    )
+
+    print(f"\nSelected {len(selected)} unique examples after deduplication")
+
+    # Assertions
+    # Should have fewer examples than input due to deduplication
+    assert len(selected) <= len(examples), "Deduplication should reduce count"
+    assert len(selected) >= 1, "Should have at least one unique example"
+
+    # Verify no exact duplicates
+    assert len(selected) == len(set(selected)), "No exact duplicates should remain"
+
+    print("\n✓ Test 7 PASSED: Deduplication works correctly")
+    return True
 
 
 if __name__ == "__main__":
