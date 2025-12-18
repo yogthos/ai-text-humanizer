@@ -109,7 +109,8 @@ The project uses `config.json` for configuration. Here's the complete structure:
   },
   "blend": {
     "authors": ["Dawkins", "Lovecraft"],
-    "ratio": 0.5
+    "ratio": 0.5,
+    "max_paragraphs_to_check": 100
   }
 }
 ```
@@ -207,6 +208,12 @@ Controls deterministic length validation to ensure content preservation:
   - **How it works**: Uses vector interpolation to find "bridge texts" that naturally blend both styles
     - Structure: `target_vec = (vec_a * (1 - ratio)) + (vec_b * ratio)`
     - Vocabulary: Samples words proportionally based on ratio
+- **blend.max_paragraphs_to_check**: Maximum number of paragraphs to process when finding bridge texts (default: `100`)
+  - Limits the number of paragraphs processed for performance when blending styles
+  - If there are more paragraphs than this limit, a random sample is used
+  - Higher values = better quality but slower performance
+  - Lower values = faster performance but potentially lower quality matches
+  - Recommended: 50-200 depending on your performance requirements
 
 ### Getting an API Key
 

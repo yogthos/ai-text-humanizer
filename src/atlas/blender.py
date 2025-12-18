@@ -89,7 +89,8 @@ class StyleBlender:
         author_a: str,
         author_b: str,
         blend_ratio: float = 0.5,
-        n_results: int = 5
+        n_results: int = 5,
+        max_paragraphs_to_check: int = 100
     ) -> Optional[str]:
         """Find 'Bridge Texts' that represent a mix of two authors.
 
@@ -101,6 +102,7 @@ class StyleBlender:
             author_b: Second author identifier.
             blend_ratio: Blend ratio (0.0 = All Author A, 1.0 = All Author B, default: 0.5).
             n_results: Number of results to return (default: 5).
+            max_paragraphs_to_check: Maximum number of paragraphs to process for performance (default: 100).
 
         Returns:
             Best matching bridge text paragraph, or None if no match found.
@@ -143,9 +145,28 @@ class StyleBlender:
         if not results.get('metadatas'):
             return None
 
-        # 4. Find closest style matches
+        # 4. Sample a subset of paragraphs for performance if we have too many
+        total_paragraphs = len(results['metadatas'])
+        if total_paragraphs > max_paragraphs_to_check:
+            import random
+            indices = list(range(total_paragraphs))
+            sampled_indices = random.sample(indices, max_paragraphs_to_check)
+            # Filter results to sampled indices
+            results['metadatas'] = [results['metadatas'][i] for i in sampled_indices]
+            if results.get('documents'):
+                results['documents'] = [results['documents'][i] for i in sampled_indices]
+            print(f"    Sampling {max_paragraphs_to_check} paragraphs from {total_paragraphs} total for performance")
+
+        # 5. Find closest style matches
         candidates = []
+        total_to_process = len(results['metadatas'])
+        early_exit_threshold = 0.1  # If we find a match this close, exit early
+
         for idx, meta in enumerate(results['metadatas']):
+            # Progress logging every 20 paragraphs
+            if idx > 0 and idx % 20 == 0:
+                print(f"    Processing paragraph {idx}/{total_to_process}...")
+
             # Recompute style vector from document text (not stored in metadata)
             if results.get('documents') and idx < len(results['documents']):
                 para_style_vec = get_style_vector(results['documents'][idx])
@@ -158,11 +179,19 @@ class StyleBlender:
             if doc_text:
                 candidates.append((distance, doc_text))
 
+                # Early exit optimization: if we find a very good match, return immediately
+                if distance < early_exit_threshold:
+                    print(f"    Found excellent match (distance: {distance:.4f}) - returning early")
+                    return doc_text
+
         if not candidates:
             return None
 
         # Sort by distance (closest first)
         candidates.sort(key=lambda x: x[0])
+
+        best_distance = candidates[0][0]
+        print(f"    Best bridge text found (distance: {best_distance:.4f})")
 
         # Return the best match
         return candidates[0][1]

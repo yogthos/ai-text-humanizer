@@ -172,7 +172,8 @@ def _call_ollama_api(
             "num_predict": 300  # Max tokens for critic response
         },
         "format": "json",  # Request JSON format
-        "keep_alive": keep_alive  # Keep model in VRAM to avoid reload latency
+        "keep_alive": keep_alive,  # Keep model in VRAM to avoid reload latency
+        "stream": False  # Request non-streaming response
     }
 
     try:
@@ -184,6 +185,23 @@ def _call_ollama_api(
             return result["message"]["content"].strip()
         else:
             raise ValueError(f"Unexpected API response: {result}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            # Model might not be found - provide helpful error message
+            try:
+                base_url = api_url.replace("/api/chat", "").replace("/api/generate", "").rstrip("/")
+                models_url = f"{base_url}/api/tags"
+                models_response = requests.get(models_url, timeout=5)
+                if models_response.status_code == 200:
+                    models_data = models_response.json()
+                    models = [m.get("name", "unknown") for m in models_data.get("models", [])]
+                    available_models = ", ".join(models[:5])  # Show first 5 models
+                else:
+                    available_models = "unknown"
+            except:
+                available_models = "unknown"
+            raise RuntimeError(f"Ollama API 404: Model '{model}' not found. Available models: {available_models}")
+        raise RuntimeError(f"Ollama API request failed: {e}")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Ollama API request failed: {e}")
 

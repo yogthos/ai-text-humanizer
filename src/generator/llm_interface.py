@@ -76,6 +76,21 @@ def _call_deepseek_api(
         raise RuntimeError(f"API request failed: {e}")
 
 
+def _get_ollama_models(api_url: str) -> str:
+    """Get list of available Ollama models for error messages."""
+    try:
+        base_url = api_url.replace("/api/chat", "").replace("/api/generate", "").rstrip("/")
+        models_url = f"{base_url}/api/tags"
+        response = requests.get(models_url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            models = [m.get("name", "unknown") for m in data.get("models", [])]
+            return ", ".join(models[:5])  # Show first 5 models
+    except:
+        pass
+    return "unknown"
+
+
 def _call_ollama_api(
     system_prompt: str,
     user_prompt: str,
@@ -116,7 +131,8 @@ def _call_ollama_api(
             "temperature": 0.1,  # Very low temperature for precise structure matching
             "num_predict": 200  # Max tokens
         },
-        "keep_alive": keep_alive  # Keep model in VRAM to avoid reload latency
+        "keep_alive": keep_alive,  # Keep model in VRAM to avoid reload latency
+        "stream": False  # Request non-streaming response
     }
 
     try:
@@ -128,6 +144,11 @@ def _call_ollama_api(
             return result["message"]["content"].strip()
         else:
             raise ValueError(f"Unexpected API response: {result}")
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            # Model might not be found - provide helpful error message
+            raise RuntimeError(f"Ollama API 404: Model '{model}' not found. Available models: {_get_ollama_models(api_url)}")
+        raise RuntimeError(f"Ollama API request failed: {e}")
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Ollama API request failed: {e}")
 

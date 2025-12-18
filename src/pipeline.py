@@ -106,6 +106,7 @@ def process_text(
     blend_config = config.get("blend", {})
     blend_authors = blend_config.get("authors", [])
     blend_ratio_config = blend_config.get("ratio", 0.5)
+    max_paragraphs_to_check = blend_config.get("max_paragraphs_to_check", 100)
     # CLI blend_ratio overrides config
     final_blend_ratio = blend_ratio if blend_ratio is not None else blend_ratio_config
 
@@ -361,7 +362,8 @@ def process_text(
                         structure_match = style_blender.retrieve_blended_template(
                             author_a=author_a,
                             author_b=author_b,
-                            blend_ratio=final_blend_ratio
+                            blend_ratio=final_blend_ratio,
+                            max_paragraphs_to_check=max_paragraphs_to_check
                         )
 
                         # For situation match, still use semantic similarity (could be enhanced later)
