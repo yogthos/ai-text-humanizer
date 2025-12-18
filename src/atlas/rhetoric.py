@@ -51,7 +51,17 @@ class RhetoricalClassifier:
 
         text_lower = text.lower()
 
-        # DEFINITION: "is a", "is an", "means", "refers to"
+        # Check for descriptive "is a" patterns first (OBSERVATION)
+        # These are NOT definitions - they're observations about examples/cases
+        descriptive_patterns = [
+            "is a raw", "is a clear", "is a good", "is a bad", "is a perfect",
+            "is a typical", "is an example", "is a case", "is a instance",
+            "is a clear example", "is a good example", "is a perfect example"
+        ]
+        if any(pattern in text_lower for pattern in descriptive_patterns):
+            return RhetoricalType.OBSERVATION
+
+        # DEFINITION: "is a", "is an", "means", "refers to" (but not descriptive patterns)
         definition_phrases = ["is a", "is an", "means", "refers to", "defined as", "is defined"]
         if any(phrase in text_lower for phrase in definition_phrases):
             return RhetoricalType.DEFINITION

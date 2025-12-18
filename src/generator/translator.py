@@ -142,6 +142,11 @@ class StyleTranslator:
                 return True
             return False
 
+        # Enhanced check: If blueprint has keywords but no SVO triples, mark as incomplete
+        original_word_count = len(blueprint.original_text.split())
+        if original_word_count > 5 and blueprint.core_keywords and not blueprint.svo_triples:
+            return True
+
         # Extract nouns from blueprint (subjects + objects, lemmatized)
         blueprint_nouns = set()
 
@@ -1181,34 +1186,67 @@ Output PURE JSON. A single list of strings:
             # Fallback if no examples provided
             examples = ["Example text in the target style."]
 
-        # Extract style_dna_dict from examples if available
-        style_dna_dict = None
-        try:
-            from src.analyzer.style_extractor import StyleExtractor
-            style_extractor = StyleExtractor(config_path=self.config_path)
-            if examples:
-                style_dna_dict = style_extractor.extract_style_dna(examples)
-        except Exception:
-            style_dna_dict = None
+        # STRICT FALLBACK RULE: If only 1 example, force fallback unless perfect match
+        if len(examples) == 1:
+            # Check sentence type compatibility
+            def _is_sentence_question(text):
+                """Check if sentence is a question."""
+                if not text or not text.strip():
+                    return False
+                question_starters = ["where", "what", "how", "why", "when", "do", "does", "is", "are"]
+                first_word = text.strip().split()[0].lower() if text.strip().split() else ""
+                return first_word in question_starters or text.strip().endswith("?")
 
-        # Phase 1: Smart Skeleton Selection (Pre-Filter)
-        template_config = self.translator_config.get("template_evolution", {})
-        num_examples = template_config.get("num_examples", 5)
-        candidates_per_template = template_config.get("candidates_per_template", 2)
+            example_is_question = _is_sentence_question(examples[0])
+            input_is_question = _is_sentence_question(blueprint.original_text)
 
-        # Retrieve top N examples (request more to have options after filtering)
-        if len(examples) < num_examples:
-            # Use all available examples
-            candidate_examples = examples
+            # Check rhetorical type match (should already match, but verify)
+            from src.atlas.rhetoric import RhetoricalClassifier
+            classifier = RhetoricalClassifier()
+            example_rhetorical_type = classifier.classify_heuristic(examples[0])
+
+            # If ANY mismatch, skip template evolution
+            if example_is_question != input_is_question or example_rhetorical_type != rhetorical_type:
+                if verbose:
+                    print(f"  ⚠ Only 1 example retrieved. Sentence type match: {example_is_question == input_is_question}, "
+                          f"Rhetorical type match: {example_rhetorical_type == rhetorical_type}. Skipping template evolution.")
+                # Skip template evolution, use standard generation
+                compatible_skeletons = []
+            else:
+                # Perfect match - allow template evolution to proceed
+                if verbose:
+                    print(f"  ✓ Only 1 example, but perfect match (sentence type and rhetorical type). Proceeding with template evolution.")
+                compatible_skeletons = self._extract_multiple_skeletons(examples, blueprint, verbose=verbose)
         else:
-            # Use top N examples
-            candidate_examples = examples[:num_examples]
+            # Multiple examples - proceed normally
+            # Extract style_dna_dict from examples if available
+            style_dna_dict = None
+            try:
+                from src.analyzer.style_extractor import StyleExtractor
+                style_extractor = StyleExtractor(config_path=self.config_path)
+                if examples:
+                    style_dna_dict = style_extractor.extract_style_dna(examples)
+            except Exception:
+                style_dna_dict = None
 
-        if verbose:
-            print(f"  Parallel Template Evolution: Processing {len(candidate_examples)} examples")
+            # Phase 1: Smart Skeleton Selection (Pre-Filter)
+            template_config = self.translator_config.get("template_evolution", {})
+            num_examples = template_config.get("num_examples", 5)
+            candidates_per_template = template_config.get("candidates_per_template", 2)
 
-        # Extract multiple skeletons with complexity filtering and deduplication
-        compatible_skeletons = self._extract_multiple_skeletons(candidate_examples, blueprint, verbose=verbose)
+            # Retrieve top N examples (request more to have options after filtering)
+            if len(examples) < num_examples:
+                # Use all available examples
+                candidate_examples = examples
+            else:
+                # Use top N examples
+                candidate_examples = examples[:num_examples]
+
+            if verbose:
+                print(f"  Parallel Template Evolution: Processing {len(candidate_examples)} examples")
+
+            # Extract multiple skeletons with complexity filtering and deduplication
+            compatible_skeletons = self._extract_multiple_skeletons(candidate_examples, blueprint, verbose=verbose)
 
         if verbose:
             print(f"  Skeletons extracted: {len(compatible_skeletons)} compatible (after complexity filtering)")

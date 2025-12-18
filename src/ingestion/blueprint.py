@@ -165,11 +165,66 @@ class BlueprintExtractor:
                             obj = self._extract_phrase(token)
                             break
 
+                # Extract main clause SVO
+                main_svo = None
                 if subject:
                     verb_lemma = root.lemma_.lower()
                     subject_clean = self._clean_span(subject)
                     obj_clean = self._clean_span(obj) if obj else ""
-                    svos.append((subject_clean, verb_lemma, obj_clean))
+                    main_svo = (subject_clean, verb_lemma, obj_clean)
+                    svos.append(main_svo)
+
+                # ENHANCEMENT: Extract SVO from nested clauses (that, which, who)
+                # Check for relative clauses and complement clauses
+                nested_clauses = []
+                for token in sent:
+                    # Find "that" clauses (ccomp, csubj, acl)
+                    if token.text.lower() in ["that", "which", "who", "whom"]:
+                        # Find the verb in the nested clause
+                        nested_verb = None
+                        for child in token.subtree:
+                            if child.pos_ == "VERB" and child != root:
+                                nested_verb = child
+                                break
+
+                        if nested_verb:
+                            # Extract SVO from nested clause
+                            nested_subject = None
+                            nested_obj = None
+
+                            # Find subject of nested verb
+                            for t in sent:
+                                if t.dep_ in ("nsubj", "nsubjpass") and t.head == nested_verb:
+                                    nested_subject = self._extract_phrase(t)
+                                    break
+
+                            # If no explicit subject, the head of "that" might be the subject
+                            if not nested_subject and token.head == nested_verb:
+                                # The noun before "that" is the subject
+                                for t in sent:
+                                    if t.head == token and t.pos_ == "NOUN":
+                                        nested_subject = self._extract_phrase(t)
+                                        break
+
+                            # Find object of nested verb
+                            for t in sent:
+                                if t.dep_ == "dobj" and t.head == nested_verb:
+                                    nested_obj = self._extract_phrase(t)
+                                    break
+
+                            if nested_subject or nested_obj:
+                                nested_verb_lemma = nested_verb.lemma_.lower()
+                                nested_subject_clean = self._clean_span(nested_subject) if nested_subject else ""
+                                nested_obj_clean = self._clean_span(nested_obj) if nested_obj else ""
+
+                                # Prioritize nested clause if it has more semantic content
+                                nested_svo = (nested_subject_clean, nested_verb_lemma, nested_obj_clean)
+                                if nested_subject_clean and nested_obj_clean:
+                                    # Nested clause has both subject and object - prioritize it
+                                    svos.insert(0, nested_svo)  # Add at beginning
+                                else:
+                                    svos.append(nested_svo)  # Add at end
+
                 continue
 
             # Strategy 2: ROOT is not a verb - find the main verb or handle special cases

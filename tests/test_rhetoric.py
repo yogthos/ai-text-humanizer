@@ -96,6 +96,30 @@ def test_empty_text():
     print("✓ test_empty_text passed")
 
 
+def test_descriptive_is_a_patterns():
+    """Test that descriptive 'is a' patterns are classified as OBSERVATION, not DEFINITION.
+
+    This test verifies the fix for the bug where "is a raw example" was incorrectly
+    classified as DEFINITION instead of OBSERVATION.
+    """
+    classifier = RhetoricalClassifier()
+
+    # These should be OBSERVATION (descriptive patterns)
+    assert classifier.classify_heuristic("The demand that NATO countries raise defense spending is a raw example.") == RhetoricalType.OBSERVATION
+    assert classifier.classify_heuristic("This is a clear example.") == RhetoricalType.OBSERVATION
+    assert classifier.classify_heuristic("That is a good case.") == RhetoricalType.OBSERVATION
+    assert classifier.classify_heuristic("It is a perfect instance.") == RhetoricalType.OBSERVATION
+    assert classifier.classify_heuristic("This is a typical example.") == RhetoricalType.OBSERVATION
+    assert classifier.classify_heuristic("It is an example of something.") == RhetoricalType.OBSERVATION
+
+    # But actual definitions should still be DEFINITION
+    assert classifier.classify_heuristic("A revolution is a process.") == RhetoricalType.DEFINITION
+    assert classifier.classify_heuristic("This is a type of machine.") == RhetoricalType.DEFINITION
+    assert classifier.classify_heuristic("A cat is an animal.") == RhetoricalType.DEFINITION
+
+    print("✓ test_descriptive_is_a_patterns passed")
+
+
 if __name__ == "__main__":
     test_heuristic_classification_definition()
     test_heuristic_classification_argument()
@@ -103,5 +127,6 @@ if __name__ == "__main__":
     test_heuristic_classification_imperative()
     test_llm_classification()
     test_empty_text()
+    test_descriptive_is_a_patterns()
     print("\n✓ All rhetoric tests completed!")
 
