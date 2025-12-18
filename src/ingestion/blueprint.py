@@ -352,8 +352,18 @@ class BlueprintExtractor:
                     if child.dep_ == "prep":
                         collect_phrase_tokens(child)
                     # For conjunctions (and, or), collect the conjoined items
+                    # CRITICAL: Recursively collect all conjoined items to preserve lists
                     elif child.dep_ == "conj":
                         collect_phrase_tokens(child)
+                    # For coordinating conjunctions (cc), also collect what they connect
+                    elif child.dep_ == "cc":
+                        # The conjunction itself is already added, now collect siblings
+                        # that are connected by this conjunction
+                        for sibling in t.children:
+                            if sibling.dep_ == "conj" and sibling.i not in visited:
+                                phrase_tokens.append(sibling)
+                                visited.add(sibling.i)
+                                collect_phrase_tokens(sibling)
                 # Also include tokens that modify this token
                 elif child.head == t and child.dep_ in ("amod", "compound", "nmod"):
                     phrase_tokens.append(child)

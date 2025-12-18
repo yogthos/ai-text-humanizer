@@ -18,6 +18,7 @@ from src.generator.translator import StyleTranslator
 from src.validator.semantic_critic import SemanticCritic
 from src.atlas.builder import StyleAtlas, load_atlas
 from src.atlas.style_registry import StyleRegistry
+from src.analyzer.style_extractor import StyleExtractor
 
 
 def _split_into_paragraphs(text: str) -> List[str]:
@@ -140,6 +141,7 @@ def process_text(
     classifier = RhetoricalClassifier()
     translator = StyleTranslator(config_path=config_path)
     critic = SemanticCritic(config_path=config_path)
+    style_extractor = StyleExtractor(config_path=config_path)
 
     # Split into paragraphs first
     paragraphs = _split_into_paragraphs(input_text)
@@ -150,6 +152,9 @@ def process_text(
     generated_paragraphs = []
     current_paragraph_sentences = []  # Track sentences for current paragraph
     is_first_paragraph = True
+
+    # Track used examples to prevent repetition
+    used_examples = set()
 
     # Context tracking for contextual anchoring
     previous_generated_text = ""
@@ -241,32 +246,57 @@ def process_text(
             if verbose:
                 print(f"  Rhetorical Type: {rhetorical_type.value}")
 
-            # Step 3: Retrieve examples
-            examples = atlas.get_examples_by_rhetoric(rhetorical_type, top_k=3, author_name=author_name)
+            # Step 3: Retrieve examples (exclude previously used ones)
+            examples = atlas.get_examples_by_rhetoric(
+                rhetorical_type,
+                top_k=3,
+                author_name=author_name,
+                exclude=list(used_examples)
+            )
             if not examples:
                 # Fallback to any examples from same author
-                examples = atlas.get_examples_by_rhetoric(RhetoricalType.OBSERVATION, top_k=3, author_name=author_name)
+                examples = atlas.get_examples_by_rhetoric(
+                    RhetoricalType.OBSERVATION,
+                    top_k=3,
+                    author_name=author_name,
+                    exclude=list(used_examples)
+                )
                 if not examples:
                     # Ultimate fallback: empty examples (translator will handle it)
                     examples = []
+
+            # Track used examples
+            used_examples.update(examples)
 
             if verbose:
                 print(f"  Examples retrieved: {len(examples)}")
                 for i, ex in enumerate(examples[:2]):
                     print(f"    Example {i+1}: {ex[:80]}{'...' if len(ex) > 80 else ''}")
 
+            # Step 3.5: Extract style DNA from examples (RAG-driven)
+            style_dna_dict = None
+            style_lexicon = None
+            if examples:
+                try:
+                    style_dna_dict = style_extractor.extract_style_dna(examples)
+                    style_lexicon = style_dna_dict.get("lexicon", [])
+                    if verbose:
+                        print(f"  Style DNA extracted:")
+                        print(f"    Lexicon: {', '.join(style_lexicon[:5])}{'...' if len(style_lexicon) > 5 else ''}")
+                        print(f"    Tone: {style_dna_dict.get('tone', 'N/A')}")
+                        print(f"    Structure: {style_dna_dict.get('structure', 'N/A')[:60]}...")
+                except Exception as e:
+                    if verbose:
+                        print(f"  ⚠ Style DNA extraction failed: {e}")
+                    style_dna_dict = None
+                    style_lexicon = None
+
             # Step 4: Generate initial draft
             result = None
             generated = None
 
             try:
-                # Get examples for rhetorical type
-                examples = atlas.get_examples_by_rhetoric(rhetorical_type, top_k=3, author_name=author_name)
-                if not examples:
-                    # Fallback to any examples from same author
-                    examples = atlas.get_examples_by_rhetoric(RhetoricalType.OBSERVATION, top_k=3, author_name=author_name)
-                    if not examples:
-                        examples = []
+                # Generate initial draft (examples already retrieved above)
 
                 # Generate initial draft
                 generated = translator.translate(
@@ -280,8 +310,8 @@ def process_text(
                 if verbose:
                     print(f"  Generated (initial draft): {generated}")
 
-                # Step 5: Validate initial draft
-                result = critic.evaluate(generated, blueprint)
+                # Step 5: Validate initial draft (with style whitelist)
+                result = critic.evaluate(generated, blueprint, allowed_style_words=style_lexicon)
 
                 if verbose:
                     print(f"  Critic Result: pass={result['pass']}, score={result['score']:.2f}")
@@ -304,7 +334,8 @@ def process_text(
                             initial_score=result["score"],
                             initial_feedback=result["feedback"],
                             critic=critic,
-                            verbose=verbose
+                            verbose=verbose,
+                            style_dna_dict=style_dna_dict
                         )
 
                         # Re-evaluate evolved draft
@@ -314,8 +345,10 @@ def process_text(
                             print(f"  Evolution Result: pass={result['pass']}, score={result['score']:.2f}")
                             if result['pass']:
                                 print(f"    ✓ Evolution successful: Score improved to {result['score']:.2f}")
+                                print(f"    Evolved text: {generated}")
                             else:
                                 print(f"    ✗ Evolution failed: Final score {result['score']:.2f}")
+                                print(f"    Evolved text: {generated}")
                     except Exception as e:
                         if verbose:
                             print(f"  ⚠ Evolution failed with exception: {e}")
@@ -326,7 +359,10 @@ def process_text(
                 result = None
 
             # Step 6: Accept or fallback
-            if result and result["pass"]:
+            # Soft Landing: If we have a decent draft (Score >= 0.75), KEEP IT.
+            # This prevents throwing away good work (e.g., 0.81 scores) just because pass=False
+            if result and result.get("score", 0.0) >= 0.75:
+                # Accept even if pass=False - score >= 0.75 is good enough
                 # DEBUG: Before appending, verify we haven't seen this before
                 if generated in generated_sentences:
                     print(f"  ⚠ WARNING: Duplicate generated sentence detected!")
@@ -354,15 +390,23 @@ def process_text(
                             is_first_paragraph = False
 
                     if verbose:
-                        print(f"  ✓ Accepted")
-            else:
+                        pass_status = "PASS" if result.get("pass", False) else "SOFT PASS"
+                        print(f"  ✓ Accepted ({pass_status}, score: {result.get('score', 0.0):.2f}): {generated}")
+            elif result and result.get("score", 0.0) < 0.75:
                 # Evolution failed or initial generation failed, use literal translation fallback
                 if verbose:
                     print(f"  ↻ Evolution/Generation failed, using literal translation")
                 try:
-                    generated = translator.translate_literal(blueprint, author_name, style_dna)
+                    # Pass rhetorical_type and examples for style-preserving fallback
+                    generated = translator.translate_literal(
+                        blueprint=blueprint,
+                        author_name=author_name,
+                        style_dna=style_dna,
+                        rhetorical_type=rhetorical_type,
+                        examples=examples
+                    )
                     if verbose:
-                        print(f"  Literal translation: {generated}")
+                        print(f"  Style-preserving fallback: {generated}")
 
                     # DEBUG: Check for duplicate before appending
                     if generated in generated_sentences:
@@ -382,6 +426,9 @@ def process_text(
                             write_callback(generated, is_new_paragraph, is_first_paragraph)
                             if is_new_paragraph and is_first_paragraph:
                                 is_first_paragraph = False
+
+                        if verbose:
+                            print(f"  ✓ Accepted (literal fallback): {generated}")
                 except Exception as e:
                     print(f"Warning: Literal translation failed: {e}")
                     # Ultimate fallback: use original sentence
@@ -404,6 +451,9 @@ def process_text(
                             write_callback(sentence, is_new_paragraph, is_first_paragraph)
                             if is_new_paragraph and is_first_paragraph:
                                 is_first_paragraph = False
+
+                        if verbose:
+                            print(f"  ✓ Accepted (original fallback): {sentence}")
 
         # Join sentences within paragraph with spaces
         if generated_sentences:
@@ -480,14 +530,26 @@ def run_pipeline(
     # Get style DNA from registry
     if atlas_cache_path:
         registry = StyleRegistry(atlas_cache_path)
+        exists, suggestion = registry.validate_author(author_name)
+        if not exists:
+            print(f"Warning: Author '{author_name}' not found in registry.")
+            if suggestion:
+                print(f"  {suggestion}")
+
         style_dna = registry.get_dna(author_name)
         if not style_dna:
             # Fallback: try to get from atlas
             style_dna = atlas.author_style_dna.get(author_name, "")
             if not style_dna:
                 print(f"Warning: No Style DNA found for '{author_name}'. Using empty DNA.")
+                available = list(registry.get_all_profiles().keys())
+                if available:
+                    print(f"Available authors in registry: {', '.join(sorted(available))}")
                 print(f"Generate Style DNA using: python scripts/generate_style_dna.py --author '{author_name}'")
                 style_dna = ""
+        else:
+            if verbose:
+                print(f"  ✓ Loaded Style DNA from registry for '{author_name}'")
     else:
         style_dna = atlas.author_style_dna.get(author_name, "")
 

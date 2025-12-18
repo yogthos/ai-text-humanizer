@@ -9,6 +9,7 @@ This module builds a Style Atlas by:
 
 import json
 import pickle
+import random
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
@@ -198,6 +199,9 @@ class StyleAtlas:
             # Filter out excluded texts
             if exclude:
                 examples = [ex for ex in examples if ex not in exclude]
+
+            # Randomize examples to ensure variety across calls
+            random.shuffle(examples)
 
             # Return top_k
             return examples[:top_k]

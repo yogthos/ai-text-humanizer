@@ -6,7 +6,7 @@ based on semantic blueprints rather than text overlap.
 
 import json
 import re
-from typing import Dict, Tuple, Optional, Set
+from typing import Dict, Tuple, Optional, Set, List
 from src.ingestion.blueprint import SemanticBlueprint, BlueprintExtractor
 
 try:
@@ -96,10 +96,48 @@ class SemanticCritic:
         else:
             self.semantic_model = None
 
+    def _calculate_semantic_similarity(self, original: str, generated: str) -> float:
+        """Calculate semantic similarity between original and generated text.
+
+        Uses sentence-transformers to encode texts and compute cosine similarity.
+        This automatically catches semantic issues like missing content or contradictions.
+
+        Args:
+            original: Original input text.
+            generated: Generated text to compare.
+
+        Returns:
+            Similarity score between 0.0 and 1.0 (1.0 = identical meaning).
+        """
+        if not self.semantic_model:
+            # Fallback: return 1.0 if model unavailable (let other checks handle it)
+            return 1.0
+
+        try:
+            # Encode both texts
+            original_embedding = self.semantic_model.encode(original, convert_to_tensor=True)
+            generated_embedding = self.semantic_model.encode(generated, convert_to_tensor=True)
+
+            # Calculate cosine similarity
+            if util:
+                similarity = util.cos_sim(original_embedding, generated_embedding).item()
+            else:
+                # Fallback if util not available
+                import torch
+                similarity = torch.nn.functional.cosine_similarity(
+                    original_embedding, generated_embedding, dim=0
+                ).item()
+
+            return float(similarity)
+        except Exception as e:
+            # If encoding fails, return 1.0 to allow other checks to run
+            return 1.0
+
     def evaluate(
         self,
         generated_text: str,
-        input_blueprint: SemanticBlueprint
+        input_blueprint: SemanticBlueprint,
+        allowed_style_words: Optional[List[str]] = None
     ) -> Dict[str, any]:
         """Evaluate generated text against input blueprint.
 
@@ -116,6 +154,19 @@ class SemanticCritic:
             - feedback: str
             - score: float (0-1, weighted: accuracy * 0.7 + fluency * 0.3)
         """
+        # CRITICAL: Copy-Paste Check - reject exact copies of original text
+        # This forces the system to transform the style, not just copy verbatim
+        if generated_text.strip() == input_blueprint.original_text.strip():
+            return {
+                "pass": False,
+                "score": 0.1,  # Not 0.0 to allow evolution to improve from this state
+                "recall_score": 1.0,  # Technically perfect recall, but...
+                "precision_score": 1.0,  # Technically perfect precision, but...
+                "fluency_score": 1.0,  # Technically fluent, but...
+                "feedback": "CRITICAL: Generated text is identical to input. You must transform the style, not copy it verbatim. The output must be different from the input while preserving meaning.",
+                "primary_failure_type": "meaning"
+            }
+
         if not generated_text or not generated_text.strip():
             return {
                 "pass": False,
@@ -125,6 +176,278 @@ class SemanticCritic:
                 "score": 0.0,
                 "feedback": "CRITICAL: Generated text is empty."
             }
+
+        original_text = input_blueprint.original_text
+
+        # HARD GATE: Semantic Similarity Check (Phase 3)
+        # This replaces manual word-count and fragment checks with embedding-based validation
+        similarity = None
+        if self.semantic_model and original_text:
+            similarity = self._calculate_semantic_similarity(original_text, generated_text)
+            # Hard floor: 0.75 (below this is likely hallucination)
+            if similarity < 0.75:
+                return {
+                    "pass": False,
+                    "recall_score": 0.0,
+                    "precision_score": 0.0,
+                    "fluency_score": 0.0,
+                    "score": 0.0,
+                    "feedback": f"CRITICAL: Semantic similarity too low ({similarity:.2f} < 0.75). Generated text does not preserve meaning from original."
+                }
+            # Grace zone: 0.70-0.75 - will check recall/fluency later for override
+            # 0.75-0.85 is acceptable for style transfer
+
+        # Fallback checks (only if semantic model unavailable)
+        # These are kept as backup but semantic similarity is preferred
+        if not self.semantic_model and original_text:
+            # HARD GATE 1: Compression Ratio Check (Fallback)
+            # Check if output has lost too much content relative to input
+            input_len = len(original_text.split())
+            output_len = len(generated_text.split())
+            ratio = output_len / max(1, input_len)
+
+            # Stricter threshold based on input length
+            # For short sentences (<10 words), require 60% retention
+            # For longer sentences, require 50% retention
+            if input_len < 10 and ratio <= 0.6:
+                return {
+                    "pass": False,
+                    "recall_score": 0.0,
+                    "precision_score": 0.0,
+                    "fluency_score": 0.0,
+                    "score": 0.0,
+                    "feedback": f"CRITICAL: Semantic collapse. Output ({output_len} words) lost >40% of original content ({input_len} words). Restore missing concepts from the original text."
+                }
+            elif input_len >= 10 and ratio < 0.5:
+                return {
+                    "pass": False,
+                    "recall_score": 0.0,
+                    "precision_score": 0.0,
+                    "fluency_score": 0.0,
+                    "score": 0.0,
+                    "feedback": f"CRITICAL: Semantic collapse. Output ({output_len} words) lost >50% of original content ({input_len} words). Restore missing concepts from the original text."
+                }
+
+            # HARD GATE 1.5: Noun Preservation Check (Fallback)
+            # Extract concrete nouns from original and ensure they appear in output
+            if original_text:
+                try:
+                    import spacy
+                    try:
+                        # Load spaCy with full pipeline for noun extraction
+                        if _spacy_nlp:
+                            nlp = _spacy_nlp
+                        else:
+                            nlp = spacy.load("en_core_web_sm")
+                    except (OSError, ImportError):
+                        nlp = None
+
+                    if nlp:
+                        # Extract nouns from original text
+                        original_doc = nlp(original_text)
+                        original_nouns = set()
+                        for token in original_doc:
+                            if token.pos_ == "NOUN" and not token.is_stop:
+                                # Use lemma for matching (handles plurals/singulars)
+                                original_nouns.add(token.lemma_.lower())
+
+                        # Extract nouns from generated text
+                        generated_doc = nlp(generated_text)
+                        generated_nouns = set()
+                        for token in generated_doc:
+                            if token.pos_ == "NOUN" and not token.is_stop:
+                                generated_nouns.add(token.lemma_.lower())
+
+                        # HARD GATE: If original had nouns but output has ZERO matching nouns, fail
+                        if original_nouns and not any(noun in generated_nouns for noun in original_nouns):
+                            missing_nouns = list(original_nouns)[:5]  # Show first 5 missing nouns
+                            return {
+                                "pass": False,
+                                "recall_score": 0.0,
+                                "precision_score": 0.0,
+                                "fluency_score": 0.0,
+                                "score": 0.0,
+                                "feedback": f"CRITICAL: Key nouns from original text are missing in output. Missing nouns: {', '.join(missing_nouns)}. Restore all key concepts from the original text."
+                            }
+                except Exception:
+                    # If noun check fails, continue (don't block on spaCy errors)
+                    pass
+
+        # HARD GATE 2: Fragment Check (Fallback - only if semantic model unavailable)
+        # Semantic similarity check above should catch fragments, but keep this as backup
+        if not self.semantic_model:
+            try:
+                # Load spaCy with parser for dependency checking
+                import spacy
+                try:
+                    # Try to use existing nlp if parser is available, otherwise load with parser
+                    if _spacy_nlp and hasattr(_spacy_nlp, 'parser') and _spacy_nlp.parser is not None:
+                        nlp = _spacy_nlp
+                    else:
+                        # Load with parser for this check
+                        nlp = spacy.load("en_core_web_sm")
+                except (OSError, ImportError):
+                    # If spaCy not available, skip fragment check
+                    nlp = None
+
+                if nlp:
+                    doc = nlp(generated_text)
+                    has_verb = any(token.pos_ == "VERB" for token in doc)
+                    has_subj = any(token.dep_ == "nsubj" or token.dep_ == "nsubjpass" for token in doc)
+
+                    # Also check for imperative sentences (no explicit subject but verb is root)
+                    is_imperative = False
+                    if has_verb and not has_subj:
+                        # Check if root is a verb (imperative sentences)
+                        root = [token for token in doc if token.dep_ == "ROOT"]
+                        if root and root[0].pos_ == "VERB":
+                            # Imperative sentences are valid (e.g., "Stop.")
+                            is_imperative = True
+
+                    if not (has_verb and (has_subj or is_imperative)):
+                        return {
+                            "pass": False,
+                            "recall_score": 0.0,
+                            "precision_score": 0.0,
+                            "fluency_score": 0.0,
+                            "score": 0.0,
+                            "feedback": "CRITICAL: Sentence fragment detected (missing Subject or Verb). Complete the thought with a proper main clause."
+                        }
+            except Exception:
+                # If fragment check fails, continue (don't block on spaCy errors)
+                pass
+
+        # HARD GATE 3: Logic Contradiction Check (The Oxymoron Killer)
+        # Use spaCy's dependency parsing and word vectors to detect semantic contradictions
+        try:
+            import spacy
+            try:
+                # Try to load model with word vectors for semantic analysis
+                if _spacy_nlp and hasattr(_spacy_nlp.vocab, 'vectors') and len(_spacy_nlp.vocab.vectors) > 0:
+                    nlp = _spacy_nlp
+                    has_vectors = True
+                else:
+                    # Try medium model with vectors first
+                    try:
+                        nlp = spacy.load("en_core_web_md")
+                        has_vectors = True
+                    except OSError:
+                        # Fallback to small model
+                        nlp = spacy.load("en_core_web_sm")
+                        has_vectors = hasattr(nlp.vocab, 'vectors') and len(nlp.vocab.vectors) > 0
+            except (OSError, ImportError):
+                nlp = None
+                has_vectors = False
+
+            if nlp:
+                doc = nlp(generated_text)
+                contradictions = []
+
+                # Use dependency parsing to find modifier-noun pairs
+                for token in doc:
+                    if token.pos_ == "NOUN":
+                        # Check for adjective modifiers (amod dependency)
+                        for child in token.children:
+                            if child.dep_ == "amod" and child.pos_ == "ADJ":
+                                modifier = child
+                                noun = token
+
+                                # Use spaCy's semantic analysis to detect contradictions
+                                if has_vectors and modifier.has_vector and noun.has_vector:
+                                    # Check semantic compatibility using word vectors
+                                    similarity = modifier.similarity(noun)
+
+                                    # Very low similarity suggests potential contradiction
+                                    # But we need to be smarter - check semantic properties
+                                    # Words meaning "unlimited" should be similar to each other
+                                    # Words meaning "limited" should be similar to each other
+                                    # If modifier is "unlimited-type" and noun is "limited-type", it's a contradiction
+
+                                    # Use semantic anchors to detect contradiction patterns
+                                    # Create semantic clusters using word vectors
+                                    unlimited_anchors = ["infinite", "ceaseless", "boundless", "eternal", "endless", "unlimited"]
+                                    limited_anchors = ["finite", "limited", "bounded", "temporary", "transient", "ending"]
+
+                                    # Check if modifier is semantically similar to "unlimited" concepts
+                                    modifier_unlimited_score = 0.0
+                                    modifier_limited_score = 0.0
+
+                                    for anchor in unlimited_anchors:
+                                        if anchor in nlp.vocab and nlp.vocab[anchor].has_vector:
+                                            score = modifier.similarity(nlp(anchor))
+                                            modifier_unlimited_score = max(modifier_unlimited_score, score)
+
+                                    for anchor in limited_anchors:
+                                        if anchor in nlp.vocab and nlp.vocab[anchor].has_vector:
+                                            score = modifier.similarity(nlp(anchor))
+                                            modifier_limited_score = max(modifier_limited_score, score)
+
+                                    # Check if noun is semantically similar to "limited" concepts
+                                    noun_unlimited_score = 0.0
+                                    noun_limited_score = 0.0
+
+                                    for anchor in unlimited_anchors:
+                                        if anchor in nlp.vocab and nlp.vocab[anchor].has_vector:
+                                            score = noun.similarity(nlp(anchor))
+                                            noun_unlimited_score = max(noun_unlimited_score, score)
+
+                                    for anchor in limited_anchors:
+                                        if anchor in nlp.vocab and nlp.vocab[anchor].has_vector:
+                                            score = noun.similarity(nlp(anchor))
+                                            noun_limited_score = max(noun_limited_score, score)
+
+                                    # Contradiction: modifier implies "unlimited" but noun implies "limited"
+                                    # OR modifier implies "limited" but noun implies "unlimited"
+                                    if (modifier_unlimited_score > 0.5 and noun_limited_score > 0.5) or \
+                                       (modifier_limited_score > 0.5 and noun_unlimited_score > 0.5):
+                                        contradictions.append((modifier.text, noun.text))
+
+                                    # Also check direct similarity - very low similarity with modifier-noun
+                                    # combined with semantic property mismatch is a strong signal
+                                    elif similarity < 0.2 and (modifier_unlimited_score > 0.4 or modifier_limited_score > 0.4):
+                                        contradictions.append((modifier.text, noun.text))
+
+                # Also check for adverb-adjective pairs that might create contradictions
+                for token in doc:
+                    if token.pos_ == "ADJ":
+                        for child in token.children:
+                            if child.dep_ == "advmod" and child.pos_ == "ADV":
+                                adverb = child
+                                adjective = token
+
+                                if has_vectors and adverb.has_vector and adjective.has_vector:
+                                    # Similar semantic analysis for adverb-adjective pairs
+                                    unlimited_anchors = ["infinitely", "ceaselessly", "boundlessly", "eternally", "endlessly"]
+                                    limited_anchors = ["finitely", "temporarily", "transiently"]
+
+                                    adverb_unlimited_score = max([
+                                        adverb.similarity(nlp(anchor))
+                                        for anchor in unlimited_anchors
+                                        if anchor in nlp.vocab and nlp.vocab[anchor].has_vector
+                                    ] + [0.0])
+
+                                    adj_limited_score = max([
+                                        adjective.similarity(nlp(anchor.replace("ly", "")))
+                                        for anchor in limited_anchors
+                                        if anchor.replace("ly", "") in nlp.vocab and nlp.vocab[anchor.replace("ly", "")].has_vector
+                                    ] + [0.0])
+
+                                    if adverb_unlimited_score > 0.5 and adj_limited_score > 0.5:
+                                        contradictions.append((adverb.text, adjective.text))
+
+                if contradictions:
+                    contradiction_pairs = [f"'{mod}' contradicts '{noun}'" for mod, noun in contradictions[:3]]
+                    return {
+                        "pass": False,
+                        "recall_score": 0.0,
+                        "precision_score": 0.0,
+                        "fluency_score": 0.0,
+                        "score": 0.0,
+                        "feedback": f"CRITICAL: Logical contradiction detected: {', '.join(contradiction_pairs)}. Use modifiers that align with the noun's definition."
+                    }
+        except Exception:
+            # If logic check fails, continue (don't block on spaCy errors)
+            pass
 
         # First, validate citations and quotes (non-negotiable)
         citations_valid, citations_feedback = self._validate_citations_and_quotes(
@@ -163,7 +486,8 @@ class SemanticCritic:
         # Precision check: Did we hallucinate?
         precision_score, precision_feedback = self._check_precision(
             generated_blueprint,
-            input_blueprint
+            input_blueprint,
+            allowed_style_words=allowed_style_words
         )
 
         # Fluency check: Is it grammatically natural?
@@ -173,10 +497,26 @@ class SemanticCritic:
         accuracy_score = (recall_score + precision_score) / 2.0
         final_score = accuracy_score * self.accuracy_weight + fluency_score * self.fluency_weight
 
+        # Style boost: If style words from lexicon are used, boost the score
+        if allowed_style_words:
+            style_words_set = {w.lower().strip() for w in allowed_style_words}
+            generated_tokens = _get_significant_tokens(generated_text)
+            used_style_words = [w for w in style_words_set if w in generated_tokens]
+            if used_style_words:
+                # Small boost (0.02 per style word, max 0.1) for using style vocabulary
+                style_boost = min(0.1, len(used_style_words) * 0.02)
+                final_score = min(1.0, final_score + style_boost)
+
         # Pass if recall, precision, and fluency are above thresholds
         passes = (recall_score >= self.recall_threshold and
                  precision_score >= self.precision_threshold and
                  fluency_score >= self.fluency_threshold)
+
+        # GRACE ZONE OVERRIDE: If similarity is 0.70-0.75 but recall=1.0 and fluency>0.9,
+        # accept despite lower similarity (high quality writing forgives slight semantic drift)
+        if similarity is not None and 0.70 <= similarity < 0.75:
+            if recall_score >= 1.0 and fluency_score > 0.9:
+                passes = True
 
         feedback_parts = []
         if recall_score < self.recall_threshold:
@@ -258,7 +598,8 @@ class SemanticCritic:
     def _check_precision(
         self,
         generated_blueprint: SemanticBlueprint,
-        input_blueprint: SemanticBlueprint
+        input_blueprint: SemanticBlueprint,
+        allowed_style_words: Optional[List[str]] = None
     ) -> Tuple[float, str]:
         """Check if generated text hallucinated concepts (all heavy words must match input).
 
@@ -327,7 +668,14 @@ class SemanticCritic:
 
             if precision_ratio < self.precision_threshold:
                 hallucinated = heavy_set - input_set
-                return precision_ratio, f"CRITICAL: Hallucinated concepts: {', '.join(list(hallucinated)[:5])}. Remove concepts not in input."
+                # Filter out allowed style words (whitelist)
+                if allowed_style_words:
+                    style_words_set = {w.lower().strip() for w in allowed_style_words}
+                    hallucinated = {w for w in hallucinated if w.lower() not in style_words_set}
+                if hallucinated:
+                    return precision_ratio, f"CRITICAL: Hallucinated concepts: {', '.join(list(hallucinated)[:5])}. Remove concepts not in input."
+                # If all "hallucinated" words are actually style words, precision is acceptable
+                return 1.0, ""
             return precision_ratio, ""
 
         try:
@@ -344,7 +692,14 @@ class SemanticCritic:
 
             if precision_ratio < self.precision_threshold:
                 hallucinated = [heavy_words[i] for i, score in enumerate(max_scores) if score.item() < self.similarity_threshold]
-                return precision_ratio, f"CRITICAL: Hallucinated concepts: {', '.join(hallucinated[:5])}. Remove concepts not in input."
+                # Filter out allowed style words (whitelist)
+                if allowed_style_words:
+                    style_words_set = {w.lower().strip() for w in allowed_style_words}
+                    hallucinated = [w for w in hallucinated if w.lower() not in style_words_set]
+                if hallucinated:
+                    return precision_ratio, f"CRITICAL: Hallucinated concepts: {', '.join(hallucinated[:5])}. Remove concepts not in input."
+                # If all "hallucinated" words are actually style words, precision is acceptable
+                return 1.0, ""
 
             return precision_ratio, ""
         except Exception:
@@ -359,6 +714,8 @@ class SemanticCritic:
         - Unnatural verb forms
         - Incomplete sentences
         - Awkward word combinations
+        - Interrupted future tense (stilted patterns)
+        - Unnecessary passive voice
 
         Args:
             generated_text: Text to evaluate for fluency.
@@ -374,6 +731,22 @@ class SemanticCritic:
         feedback_parts = []
 
         try:
+            # Check for interrupted future tense (stilted pattern)
+            # Pattern: will/shall + [comma] + [any adverb phrase] + [comma] + verb
+            # Catches: "will, in time, be", "shall, ultimately, succumb", "will, eventually, break"
+            stilted_pattern = re.search(r'\b(will|shall)\s*,\s*[^,]+,\s*(be\s+)?\w+', generated_text, re.IGNORECASE)
+            if stilted_pattern:
+                score -= 0.5
+                feedback_parts.append("CRITICAL: Stilted phrasing detected. Do not interrupt 'will/shall' with commas. Use 'eventually [verb]' instead.")
+
+            # Check for future passive voice (weak construction)
+            # Pattern: will be + past participle (ending in -en or -ed)
+            # Matches: will be broken, will be taken, will be given
+            future_passive = re.search(r'\bwill\s+be\s+\w+(?:en|ed)\b', generated_text, re.IGNORECASE)
+            if future_passive:
+                score -= 0.15
+                feedback_parts.append("Prefer Active Voice for universal statements (e.g., 'breaks' instead of 'will be broken').")
+
             # Parse with spaCy
             doc = self.extractor.nlp(generated_text)
 
@@ -387,9 +760,18 @@ class SemanticCritic:
                 if token.pos_ == "VERB" and token.dep_ == "ROOT":
                     has_predicate = True
 
+            # Relaxed check: Only flag incomplete structure if the current score is also low
+            # Complex sentences with good overall fluency should not be flagged as incomplete
+            # We check the score after other penalties to see if it's still high
             if not has_subject or not has_predicate:
-                score -= 0.3
-                feedback_parts.append("Incomplete sentence structure")
+                # Calculate what the score would be after this penalty
+                potential_score = score - 0.3
+                # If the score would still be > 0.8 after penalty, assume structure is fine
+                # This prevents false positives on complex clauses that parse differently
+                if potential_score <= 0.8:
+                    score -= 0.3
+                    feedback_parts.append("Incomplete sentence structure")
+                # If score would remain > 0.8, trust the LLM's judgment - don't penalize
 
             # Check 2: Missing articles before singular nouns
             # Pattern: verb + singular noun without article (e.g., "touch breaks")

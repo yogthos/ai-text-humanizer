@@ -1139,7 +1139,8 @@ ORIGINAL TEXT (for content preservation check):
 - CRITICAL: All direct quotations (text in quotes) from Original Text must be preserved exactly
 - CRITICAL: ALL facts, concepts, details, and information from Original Text must be preserved in Generated Text
 - If Original Text contains multiple facts/concepts, ALL must appear in Generated Text
-- If any facts, concepts, or details are missing, this is a CRITICAL FAILURE"""
+- **CRITICAL - LIST PRESERVATION:** If Original Text contains lists (e.g., "birth, life, and decay"), ALL items must appear in Generated Text. Missing any item from a list is a CRITICAL FAILURE.
+- If any facts, concepts, details, or list items are missing, this is a CRITICAL FAILURE"""
         preservation_instruction = """
 
 CRITICAL: Check that:
@@ -1559,9 +1560,24 @@ def apply_surgical_fix(
     llm = LLMProvider(config_path=config_path)
 
     # Build editor prompt
-    system_prompt = "You are a Text Editor. Your task is to apply specific edits to text without rewriting the entire content."
+    from pathlib import Path
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    system_prompt_template_path = prompts_dir / "critic_editor_system.md"
+    user_prompt_template_path = prompts_dir / "critic_editor_user.md"
 
-    user_prompt = f"""You are a Text Editor. DO NOT REWRITE the whole content.
+    if system_prompt_template_path.exists():
+        system_prompt = system_prompt_template_path.read_text().strip()
+    else:
+        system_prompt = "You are a Text Editor. Your task is to apply specific edits to text without rewriting the entire content."
+
+    if user_prompt_template_path.exists():
+        user_prompt_template = user_prompt_template_path.read_text().strip()
+        user_prompt = user_prompt_template.format(
+            draft_text=draft_text,
+            instruction=instruction
+        )
+    else:
+        user_prompt = f"""You are a Text Editor. DO NOT REWRITE the whole content.
 
 Input Text: "{draft_text}"
 

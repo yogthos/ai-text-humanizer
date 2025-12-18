@@ -5,7 +5,24 @@ OBSERVATION, IMPERATIVE) to enable better style example retrieval.
 """
 
 from enum import Enum
+from pathlib import Path
 from typing import Optional
+
+
+def _load_prompt_template(template_name: str) -> str:
+    """Load a prompt template from the prompts directory.
+
+    Args:
+        template_name: Name of the template file (e.g., 'rhetoric_classification_user.md')
+
+    Returns:
+        Template content as string.
+    """
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    template_path = prompts_dir / template_name
+    if not template_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {template_path}")
+    return template_path.read_text().strip()
 
 
 class RhetoricalType(Enum):
@@ -68,20 +85,15 @@ class RhetoricalClassifier:
         if not text or not text.strip():
             return RhetoricalType.UNKNOWN
 
-        prompt = f"""Classify the following text into one of these rhetorical modes:
-- DEFINITION: Explains what something is (e.g., "A revolution is...")
-- ARGUMENT: Makes a claim/logic (e.g., "Therefore, we must...")
-- OBSERVATION: Describes a state (e.g., "The enemy advances...")
-- IMPERATIVE: Commands/Instructions (e.g., "Study the problem...")
+        prompt_template = _load_prompt_template("rhetoric_classification_user.md")
+        prompt = prompt_template.format(text=text)
 
-Text: "{text}"
-
-Respond with ONLY one word: DEFINITION, ARGUMENT, OBSERVATION, or IMPERATIVE."""
+        system_prompt = _load_prompt_template("rhetoric_classification_system.md")
 
         try:
             response = llm_provider.call(
                 prompt=prompt,
-                system_prompt="You are a text classifier. Respond with only the classification word.",
+                system_prompt=system_prompt,
                 max_tokens=10
             )
 

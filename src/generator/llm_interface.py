@@ -241,19 +241,33 @@ def generate_sentence(
     # Add hint from previous attempt if provided (for retries)
     # Use Chain-of-Thought format for retries
     if hint:
-        user_prompt += "\n\n"
-        user_prompt += "--- RETRY MODE: CHAIN-OF-THOUGHT CORRECTION ---\n\n"
-        user_prompt += f"CRITIC FEEDBACK: {hint}\n\n"
-        user_prompt += "TASK:\n"
-        user_prompt += "1. Analyze WHY the previous attempt failed the critic's specific rule.\n"
-        user_prompt += "2. Write a 'Plan of Correction' (1 sentence).\n"
-        user_prompt += "3. Generate the final corrected text.\n\n"
-        user_prompt += "Output format:\n"
-        user_prompt += "PLAN: [Your reasoning]\n"
-        user_prompt += "TEXT: [The corrected text]"
-        # If hint contains length information, emphasize it
-        if "words" in hint.lower() and ("delete" in hint.lower() or "expand" in hint.lower() or "add" in hint.lower()):
-            user_prompt += "\n\nCRITICAL: The length constraint above is a hard requirement. You MUST follow the exact word count instruction."
+        from pathlib import Path
+        prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+        retry_template_path = prompts_dir / "llm_interface_retry.md"
+        if retry_template_path.exists():
+            retry_template = retry_template_path.read_text().strip()
+            length_constraint = ""
+            if "words" in hint.lower() and ("delete" in hint.lower() or "expand" in hint.lower() or "add" in hint.lower()):
+                length_constraint = "\n\nCRITICAL: The length constraint above is a hard requirement. You MUST follow the exact word count instruction."
+            retry_prompt = retry_template.format(
+                hint=hint,
+                length_constraint=length_constraint
+            )
+            user_prompt += "\n\n" + retry_prompt
+        else:
+            # Fallback to old hardcoded version if template missing
+            user_prompt += "\n\n"
+            user_prompt += "--- RETRY MODE: CHAIN-OF-THOUGHT CORRECTION ---\n\n"
+            user_prompt += f"CRITIC FEEDBACK: {hint}\n\n"
+            user_prompt += "TASK:\n"
+            user_prompt += "1. Analyze WHY the previous attempt failed the critic's specific rule.\n"
+            user_prompt += "2. Write a 'Plan of Correction' (1 sentence).\n"
+            user_prompt += "3. Generate the final corrected text.\n\n"
+            user_prompt += "Output format:\n"
+            user_prompt += "PLAN: [Your reasoning]\n"
+            user_prompt += "TEXT: [The corrected text]"
+            if "words" in hint.lower() and ("delete" in hint.lower() or "expand" in hint.lower() or "add" in hint.lower()):
+                user_prompt += "\n\nCRITICAL: The length constraint above is a hard requirement. You MUST follow the exact word count instruction."
 
     # Calculate adaptive max_tokens based on input length
     # Allow 3-4x input length for style transfer (structure adaptation needs space)

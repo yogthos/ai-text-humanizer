@@ -169,20 +169,14 @@ def generate_author_style_dna(author_name: str, sample_text: str, config_path: s
         sample_snippet += "..."
 
     # Build prompt for Style DNA generation
-    system_prompt = """You are a literary style analyst. Your task is to analyze writing style and generate concise, accurate style descriptions."""
+    system_prompt_template = _load_prompt_template("prompt_builder_style_dna_system.md")
+    system_prompt = system_prompt_template
 
-    user_prompt = f"""Analyze this sample text by {author_name}:
-"{sample_snippet}"
-
-Output a concise 'Style DNA' string (max 40 words) describing:
-1. Sentence rhythm (e.g., staccato, flowing, labyrinthine)
-2. Vocabulary preference (e.g., technical, archaic, concrete, abstract)
-3. Rhetorical habits (e.g., irony, directness, metaphors, passive voice)
-
-Format: [Adjectives describing tone] + [Structural habits].
-Example: "Stoic, minimalist, and journalistic. Uses short declarative sentences with concrete nouns and strong verbs; avoids adjectives, adverbs, and complex subordination."
-
-Output ONLY the Style DNA string, nothing else."""
+    user_prompt_template = _load_prompt_template("prompt_builder_style_dna_user.md")
+    user_prompt = user_prompt_template.format(
+        author_name=author_name,
+        sample_snippet=sample_snippet
+    )
 
     try:
         # Use LLMProvider to generate Style DNA
