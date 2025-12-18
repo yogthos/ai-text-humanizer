@@ -96,6 +96,17 @@ class SemanticCritic:
         else:
             self.semantic_model = None
 
+        # Initialize LLM provider for meaning verification (lazy initialization)
+        self.use_llm_verification = critic_config.get("use_llm_verification", True)
+        self.llm_provider = None
+        if self.use_llm_verification:
+            try:
+                from src.generator.llm_provider import LLMProvider
+                self.llm_provider = LLMProvider(config_path=config_path)
+            except Exception:
+                # LLM provider unavailable - verification will be skipped
+                self.llm_provider = None
+
     def _calculate_semantic_similarity(self, original: str, generated: str) -> float:
         """Calculate semantic similarity between original and generated text.
 
@@ -137,22 +148,31 @@ class SemanticCritic:
         self,
         generated_text: str,
         input_blueprint: SemanticBlueprint,
-        allowed_style_words: Optional[List[str]] = None
+        allowed_style_words: Optional[List[str]] = None,
+        skeleton: Optional[str] = None
     ) -> Dict[str, any]:
         """Evaluate generated text against input blueprint.
+
+        Uses two-gate validation system:
+        - Gate 1: Template Fit (skeleton adherence) - if skeleton provided
+        - Gate 2: Meaning Preservation (recall)
+        - Final Heuristic: LLM meaning verification
 
         Args:
             generated_text: Generated text to evaluate.
             input_blueprint: Original input blueprint to compare against.
+            allowed_style_words: Optional list of style words to whitelist.
+            skeleton: Optional skeleton template for adherence checking.
 
-            Returns:
+        Returns:
             Dict with:
             - pass: bool
             - recall_score: float (0-1)
             - precision_score: float (0-1)
-            - fluency_score: float (0-1)
+            - adherence_score: float (0-1)
+            - llm_meaning_score: float (0-1)
+            - score: float (0-1, weighted: adherence * 0.5 + recall * 0.5)
             - feedback: str
-            - score: float (0-1, weighted: accuracy * 0.7 + fluency * 0.3)
         """
         # CRITICAL: Copy-Paste Check - reject exact copies of original text
         # This forces the system to transform the style, not just copy verbatim
@@ -487,53 +507,167 @@ class SemanticCritic:
         precision_score, precision_feedback = self._check_precision(
             generated_blueprint,
             input_blueprint,
-            allowed_style_words=allowed_style_words
+            allowed_style_words=allowed_style_words,
+            skeleton=skeleton
         )
 
-        # Fluency check: Is it grammatically natural?
-        fluency_score, fluency_feedback = self._check_fluency(generated_text)
+        # Gate 1: Template Fit (Skeleton Adherence)
+        adherence_score = 1.0
+        adherence_feedback = ""
+        if skeleton:
+            adherence_score, adherence_feedback = self._check_adherence(generated_text, skeleton)
 
-        # Calculate weighted final score (accuracy + fluency)
-        accuracy_score = (recall_score + precision_score) / 2.0
-        final_score = accuracy_score * self.accuracy_weight + fluency_score * self.fluency_weight
+        # Gate 2: Meaning Preservation (Recall)
+        # Hard gate: If recall < 0.7, fail
+        # Hard gate: If adherence < 0.8, fail
+        passes = (recall_score >= 0.7 and adherence_score >= 0.8)
 
-        # Style boost: If style words from lexicon are used, boost the score
-        if allowed_style_words:
-            style_words_set = {w.lower().strip() for w in allowed_style_words}
-            generated_tokens = _get_significant_tokens(generated_text)
-            used_style_words = [w for w in style_words_set if w in generated_tokens]
-            if used_style_words:
-                # Small boost (0.02 per style word, max 0.1) for using style vocabulary
-                style_boost = min(0.1, len(used_style_words) * 0.02)
-                final_score = min(1.0, final_score + style_boost)
+        # Final score formula: (adherence * 0.5) + (recall * 0.5)
+        final_score = (adherence_score * 0.5) + (recall_score * 0.5)
 
-        # Pass if recall, precision, and fluency are above thresholds
-        passes = (recall_score >= self.recall_threshold and
-                 precision_score >= self.precision_threshold and
-                 fluency_score >= self.fluency_threshold)
-
-        # GRACE ZONE OVERRIDE: If similarity is 0.70-0.75 but recall=1.0 and fluency>0.9,
-        # accept despite lower similarity (high quality writing forgives slight semantic drift)
-        if similarity is not None and 0.70 <= similarity < 0.75:
-            if recall_score >= 1.0 and fluency_score > 0.9:
-                passes = True
+        # Final Heuristic: LLM Meaning Verification
+        llm_meaning_preserved = True
+        llm_confidence = 1.0
+        llm_explanation = ""
+        if self.use_llm_verification and self.llm_provider:
+            llm_meaning_preserved, llm_confidence, llm_explanation = self._verify_meaning_with_llm(
+                original_text, generated_text
+            )
+            # If LLM detects meaning loss with high confidence, override pass status
+            if not llm_meaning_preserved and llm_confidence > 0.7:
+                passes = False
 
         feedback_parts = []
-        if recall_score < self.recall_threshold:
+        if recall_score < 0.7:
             feedback_parts.append(recall_feedback)
-        if precision_score < self.precision_threshold:
-            feedback_parts.append(precision_feedback)
-        if fluency_score < self.fluency_threshold:
-            feedback_parts.append(fluency_feedback)
+        if adherence_score < 0.8 and skeleton:
+            feedback_parts.append(adherence_feedback)
+        if not llm_meaning_preserved and llm_confidence > 0.7:
+            feedback_parts.append(f"LLM Verification: {llm_explanation}")
 
         return {
             "pass": passes,
             "recall_score": recall_score,
             "precision_score": precision_score,
-            "fluency_score": fluency_score,
+            "adherence_score": adherence_score,
+            "llm_meaning_score": llm_confidence,
             "score": final_score,
             "feedback": " ".join(feedback_parts) if feedback_parts else "Passed semantic validation."
         }
+
+    def _verify_meaning_with_llm(self, original_text: str, generated_text: str) -> Tuple[bool, float, str]:
+        """Verify meaning preservation using LLM (Final Heuristic).
+
+        Uses LLM to compare original and generated text, confirming core meaning is unchanged.
+
+        Args:
+            original_text: Original input text.
+            generated_text: Generated text to verify.
+
+        Returns:
+            Tuple of (meaning_preserved: bool, confidence: float, explanation: str).
+        """
+        if not self.llm_provider:
+            return True, 0.5, "LLM verification unavailable"
+
+        system_prompt = "You are a semantic validator. Your task is to determine if two sentences convey the same core meaning, even if they use different words or stylistic structures."
+
+        user_prompt = f"""Compare these two sentences and determine if the generated text preserves the core meaning of the original.
+
+Original: "{original_text}"
+
+Generated: "{generated_text}"
+
+Does the generated text preserve the core meaning of the original? Respond with JSON:
+{{
+    "meaning_preserved": true/false,
+    "confidence": 0.0-1.0,
+    "explanation": "brief reason"
+}}"""
+
+        try:
+            response = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="critic",
+                require_json=True,
+                temperature=0.2,
+                max_tokens=200
+            )
+
+            # Parse JSON response
+            import json
+            try:
+                result = json.loads(response)
+            except json.JSONDecodeError:
+                # Try to extract JSON from response
+                json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                else:
+                    # Fallback: assume meaning preserved if parsing fails
+                    return True, 0.5, "LLM response parsing failed"
+
+            meaning_preserved = result.get("meaning_preserved", True)
+            confidence = float(result.get("confidence", 0.5))
+            explanation = result.get("explanation", "")
+
+            return meaning_preserved, confidence, explanation
+        except Exception as e:
+            # Handle errors gracefully - don't block evaluation
+            return True, 0.5, f"LLM verification unavailable: {str(e)}"
+
+    def _check_adherence(self, generated_text: str, skeleton: str) -> Tuple[float, str]:
+        """Check if generated text adheres to skeleton structure (Gate 1).
+
+        Extracts anchor words from skeleton (all words outside [NP], [VP], [ADJ] brackets)
+        and verifies they appear in generated text in roughly the same relative order.
+
+        Args:
+            generated_text: Generated text to check.
+            skeleton: Skeleton template with placeholders.
+
+        Returns:
+            Tuple of (adherence_score, feedback_string).
+        """
+        if not skeleton or not skeleton.strip():
+            return 1.0, ""
+
+        if not generated_text or not generated_text.strip():
+            return 0.0, "Failed to match template structure: generated text is empty"
+
+        # Extract anchor words from skeleton (all words outside placeholders)
+        skeleton_clean = re.sub(r'\[NP\]|\[VP\]|\[ADJ\]', '', skeleton, flags=re.IGNORECASE)
+        skeleton_tokens = re.findall(r'\b\w+\b', skeleton_clean.lower())
+
+        if not skeleton_tokens:
+            # No anchor words in skeleton - cannot check adherence
+            return 1.0, ""
+
+        # Extract words from generated text
+        generated_tokens = re.findall(r'\b\w+\b', generated_text.lower())
+
+        # Check if anchor words appear in generated text in roughly the same order
+        matched_count = 0
+        generated_idx = 0
+
+        for anchor_word in skeleton_tokens:
+            # Search for anchor word in generated text starting from current position
+            found = False
+            for i in range(generated_idx, len(generated_tokens)):
+                if generated_tokens[i] == anchor_word:
+                    matched_count += 1
+                    generated_idx = i + 1  # Move forward
+                    found = True
+                    break
+            # If not found, continue (don't break - allow some flexibility)
+
+        adherence_score = matched_count / len(skeleton_tokens) if skeleton_tokens else 0.0
+
+        if adherence_score < 0.8:
+            return adherence_score, "Failed to match template structure"
+
+        return adherence_score, ""
 
     def _check_recall(
         self,
@@ -599,7 +733,8 @@ class SemanticCritic:
         self,
         generated_blueprint: SemanticBlueprint,
         input_blueprint: SemanticBlueprint,
-        allowed_style_words: Optional[List[str]] = None
+        allowed_style_words: Optional[List[str]] = None,
+        skeleton: Optional[str] = None
     ) -> Tuple[float, str]:
         """Check if generated text hallucinated concepts (all heavy words must match input).
 
@@ -659,6 +794,16 @@ class SemanticCritic:
             # No input keywords to compare against - allow all
             return 1.0, ""
 
+        # Extract skeleton anchor words and add to whitelist
+        skeleton_anchor_words = set()
+        if skeleton:
+            skeleton_clean = re.sub(r'\[NP\]|\[VP\]|\[ADJ\]', '', skeleton, flags=re.IGNORECASE)
+            skeleton_tokens = re.findall(r'\b\w+\b', skeleton_clean.lower())
+            skeleton_anchor_words = {token.lower() for token in skeleton_tokens}
+
+        # Create whitelist: input keywords + skeleton anchor words
+        allowed_words = set(input_keywords) | skeleton_anchor_words
+
         if not self.semantic_model:
             # Fallback: simple set intersection
             heavy_set = set(heavy_words)
@@ -667,8 +812,8 @@ class SemanticCritic:
             precision_ratio = overlap / len(heavy_words) if heavy_words else 1.0
 
             if precision_ratio < self.precision_threshold:
-                hallucinated = heavy_set - input_set
-                # Filter out allowed style words (whitelist)
+                hallucinated = heavy_set - allowed_words  # Use whitelist instead of just input_set
+                # Filter out allowed style words (additional whitelist)
                 if allowed_style_words:
                     style_words_set = {w.lower().strip() for w in allowed_style_words}
                     hallucinated = {w for w in hallucinated if w.lower() not in style_words_set}
@@ -692,7 +837,9 @@ class SemanticCritic:
 
             if precision_ratio < self.precision_threshold:
                 hallucinated = [heavy_words[i] for i, score in enumerate(max_scores) if score.item() < self.similarity_threshold]
-                # Filter out allowed style words (whitelist) and conceptually related words
+                # Filter out words in whitelist (input keywords + skeleton anchor words)
+                hallucinated = [w for w in hallucinated if w.lower() not in allowed_words]
+                # Filter out allowed style words (additional whitelist)
                 if allowed_style_words:
                     style_words_set = {w.lower().strip() for w in allowed_style_words}
                     # Direct match filter

@@ -397,10 +397,11 @@ def process_text(
                     if verbose:
                         pass_status = "PASS" if result.get("pass", False) else "SOFT PASS"
                         print(f"  ✓ Accepted ({pass_status}, score: {result.get('score', 0.0):.2f}): {generated}")
-            elif result and result.get("score", 0.0) < 0.75:
+            elif result and result.get("score", 0.0) < 0.60:
                 # Evolution failed or initial generation failed, use literal translation fallback
+                # Lowered threshold to 0.60 to avoid discarding "diamonds in the rough" (good style, minor issues)
                 if verbose:
-                    print(f"  ↻ Evolution/Generation failed, using literal translation")
+                    print(f"  ↻ Evolution/Generation failed (score < 0.60), using literal translation")
                 try:
                     # Pass rhetorical_type and examples for style-preserving fallback
                     generated = translator.translate_literal(

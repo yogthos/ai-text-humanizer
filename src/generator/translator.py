@@ -14,6 +14,7 @@ from src.generator.llm_provider import LLMProvider
 from src.generator.llm_interface import clean_generated_text
 from src.critic.judge import LLMJudge
 from src.critic.scorer import SoftScorer
+from src.validator.semantic_critic import SemanticCritic
 from src.generator.mutation_operators import (
     get_operator, OP_SEMANTIC_INJECTION, OP_GRAMMAR_REPAIR, OP_STYLE_POLISH, OP_DYNAMIC_STYLE, OP_STRUCTURAL_CLONE
 )
@@ -190,7 +191,8 @@ class StyleTranslator:
 
         for example in examples:
             try:
-                skeleton = self.structuralizer.extract_skeleton(example)
+                # Pass input text for skeleton pruning (if single sentence, truncate to first sentence)
+                skeleton = self.structuralizer.extract_skeleton(example, input_text=blueprint.original_text)
                 if not skeleton:
                     continue
 
@@ -345,6 +347,20 @@ class StyleTranslator:
                 "passed_gates": bool
             }
         """
+        # GHOSTBUSTER: Reject candidates containing skeleton placeholder brackets
+        # These are generation failures (raw skeletons), not valid candidates
+        # Note: Citation references like [^155] are allowed - only reject [NP], [VP], [ADJ] placeholders
+        skeleton_placeholder_pattern = r'\[(?:NP|VP|ADJ)\]'
+        if re.search(skeleton_placeholder_pattern, candidate, re.IGNORECASE):
+            return {
+                "semantic_score": 0.0,
+                "adherence_score": 0.0,
+                "style_density": 0.0,
+                "composite_score": 0.0,
+                "passed_gates": False,
+                "rejection_reason": "Candidate contains skeleton placeholder brackets ([NP], [VP], [ADJ]) - generation failure"
+            }
+
         from src.validator.semantic_critic import SemanticCritic
 
         # Load weights from config
@@ -366,7 +382,7 @@ class StyleTranslator:
         # 1. Semantic Score (40% weight)
         critic = SemanticCritic(config_path=self.config_path)
         semantic_result = self.soft_scorer.evaluate_with_raw_score(
-            candidate, blueprint, style_lexicon=style_lexicon
+            candidate, blueprint, style_lexicon=style_lexicon, skeleton=skeleton
         )
         semantic_score = semantic_result.get("raw_score", semantic_result.get("score", 0.0))
 
@@ -375,6 +391,33 @@ class StyleTranslator:
 
         # 3. Style Density Score (30% weight)
         style_density = self._calculate_style_density(candidate, style_lexicon)
+
+        # 4. Expansion Ratio Gate (Dynamic): Reject excessive expansion
+        input_words = blueprint.original_text.split()
+        candidate_words = candidate.split()
+        input_len = len(input_words)
+        expansion_ratio = len(candidate_words) / max(1, input_len)
+
+        # Dynamic expansion thresholds: Allow more expansion for short inputs
+        # Short sentences need more room to breathe when transformed to complex styles (e.g., Maoist dialectic)
+        if input_len < 10:
+            max_ratio = 6.0  # Allow 6x expansion for very short inputs (e.g., 7 words -> 42 words)
+        elif input_len < 20:
+            max_ratio = 4.0  # Allow 4x expansion for short inputs
+        else:
+            max_ratio = 2.5  # Allow 2.5x expansion for longer inputs
+
+        # Hard rejection: If ratio > max_ratio, reject immediately
+        # Exception: Allow if style_density > 0.4 (very high style usage indicates intentional expansion)
+        if expansion_ratio > max_ratio and style_density <= 0.4:
+            return {
+                "semantic_score": semantic_score,
+                "adherence_score": adherence_score,
+                "style_density": style_density,
+                "composite_score": 0.0,
+                "passed_gates": False,
+                "rejection_reason": f"Candidate rejected due to excessive expansion (Ratio: {expansion_ratio:.2f} > {max_ratio:.1f} for {input_len}-word input)."
+            }
 
         # Hard gates: reject if semantic or adherence below threshold
         passed_gates = (semantic_score >= semantic_threshold and
@@ -490,6 +533,15 @@ class StyleTranslator:
                         )
 
                         if candidate and candidate.strip():
+                            # EXPANSION GATE: Reject candidates where word_count > 3 * input_word_count
+                            input_word_count = len(blueprint.original_text.split())
+                            candidate_word_count = len(candidate.split())
+                            if candidate_word_count > 3 * input_word_count:
+                                if verbose:
+                                    ratio = candidate_word_count / max(1, input_word_count)
+                                    print(f"    ✗ Candidate rejected: excessive expansion (Ratio: {ratio:.2f}, {candidate_word_count} words vs {input_word_count} input words)")
+                                continue
+
                             all_candidates.append({
                                 "text": candidate,
                                 "skeleton": skeleton,
@@ -514,11 +566,19 @@ class StyleTranslator:
                         style_dna=style_dna_dict
                     )
 
+                    # Check if this is a rescue candidate (high adherence but low semantic)
+                    needs_repair = False
+                    if evaluation.get("adherence_score", 0.0) > 0.9 and evaluation.get("semantic_score", 0.0) < 0.6:
+                        needs_repair = True
+                        if verbose:
+                            print(f"    ⚠ Rescue candidate detected (Adherence: {evaluation.get('adherence_score', 0.0):.2f}, Semantic: {evaluation.get('semantic_score', 0.0):.2f}) - marking for repair")
+
                     evaluated_candidates.append({
                         "text": candidate_data["text"],
                         "skeleton": candidate_data["skeleton"],
                         "source_example": candidate_data["source_example"],
-                        "evaluation": evaluation
+                        "evaluation": evaluation,
+                        "needs_repair": needs_repair
                     })
 
                     if verbose:
@@ -535,8 +595,9 @@ class StyleTranslator:
                     continue
 
             # Phase 4: Selection
-            # Filter candidates that passed hard gates
+            # Filter candidates that passed hard gates OR are rescue candidates
             passed_candidates = [c for c in evaluated_candidates if c["evaluation"]["passed_gates"]]
+            rescue_candidates = [c for c in evaluated_candidates if c.get("needs_repair", False) and not c["evaluation"]["passed_gates"]]
 
             if passed_candidates:
                 # Sort by composite score (descending)
@@ -552,12 +613,76 @@ class StyleTranslator:
                 # Restore citations and quotes
                 best_text = self._restore_citations_and_quotes(best_candidate["text"], blueprint)
                 return best_text
+            elif rescue_candidates:
+                # Select best rescue candidate (highest adherence score)
+                rescue_candidates.sort(key=lambda x: x["evaluation"].get("adherence_score", 0.0), reverse=True)
+                best_rescue = rescue_candidates[0]
+
+                if verbose:
+                    print(f"  ⚠ No passed candidates, but found {len(rescue_candidates)} rescue candidate(s)")
+                    print(f"    Selected rescue candidate (Adherence: {best_rescue['evaluation'].get('adherence_score', 0.0):.2f}, Semantic: {best_rescue['evaluation'].get('semantic_score', 0.0):.2f})")
+                    print(f"    Text: {best_rescue['text'][:80]}...")
+                    print(f"    → Passing to evolution loop with semantic injection priority")
+
+                # Restore citations and quotes
+                rescue_text = self._restore_citations_and_quotes(best_rescue["text"], blueprint)
+
+                # Pass to evolution loop with semantic injection priority
+                # Evaluate the rescue candidate to get initial score
+                critic = SemanticCritic(config_path=self.config_path)
+                initial_result = critic.evaluate(rescue_text, blueprint, skeleton=best_rescue["skeleton"])
+                initial_score = initial_result.get("score", 0.0)
+                initial_feedback = initial_result.get("feedback", "")
+
+                # Evolve with semantic injection priority
+                evolved_text, evolved_score = self._evolve_text(
+                    initial_draft=rescue_text,
+                    blueprint=blueprint,
+                    author_name=author_name,
+                    style_dna=style_dna,
+                    rhetorical_type=rhetorical_type,
+                    initial_score=initial_score,
+                    initial_feedback=initial_feedback,
+                    critic=critic,
+                    verbose=verbose,
+                    style_dna_dict=style_dna_dict,
+                    examples=examples,
+                    force_semantic_injection=True  # Flag to prioritize semantic injection
+                )
+
+                return evolved_text
             else:
                 if verbose:
                     print(f"  ✗ All candidates failed hard gates, falling back to standard generation")
 
         # Step 2: Standard generation (fallback if structural cloning fails or not applicable)
+        # Style-Infused Fallback: Ensure we use style DNA even in fallback
         prompt = self._build_prompt(blueprint, author_name, style_dna, rhetorical_type, examples)
+
+        # Extract style lexicon for prompt injection
+        style_lexicon_text = ""
+        if style_dna_dict and isinstance(style_dna_dict, dict):
+            style_lexicon = style_dna_dict.get("lexicon", [])
+            if style_lexicon:
+                lexicon_preview = ", ".join(style_lexicon[:15])  # Show first 15 words
+                style_lexicon_text = f"\n\n**STYLE VOCABULARY (Use these words):** {lexicon_preview}"
+
+        # Build examples text for style injection
+        examples_text = ""
+        if examples:
+            examples_preview = "\n".join([f"- \"{ex}\"" for ex in examples[:3]])
+            examples_text = f"\n\n**STYLE EXAMPLES (Match this voice):**\n{examples_preview}"
+
+        # Inject style guidance into prompt
+        if style_lexicon_text or examples_text:
+            style_injection = f"""
+=== STYLE REQUIREMENT (CRITICAL - DO NOT BE BORING) ===
+You are writing in the style of these examples. Do NOT write generic corporate English.{examples_text}{style_lexicon_text}
+
+**CRITICAL:** Transform the sentence to match the author's distinctive voice. Use the vocabulary provided. Be distinct, not generic.
+=====================================================
+"""
+            prompt = style_injection + prompt
 
         system_prompt_template = _load_prompt_template("translator_system.md")
         system_prompt = system_prompt_template.format(
@@ -1011,16 +1136,16 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         self,
         recall_score: float,
         precision_score: float,
-        fluency_score: float,
-        overall_score: float,
-        pass_threshold: float,
+        fluency_score: Optional[float] = None,
+        overall_score: float = 0.0,
+        pass_threshold: float = 0.9,
         original_text: str = "",
         generated_text: str = ""
     ) -> bool:
         """Check if draft should be accepted using Fluency Forgiveness logic.
 
         HARD GATE: Length heuristic - reject if input > 6 words and output < 4 words.
-        HARD GATE: Fluency must be above minimum threshold.
+        HARD GATE: Fluency must be above minimum threshold (if provided).
         RULE 1: Recall is King. If we miss keywords, we fail.
         RULE 2: Precision is Flexible. If Recall is perfect, we can accept lower precision.
         Fallback: High overall score.
@@ -1028,7 +1153,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         Args:
             recall_score: Recall score (0-1)
             precision_score: Precision score (0-1)
-            fluency_score: Fluency score (0-1)
+            fluency_score: Optional fluency score (0-1). If None, fluency check is skipped.
             overall_score: Weighted overall score (0-1)
             pass_threshold: Default pass threshold
             original_text: Original input text (for length check)
@@ -1045,8 +1170,10 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
             if input_word_count > 6 and output_word_count < 4:
                 return False  # Too short to be a valid translation
 
-        # HARD GATE: Fluency must be above minimum (prevents "We touch breaks" type garbage)
-        if fluency_score < 0.7:
+        # HARD GATE: Fluency must be above minimum (if fluency_score is provided)
+        # Note: Fluency check removed from SemanticCritic in two-gate simplification
+        # This check is kept for backward compatibility but defaults to passing if not provided
+        if fluency_score is not None and fluency_score < 0.7:
             return False  # HARD REJECT regardless of other scores
 
         # RULE 1: Recall is King. If we miss keywords, we fail.
@@ -1154,7 +1281,9 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
 
             # Validate simplification output - don't return broken fragments
             result = critic.evaluate(simplified, blueprint)
-            if result["fluency_score"] < 0.7:
+            # Note: fluency_score may not be present (removed in two-gate simplification)
+            # Use recall_score as proxy for validation
+            if result.get("recall_score", 0.0) < 0.7:
                 if verbose:
                     print("  Simplification produced low-fluency output, reverting to best draft")
                 return best_draft
@@ -1178,7 +1307,8 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         critic: 'SemanticCritic',
         verbose: bool = False,
         style_dna_dict: Optional[Dict[str, any]] = None,
-        examples: Optional[List[str]] = None
+        examples: Optional[List[str]] = None,
+        force_semantic_injection: bool = False
     ) -> Tuple[str, float]:
         """Evolve text using population-based beam search with tournament selection.
 
@@ -1273,7 +1403,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
             if self._check_acceptance(
                 recall_score=best_result["recall_score"],
                 precision_score=best_result["precision_score"],
-                fluency_score=best_result["fluency_score"],
+                fluency_score=best_result.get("fluency_score"),  # Optional - may not be present
                 overall_score=best_score,
                 pass_threshold=pass_threshold,
                 original_text=blueprint.original_text,
@@ -1290,7 +1420,13 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
 
             try:
                 # Step A: Diagnosis - Analyze current draft to select mutation strategy
-                operator_type = self._diagnose_draft(best_draft, blueprint, critic)
+                # If force_semantic_injection is True, prioritize semantic injection for rescue candidates
+                if force_semantic_injection and gen == 0:
+                    operator_type = OP_SEMANTIC_INJECTION
+                    if verbose:
+                        print(f"    Forcing semantic injection for rescue candidate repair")
+                else:
+                    operator_type = self._diagnose_draft(best_draft, blueprint, critic)
                 # Use dynamic style if style lexicon is available and we're doing style polish
                 if style_lexicon and operator_type == OP_STYLE_POLISH:
                     operator_type = OP_DYNAMIC_STYLE  # Use OP_DYNAMIC_STYLE when style DNA is available
@@ -1409,7 +1545,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                     if self._check_acceptance(
                         recall_score=candidate_result["recall_score"],
                         precision_score=candidate_result["precision_score"],
-                        fluency_score=candidate_result["fluency_score"],
+                        fluency_score=candidate_result.get("fluency_score"),  # Optional - may not be present
                         overall_score=candidate_score,
                         pass_threshold=pass_threshold,
                         original_text=blueprint.original_text,
@@ -1471,12 +1607,34 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         if verbose:
             print(f"  Evolution: Final score {best_score:.2f} (improvement: {best_score - initial_score:+.2f})")
 
-        # Soft Pass Logic: Accept scores >= 0.85 even if below threshold
-        # A 0.85 style-transferred sentence is better than a 1.00 copy-pasted original
+        # Soft Pass Logic: Only accept if style is present OR score is very high
+        # Ban boring sentences - force evolution to continue if no style
+        style_lexicon = None
+        if style_dna_dict and isinstance(style_dna_dict, dict):
+            style_lexicon = style_dna_dict.get("lexicon")
+
+        style_density = 0.0
+        if style_lexicon and best_draft:
+            style_density = self._calculate_style_density(best_draft, style_lexicon)
+
+        # Conditional Soft Pass:
+        # - If style present (density > 0.1): Accept if score >= 0.85
+        # - If boring (density == 0): Only accept if score >= 0.95
         if best_score >= 0.85:
-            if verbose and best_score < pass_threshold:
-                print(f"  Evolution: Soft pass accepted (score {best_score:.2f} >= 0.85, threshold {pass_threshold:.2f})")
-            return (best_draft, best_score)
+            if style_density > 0.1:
+                # Style is present, accept early
+                if verbose and best_score < pass_threshold:
+                    print(f"  Evolution: Soft pass accepted (score {best_score:.2f} >= 0.85, style_density {style_density:.2f} > 0.1)")
+                return (best_draft, best_score)
+            elif best_score >= 0.95:
+                # Very high score even without style, accept
+                if verbose:
+                    print(f"  Evolution: Soft pass accepted (score {best_score:.2f} >= 0.95, style_density {style_density:.2f})")
+                return (best_draft, best_score)
+            else:
+                # Boring sentence with mediocre score - reject soft pass, keep evolving
+                if verbose:
+                    print(f"  Evolution: Soft pass rejected (score {best_score:.2f} but style_density {style_density:.2f} <= 0.1, requiring >= 0.95 for boring sentences)")
 
         return (best_draft, best_score)
 
@@ -1514,15 +1672,15 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         """
         result = critic.evaluate(draft, blueprint)
         recall = result.get("recall_score", 0.0)
-        fluency = result.get("fluency_score", 0.0)
+        fluency = result.get("fluency_score", 1.0)  # Default to 1.0 if not present (fluency checks removed)
 
         # Diagnosis logic:
         # - If recall < 1.0: Missing keywords → Semantic Injection
-        # - Elif fluency < 0.8: Grammar issues → Grammar Repair
+        # - Elif fluency < 0.8: Grammar issues → Grammar Repair (only if fluency_score available)
         # - Else: Style needs enhancement → Style Polish
         if recall < 1.0:
             return OP_SEMANTIC_INJECTION
-        elif fluency < 0.8:
+        elif fluency is not None and fluency < 0.8:
             return OP_GRAMMAR_REPAIR
         else:
             return OP_STYLE_POLISH

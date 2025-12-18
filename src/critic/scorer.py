@@ -30,7 +30,8 @@ class SoftScorer:
         self,
         generated_text: str,
         input_blueprint: SemanticBlueprint,
-        style_lexicon: Optional[List[str]] = None
+        style_lexicon: Optional[List[str]] = None,
+        skeleton: Optional[str] = None
     ) -> Tuple[float, Dict[str, float]]:
         """Calculate raw fitness score for evolution guidance.
 
@@ -55,11 +56,12 @@ class SoftScorer:
             - metrics_dict: Dictionary with individual metric scores
         """
         # Get evaluation from semantic critic
-        result = self.critic.evaluate(generated_text, input_blueprint)
+        result = self.critic.evaluate(generated_text, input_blueprint, skeleton=skeleton)
 
         # Extract individual scores
         recall_score = result.get("recall_score", 0.0)
-        fluency_score = result.get("fluency_score", 0.0)
+        adherence_score = result.get("adherence_score", 1.0)  # Default to 1.0 if no skeleton
+        fluency_score = result.get("fluency_score", 0.0)  # Keep for backward compatibility
 
         # Calculate semantic similarity if available
         # CRITICAL: Calculate similarity BEFORE checking if result passed
@@ -88,16 +90,20 @@ class SoftScorer:
             recall_score = max(recall_score, similarity_score * 0.8)  # Partial credit
             fluency_score = max(fluency_score, 0.5)  # Assume moderate fluency if not measured
 
-        # Weighted fitness formula prioritizing meaning first, then grammar, then style
-        w_recall = 0.5
-        w_fluency = 0.3
-        w_similarity = 0.2
-
-        raw_score = (
-            recall_score * w_recall +
-            fluency_score * w_fluency +
-            similarity_score * w_similarity
-        )
+        # Weighted fitness formula
+        if skeleton:
+            # When skeleton is provided, use adherence-based formula
+            raw_score = (recall_score * 0.5) + (adherence_score * 0.5)
+        else:
+            # Fallback to original formula when no skeleton
+            w_recall = 0.5
+            w_fluency = 0.3
+            w_similarity = 0.2
+            raw_score = (
+                recall_score * w_recall +
+                fluency_score * w_fluency +
+                similarity_score * w_similarity
+            )
 
         # PERFECTION BOOST: If the sentence is semantically complete and grammatically perfect,
         # do not let a low vector similarity score drag it down.
@@ -107,26 +113,7 @@ class SoftScorer:
             # Boost the score to at least 0.92 for near-perfect meaning and grammar
             raw_score = max(raw_score, 0.92)
 
-        # STYLE DENSITY BONUS: Reward using style words from the lexicon
-        # This incentivizes the generator to use author-specific vocabulary
-        if style_lexicon and generated_text:
-            from src.validator.semantic_critic import _get_significant_tokens
-            style_words_set = {w.lower().strip() for w in style_lexicon}
-            generated_tokens = _get_significant_tokens(generated_text)
-            used_style_words = [w for w in style_words_set if w in generated_tokens]
-
-            if used_style_words and generated_tokens:
-                # Calculate style density: ratio of style words to total words
-                style_density = len(used_style_words) / max(len(generated_tokens), 1)
-                # Add bonus: style_density * 0.2 (max 0.2 bonus for 100% style words)
-                style_bonus = style_density * 0.2
-                raw_score = min(1.0, raw_score + style_bonus)
-            else:
-                # BLANDNESS PENALTY: If style_lexicon is present but no style words are used,
-                # cap the score at 0.85 to force the loop to reject "perfect but boring" sentences
-                # This ensures evolution continues until it uses the author's vocabulary
-                if len(style_lexicon) > 0:
-                    raw_score = min(raw_score, 0.85)
+        # Style density bonus removed - conflicts with simplified approach
 
         # Ensure raw_score is never zero (unless truly empty/broken)
         # Minimum score of 0.01 allows evolution to improve from very bad states
@@ -136,6 +123,7 @@ class SoftScorer:
 
         metrics = {
             "recall": recall_score,
+            "adherence": adherence_score,
             "fluency": fluency_score,
             "similarity": similarity_score,
             "precision": result.get("precision_score", 0.0),
@@ -148,7 +136,8 @@ class SoftScorer:
         self,
         generated_text: str,
         input_blueprint: SemanticBlueprint,
-        style_lexicon: Optional[List[str]] = None
+        style_lexicon: Optional[List[str]] = None,
+        skeleton: Optional[str] = None
     ) -> Dict[str, any]:
         """Evaluate text and return both pass status and raw_score.
 
@@ -172,16 +161,17 @@ class SoftScorer:
             - score: float - Original weighted score from critic
         """
         # Get critic evaluation
-        critic_result = self.critic.evaluate(generated_text, input_blueprint, allowed_style_words=style_lexicon)
+        critic_result = self.critic.evaluate(generated_text, input_blueprint, allowed_style_words=style_lexicon, skeleton=skeleton)
 
-        # Calculate raw_score (with style lexicon for density bonus)
-        raw_score, metrics = self.calculate_raw_score(generated_text, input_blueprint, style_lexicon=style_lexicon)
+        # Calculate raw_score
+        raw_score, metrics = self.calculate_raw_score(generated_text, input_blueprint, style_lexicon=style_lexicon, skeleton=skeleton)
 
         # Combine results
         return {
             "pass": critic_result.get("pass", False),
             "raw_score": raw_score,
             "recall_score": metrics["recall"],
+            "adherence_score": metrics.get("adherence", 1.0),
             "fluency_score": metrics["fluency"],
             "similarity_score": metrics["similarity"],
             "precision_score": metrics["precision"],

@@ -476,6 +476,32 @@ When filling the [SLOTS], you MUST prioritize using words from this list where p
 This ensures the output matches the target author's voice.
 """
 
+        # Extract keywords from blueprint for explicit mapping
+        subjects = blueprint.get_subjects()
+        verbs = blueprint.get_verbs()
+        objects = blueprint.get_objects()
+        core_keywords = list(blueprint.core_keywords)[:10]  # Limit to top 10 for prompt size
+
+        # Build explicit concept mapping section
+        mapping_section = "### STEP 1: PLANNING - Explicit Concept Mapping\n"
+        mapping_section += "**You MUST map the Input Keywords into the Skeleton Slots BEFORE generating.**\n\n"
+
+        if subjects:
+            subjects_text = ", ".join([f'"{s}"' for s in subjects[:3]])
+            mapping_section += f"* **Subjects** ({subjects_text}) → Maps to [NP] slots (noun phrases)\n"
+        if verbs:
+            verbs_text = ", ".join([f'"{v}"' for v in verbs[:3]])
+            mapping_section += f"* **Verbs** ({verbs_text}) → Maps to [VP] slots (verb phrases)\n"
+        if objects:
+            objects_text = ", ".join([f'"{o}"' for o in objects[:3]])
+            mapping_section += f"* **Objects** ({objects_text}) → Maps to [NP] slots (noun phrases)\n"
+        if core_keywords:
+            keywords_text = ", ".join([f'"{k}"' for k in core_keywords[:5]])
+            mapping_section += f"* **Core Keywords** ({keywords_text}) → Must appear in output\n"
+
+        mapping_section += "\n**CRITICAL:** You MUST include ALL mapped keywords in the final output. Do not replace them with synonyms or related concepts.\n"
+        mapping_section += "For example: Do NOT replace 'Rule' with 'Process' or 'reinforces' with 'affirms'.\n\n"
+
         user_prompt = f"""### TASK: Structural Cloning
 **Goal:** Inject the meaning of the Original Text into the Target Skeleton structure.
 
@@ -483,23 +509,37 @@ This ensures the output matches the target author's voice.
 
 **Target Skeleton (structure to match):** "{skeleton}"
 {style_instruction}
-### INSTRUCTIONS
-1. **Analyze:** Identify the core meaning and concepts in the Original Text.
-2. **Map:** Match each concept to a placeholder in the Skeleton:
-   - [NP] = Noun phrases (subjects, objects, concepts)
-   - [VP] = Verb phrases (actions, states)
-   - [ADJ] = Adjectives (descriptors, modifiers)
-3. **Fill:** Inject the meaning into the skeleton slots. You may expand definitions to fill complex slots, but do NOT change the core message.
+
+{mapping_section}
+
+### STEP 2: GENERATION
+1. **Write the sentence** using the Skeleton structure.
+2. **Fill the slots** using the mapped keywords from Step 1.
+3. **CRITICAL:** You MUST include the mapped keywords. Do not replace "Rule" with "Process" or "reinforces" with "affirms".
 4. **Preserve:** Keep ALL connecting words, prepositions, conjunctions, and punctuation from the skeleton exactly as they are.
 
-**CRITICAL:**
-- You MUST use the exact structure of the skeleton
+**CRITICAL OUTPUT REQUIREMENT:**
+- The output must be a standard English sentence. **Do NOT output brackets** like `[NP]` or `[VP]`.
+- Replace every placeholder with real words representing the Input Meaning.
+- If you output brackets, the generation has failed.
+
+**CRITICAL CONSTRAINTS:**
+- **Structure:** You MUST use the exact structure of the skeleton
+- **Meaning:** You MUST use the concepts from the Original Text - do NOT hallucinate irrelevant words
+- **Mapping:** Map input concepts to skeleton slots (e.g., "Human experience" → Subject [NP], "reinforces" → Verb [VP])
+- **No Hallucination:** Do NOT fill slots with random style words that don't relate to the input meaning
 - You MUST preserve all structural words (prepositions, conjunctions, articles)
 - You may expand concepts to fill slots, but preserve the original meaning
 - Do NOT simplify the skeleton structure
 - Do NOT change the core message of the original text
 
-**Output:** Return ONLY the final sentence with meaning injected into the skeleton structure."""
+**STOP EARLY IF NEEDED:**
+- If the Skeleton is significantly longer than your Input Content, STOP writing after you have conveyed the meaning
+- Do NOT invent new philosophy or facts just to fill the remaining slots
+- It is better to leave the tail of the skeleton empty than to generate gibberish
+- Only fill slots that you can meaningfully map from the Original Text
+
+**Output:** Return ONLY the final sentence with meaning from the Original Text injected into the skeleton structure."""
 
         try:
             mutated = llm_provider.call(

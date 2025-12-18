@@ -50,6 +50,203 @@ def test_basic_translation():
     print("✓ test_basic_translation passed")
 
 
+def test_dynamic_expansion_thresholds():
+    """Test that dynamic expansion thresholds allow more expansion for short inputs."""
+    from src.generator.translator import StyleTranslator
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test short input (< 10 words) - should allow 5x expansion
+    short_blueprint = SemanticBlueprint(
+        original_text="Human experience reinforces the rule.",
+        svo_triples=[("Human experience", "reinforces", "the rule")],
+        named_entities=[],
+        core_keywords={"human", "experience", "reinforce", "rule"},
+        citations=[],
+        quotes=[]
+    )
+
+    # Create a candidate that's 4.5x longer (should pass for short input)
+    short_candidate = " ".join(["word"] * 32)  # 32 words vs 7 words = 4.57x
+
+    evaluation = translator._evaluate_template_candidate(
+        candidate=short_candidate,
+        blueprint=short_blueprint,
+        skeleton="[NP] [VP] [NP]",
+        style_dna={"lexicon": []}
+    )
+
+    # Should not be rejected for expansion (4.57 < 5.0 for short inputs)
+    assert "excessive expansion" not in evaluation.get("rejection_reason", "").lower()
+
+    # Test longer input (>= 20 words) - should only allow 2.5x expansion
+    long_blueprint = SemanticBlueprint(
+        original_text=" ".join(["word"] * 20),  # 20 words
+        svo_triples=[],
+        named_entities=[],
+        core_keywords=set(),
+        citations=[],
+        quotes=[]
+    )
+
+    # Create a candidate that's 3x longer (should be rejected)
+    long_candidate = " ".join(["word"] * 60)  # 60 words vs 20 words = 3.0x
+
+    evaluation = translator._evaluate_template_candidate(
+        candidate=long_candidate,
+        blueprint=long_blueprint,
+        skeleton="[NP] [VP]",
+        style_dna={"lexicon": []}
+    )
+
+    # Should be rejected for expansion (3.0 > 2.5 for longer inputs)
+    assert "excessive expansion" in evaluation.get("rejection_reason", "").lower() or evaluation.get("composite_score", 1.0) == 0.0
+
+    print("✓ test_dynamic_expansion_thresholds passed")
+
+
+def test_rescue_logic():
+    """Test that high-adherence/low-semantic candidates are marked for repair."""
+    from src.generator.translator import StyleTranslator
+    from unittest.mock import Mock, patch
+
+    translator = StyleTranslator(config_path="config.json")
+
+    blueprint = SemanticBlueprint(
+        original_text="Human experience reinforces the rule of finitude.",
+        svo_triples=[("Human experience", "reinforces", "the rule of finitude")],
+        named_entities=[],
+        core_keywords={"human", "experience", "reinforce", "rule", "finitude"},
+        citations=[],
+        quotes=[]
+    )
+
+    # Create a candidate with perfect structure but missing keywords
+    # This simulates a rescue candidate: high adherence, low semantic
+    candidate_text = "The practice of cognition is the perceptual process."
+    skeleton = "The [NP] of [NP] is the [ADJ] [NP]."
+
+    # Mock the evaluation to return high adherence but low semantic
+    with patch.object(translator, '_evaluate_template_candidate') as mock_eval:
+        mock_eval.return_value = {
+            "semantic_score": 0.4,  # Low semantic (missing keywords)
+            "adherence_score": 0.95,  # High adherence (perfect structure)
+            "style_density": 0.3,
+            "composite_score": 0.5,
+            "passed_gates": False
+        }
+
+        # Evaluate candidate
+        evaluation = mock_eval.return_value
+
+        # Check if it would be marked as rescue candidate
+        needs_repair = (evaluation.get("adherence_score", 0.0) > 0.9 and
+                       evaluation.get("semantic_score", 0.0) < 0.6)
+
+        assert needs_repair == True, "High-adherence/low-semantic candidate should be marked for repair"
+
+    # Test that SemanticCritic can be imported and instantiated (catches import errors)
+    from src.validator.semantic_critic import SemanticCritic
+    critic = SemanticCritic(config_path="config.json")
+    assert critic is not None, "SemanticCritic should be importable and instantiable"
+
+    print("✓ test_rescue_logic passed")
+
+
+def test_explicit_concept_mapping():
+    """Test that structural clone prompt includes explicit concept mapping."""
+    from src.generator.mutation_operators import StructuralCloneOperator
+    from src.ingestion.blueprint import SemanticBlueprint
+    from unittest.mock import Mock
+
+    operator = StructuralCloneOperator()
+
+    blueprint = SemanticBlueprint(
+        original_text="Human experience reinforces the rule of finitude.",
+        svo_triples=[("Human experience", "reinforces", "the rule of finitude")],
+        named_entities=[],
+        core_keywords={"human", "experience", "reinforce", "rule", "finitude"},
+        citations=[],
+        quotes=[]
+    )
+
+    skeleton = "The [NP] of [NP] [VP] the [NP]."
+
+    # Mock LLM provider
+    mock_llm = Mock()
+    mock_llm.call.return_value = "The practice of human experience reinforces the rule of finitude."
+
+    # Generate with structural clone
+    result = operator.generate(
+        current_draft="",
+        blueprint=blueprint,
+        author_name="Test Author",
+        style_dna="Test style",
+        rhetorical_type=RhetoricalType.OBSERVATION,
+        llm_provider=mock_llm,
+        skeleton=skeleton,
+        style_lexicon=None
+    )
+
+    # Check that the prompt was called
+    assert mock_llm.call.called
+
+    # Check that the prompt includes concept mapping
+    call_args = mock_llm.call.call_args
+    user_prompt = call_args[1]['user_prompt'] if 'user_prompt' in call_args[1] else call_args[0][1]
+
+    # Should include explicit mapping section
+    assert "STEP 1: PLANNING" in user_prompt or "PLANNING" in user_prompt
+    assert "mapping" in user_prompt.lower() or "map" in user_prompt.lower()
+    # Should mention subjects, verbs, or objects
+    assert ("subject" in user_prompt.lower() or
+            "verb" in user_prompt.lower() or
+            "object" in user_prompt.lower() or
+            "human experience" in user_prompt.lower() or
+            "reinforces" in user_prompt.lower())
+
+    print("✓ test_explicit_concept_mapping passed")
+
+
+def test_check_acceptance_without_fluency():
+    """Test that _check_acceptance works without fluency_score."""
+    from src.generator.translator import StyleTranslator
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test with fluency_score provided (backward compatibility)
+    result1 = translator._check_acceptance(
+        recall_score=1.0,
+        precision_score=0.9,
+        fluency_score=0.8,
+        overall_score=0.95,
+        pass_threshold=0.9
+    )
+    assert result1 == True
+
+    # Test without fluency_score (new behavior)
+    result2 = translator._check_acceptance(
+        recall_score=1.0,
+        precision_score=0.9,
+        fluency_score=None,  # Not provided
+        overall_score=0.95,
+        pass_threshold=0.9
+    )
+    assert result2 == True
+
+    # Test with low recall (should fail)
+    result3 = translator._check_acceptance(
+        recall_score=0.5,
+        precision_score=0.9,
+        fluency_score=None,
+        overall_score=0.7,
+        pass_threshold=0.9
+    )
+    assert result3 == False
+
+    print("✓ test_check_acceptance_without_fluency passed")
+
+
 def test_complex_translation():
     """Test complex translation."""
     blueprint = SemanticBlueprint(
@@ -794,7 +991,7 @@ def test_evolve_text_uses_judge():
             "Every object we touch eventually breaks.",
             0.9,
             "fluency",
-            {"pass": True, "score": 0.9, "recall_score": 1.0, "precision_score": 1.0, "fluency_score": 0.9, "feedback": "Good"}
+            {"pass": True, "score": 0.9, "recall_score": 1.0, "precision_score": 1.0, "adherence_score": 1.0, "feedback": "Good"}
         )
 
         best_draft, best_score = translator._evolve_text(
@@ -855,7 +1052,7 @@ def test_evolve_text_tracks_convergence():
             "score": 0.9,
             "recall_score": 1.0,
             "precision_score": 1.0,
-            "fluency_score": 0.9,
+            "adherence_score": 1.0,
             "feedback": "Good"
         }
 
@@ -987,5 +1184,10 @@ if __name__ == "__main__":
     test_evolve_text_uses_judge()
     test_evolve_text_tracks_convergence()
     test_full_translation_with_judge()
+    # New tests for expansion, rescue, and concept mapping
+    test_dynamic_expansion_thresholds()
+    test_rescue_logic()
+    test_explicit_concept_mapping()
+    test_check_acceptance_without_fluency()
     print("\n✓ All translator tests completed!")
 

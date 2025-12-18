@@ -22,7 +22,7 @@ class Structuralizer:
         self.llm_provider = LLMProvider(config_path=config_path)
         self.config_path = config_path
 
-    def extract_skeleton(self, text: str) -> str:
+    def extract_skeleton(self, text: str, input_text: Optional[str] = None) -> str:
         """Extract structural skeleton from a sentence.
 
         Replaces Nouns with [NP], Verbs with [VP], Adjectives with [ADJ].
@@ -30,6 +30,7 @@ class Structuralizer:
 
         Args:
             text: Input sentence to extract skeleton from.
+            input_text: Optional original input text for pruning (if single sentence, truncate skeleton to first sentence).
 
         Returns:
             Skeleton template with placeholders.
@@ -37,14 +38,30 @@ class Structuralizer:
         if not text or not text.strip():
             return ""
 
-        system_prompt = """You are a linguistic structure analyzer. Your task is to extract the syntactic skeleton of a sentence by replacing content words with placeholders while preserving all structural elements."""
+        system_prompt = """You are a linguistic structure analyzer. Your task is to extract the syntactic skeleton of a sentence by replacing ALL content words with placeholders while preserving ONLY functional grammar words."""
 
-        user_prompt = f"""Analyze the sentence structure. Replace the specific nouns, verbs, and adjectives with placeholders:
-- Nouns (including noun phrases) → [NP]
-- Verbs (including verb phrases) → [VP]
-- Adjectives → [ADJ]
+        user_prompt = f"""Extract the structural skeleton by replacing ALL specific nouns, verbs, and adjectives with generic placeholders.
 
-Keep ALL prepositions, conjunctions, articles, punctuation, and structural words exactly as they are.
+**CRITICAL RULES:**
+- You MUST replace ALL specific nouns, verbs, and adjectives with placeholders ([NP], [VP], [ADJ])
+- Do NOT leave any specific content words like 'theory', 'knowledge', 'standpoint', 'practice', etc.
+- Replace EVERY content word, no exceptions
+
+**KEEP (Functional Grammar Only):**
+- Prepositions: of, in, to, for, with, by, from, at, on, etc.
+- Conjunctions: and, but, or, if, when, while, etc.
+- Determiners: the, a, an, this, that, these, those
+- Auxiliary verbs: is, are, was, were, has, have, had, will, would, could, should, may, might, must, can
+
+**REPLACE (ALL Content Words):**
+- ALL Nouns → [NP] (e.g., 'theory', 'knowledge', 'standpoint', 'practice' → [NP])
+- ALL Verbs → [VP] (e.g., 'reinforce', 'affirm', 'serve' → [VP])
+- ALL Adjectives → [ADJ] (e.g., 'primary', 'objective', 'dialectical' → [ADJ])
+
+**Example:**
+Input: "The standpoint of practice is the primary standpoint."
+Output: "The [NP] of [NP] is the [ADJ] [NP]."
+(NOT "The [NP] of practice..." - you must replace ALL content words)
 
 Input: "{text}"
 
@@ -64,6 +81,20 @@ Output ONLY the skeleton with placeholders, no explanations:"""
             # Remove quotes if present
             skeleton = re.sub(r'^["\']|["\']$', '', skeleton)
             skeleton = skeleton.strip()
+
+            # SKELETON PRUNING: If input is single-sentence, truncate skeleton to first sentence delimiter
+            if input_text:
+                input_sentences = re.split(r'[.!?]+', input_text.strip())
+                input_sentences = [s.strip() for s in input_sentences if s.strip()]
+                if len(input_sentences) == 1:
+                    # Input is single sentence - truncate skeleton to first sentence delimiter
+                    # Find first sentence-ending punctuation in skeleton
+                    for delimiter in ['.', '!', '?']:
+                        if delimiter in skeleton:
+                            # Truncate at first sentence delimiter
+                            delimiter_pos = skeleton.find(delimiter)
+                            skeleton = skeleton[:delimiter_pos + 1].strip()
+                            break
 
             # Validate: should contain at least one placeholder
             if '[NP]' not in skeleton and '[VP]' not in skeleton and '[ADJ]' not in skeleton:
