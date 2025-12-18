@@ -3,11 +3,23 @@
 This module extracts sentence skeletons from RAG samples by replacing
 nouns, verbs, and adjectives with placeholders while preserving the
 exact syntactic structure.
+
+Also provides paragraph rhythm extraction for structural cloning.
 """
 
 import re
-from typing import Optional
+from typing import Optional, List, Dict
 from src.generator.llm_provider import LLMProvider
+
+# Rhetorical connectors that define sentence flow (case-insensitive matching)
+RHETORICAL_OPENERS = {
+    'but', 'however', 'thus', 'therefore', 'yet', 'conversely', 'although',
+    'in contrast', 'nevertheless', 'nonetheless', 'moreover', 'furthermore',
+    'consequently', 'hence', 'accordingly', 'indeed', 'in fact', 'specifically',
+    'notably', 'significantly', 'importantly', 'crucially', 'meanwhile',
+    'alternatively', 'additionally', 'similarly', 'likewise', 'instead',
+    'rather', 'still', 'though', 'despite', 'regardless', 'nonetheless'
+}
 
 
 class Structuralizer:
@@ -200,4 +212,74 @@ Output ONLY the skeleton with placeholders, no explanations:"""
         except Exception:
             # On error, return original skeleton
             return skeleton
+
+def extract_paragraph_rhythm(text: str) -> List[Dict]:
+        """Extract paragraph rhythm map from a text example.
+
+        Analyzes sentence structure (length, type, opener) to create a rhythm
+        template that can be used to force generated text to match human patterns.
+
+        Args:
+            text: Input paragraph text to analyze.
+
+        Returns:
+            List of dictionaries, each representing a sentence specification:
+            [{'length': 'short', 'type': 'question', 'opener': None}, ...]
+        """
+        if not text or not text.strip():
+            return []
+
+        try:
+            from nltk.tokenize import sent_tokenize
+        except ImportError:
+            # Fallback: simple sentence splitting
+            sentences = re.split(r'[.!?]+\s+', text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+        else:
+            sentences = sent_tokenize(text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+
+        rhythm_map = []
+
+        for sentence in sentences:
+            if not sentence:
+                continue
+
+            # Count words (simple split)
+            words = sentence.split()
+            word_count = len(words)
+
+            # Determine length class
+            if word_count < 10:
+                length = 'short'
+            elif word_count <= 25:
+                length = 'medium'
+            else:
+                length = 'long'
+
+            # Determine type
+            sentence_lower = sentence.lower()
+            if sentence.rstrip().endswith('?'):
+                sent_type = 'question'
+            elif 'if' in sentence_lower and ('then' in sentence_lower or ',' in sentence):
+                # Check for conditional structure (if...then or if...,)
+                sent_type = 'conditional'
+            else:
+                sent_type = 'standard'
+
+            # Determine opener (only if it's a rhetorical connector)
+            opener = None
+            if words:
+                first_word = words[0].rstrip('.,!?;:').lower()
+                if first_word in RHETORICAL_OPENERS:
+                    # Preserve original capitalization from sentence
+                    opener = words[0].rstrip('.,!?;:')
+
+            rhythm_map.append({
+                'length': length,
+                'type': sent_type,
+                'opener': opener
+            })
+
+        return rhythm_map
 

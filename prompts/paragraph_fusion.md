@@ -17,6 +17,8 @@ You are a ghostwriter. Your goal is to write a single cohesive paragraph in the 
 4. **Coherence:** Create logical connections between propositions using appropriate connectors (Furthermore, It follows that, In this way, etc.). Make the paragraph read as a unified whole, not a list of facts.
 {citation_instruction}
 
+{structural_blueprint}
+
 ### MENTAL CHECKLIST:
 Before generating the JSON, review the Source Propositions listed above. Ensure every single one is represented in the output text. Each proposition must appear in at least one sentence of your generated paragraph. If a proposition is missing, the output is considered a FAILURE.
 

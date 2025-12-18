@@ -2676,6 +2676,47 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         if verbose:
             print(f"  Selected {len(complex_examples)} complex examples after filtering")
 
+        # Step 2.5: Select "Teacher Example" for structural cloning
+        # Select the example whose sentence count best matches our proposition count
+        import math
+        from nltk.tokenize import sent_tokenize
+
+        n_props = len(propositions)
+        target_sentences = math.ceil(n_props * 0.6)  # Target ratio: ~1.5 props per sentence
+
+        teacher_example = None
+        rhythm_map = None
+
+        if complex_examples:
+            # Count sentences for each example and find best match
+            best_match = None
+            best_diff = float('inf')
+
+            for example in complex_examples:
+                try:
+                    example_sentences = sent_tokenize(example)
+                    sentence_count = len([s for s in example_sentences if s.strip()])
+                    diff = abs(sentence_count - target_sentences)
+
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_match = example
+                except Exception:
+                    # If tokenization fails, skip this example
+                    continue
+
+            if best_match:
+                teacher_example = best_match
+                # Extract rhythm map from teacher
+                from src.analyzer.structuralizer import extract_paragraph_rhythm
+                rhythm_map = extract_paragraph_rhythm(teacher_example)
+
+                if verbose:
+                    print(f"  Selected teacher example with {len(rhythm_map)} sentences (target: {target_sentences})")
+                    if rhythm_map:
+                        rhythm_summary = [f"{r['length']} {r['type']}" for r in rhythm_map[:3]]
+                        print(f"  Rhythm map: {rhythm_summary}...")
+
         # Step 3: Extract style DNA if not provided
         if not style_dna:
             from src.analyzer.style_extractor import StyleExtractor
@@ -2736,13 +2777,46 @@ These connectors match the author's style and help create flowing, complex sente
             citation_instruction = ""
             citation_output_instruction = ""
 
+        # Format structural blueprint from rhythm map
+        structural_blueprint = ""
+        if rhythm_map and len(rhythm_map) > 0:
+            blueprint_lines = []
+            blueprint_lines.append("### STRUCTURAL BLUEPRINT:")
+            blueprint_lines.append("You must structure your paragraph to match this rhythm exactly. Distribute your Atomic Propositions into this container. Merge or split them as needed to fit the sentence types. Follow this sentence-by-sentence blueprint exactly. If the blueprint asks for a Short Sentence, do not write a long one.")
+            blueprint_lines.append("")
+            for i, spec in enumerate(rhythm_map):
+                length = spec['length']
+                sent_type = spec['type']
+                opener = spec['opener']
+
+                # Build description
+                desc_parts = [length]
+                if sent_type == 'question':
+                    desc_parts.append('rhetorical question')
+                elif sent_type == 'conditional':
+                    desc_parts.append('conditional')
+                else:
+                    desc_parts.append('declarative statement')
+
+                opener_text = ""
+                if opener:
+                    opener_text = f" starting with '{opener}'"
+
+                blueprint_lines.append(f"Sentence {i+1}: {' '.join(desc_parts).capitalize()}{opener_text}.")
+
+            structural_blueprint = "\n".join(blueprint_lines)
+        else:
+            # Fallback: no structural blueprint
+            structural_blueprint = ""
+
         prompt = PARAGRAPH_FUSION_PROMPT.format(
             propositions_list=propositions_list,
             style_examples=style_examples_text,
             mandatory_vocabulary=mandatory_vocabulary,
             rhetorical_connectors=rhetorical_connectors,
             citation_instruction=citation_instruction,
-            citation_output_instruction=citation_output_instruction
+            citation_output_instruction=citation_output_instruction,
+            structural_blueprint=structural_blueprint
         )
 
         if verbose:
@@ -2776,6 +2850,9 @@ These connectors match the author's style and help create flowing, complex sente
             from src.validator.semantic_critic import SemanticCritic
             from src.ingestion.blueprint import BlueprintExtractor
             critic = SemanticCritic(config_path=self.config_path)
+            # Pass rhythm map to critic for verification (soft check)
+            if rhythm_map:
+                critic._rhythm_map = rhythm_map
             extractor = BlueprintExtractor()
 
             # Get author style vector for holistic evaluation

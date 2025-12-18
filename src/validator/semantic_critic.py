@@ -1509,6 +1509,24 @@ Return JSON:
                 f"Style alignment low ({style_alignment:.2f}). Average sentence length: {style_details.get('avg_sentence_length', 0):.1f} words."
             )
 
+        # Optional: Verify structural blueprint match (soft check)
+        # Note: We're already in paragraph mode, so no need to check is_paragraph
+        if hasattr(self, '_rhythm_map') and self._rhythm_map:
+            try:
+                from nltk.tokenize import sent_tokenize
+                generated_sentences = sent_tokenize(generated_text)
+                generated_sentence_count = len([s for s in generated_sentences if s.strip()])
+                blueprint_sentence_count = len(self._rhythm_map)
+
+                if abs(generated_sentence_count - blueprint_sentence_count) > 1:
+                    # Add warning to feedback (not a failure)
+                    feedback_parts.append(
+                        f"[Warning: Generated paragraph has {generated_sentence_count} sentences, blueprint expected {blueprint_sentence_count}. Structural blueprint may not have been followed exactly.]"
+                    )
+            except Exception:
+                # Ignore errors in verification (soft check)
+                pass
+
         return {
             "pass": passes,
             "proposition_recall": proposition_recall,
