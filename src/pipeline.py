@@ -246,7 +246,11 @@ def process_text(
                 if critic_result.get('pass', False):
                     generated_paragraphs.append(generated_paragraph)
                     if write_callback:
-                        write_callback(generated_paragraph, is_new_paragraph=(para_idx == 0))
+                        is_new_paragraph = (para_idx == 0)
+                        write_callback(generated_paragraph, is_new_paragraph, is_first_paragraph)
+                        if is_new_paragraph and is_first_paragraph:
+                            is_first_paragraph = False
+                    previous_generated_text = generated_paragraph  # Update context
                     continue  # Skip sentence-by-sentence processing
                 else:
                     if verbose:
