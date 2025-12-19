@@ -695,31 +695,41 @@ def run_pipeline(
     authors = blend_config.get("authors", [])
     if not authors:
         raise ValueError("No authors specified in config.json. Set 'blend.authors' to a list of author names.")
-    author_name = authors[0]  # Use first author (Pipeline 2.0 doesn't support blending yet)
+    author_name = authors[0]  # Use first author as primary (for backward compatibility)
 
-    # Get style DNA from registry
+    # Get style DNA from registry for all authors
+    style_dna = ""
     if atlas_cache_path:
         registry = StyleRegistry(atlas_cache_path)
-        exists, suggestion = registry.validate_author(author_name)
-        if not exists:
-            print(f"Warning: Author '{author_name}' not found in registry.")
-            if suggestion:
-                print(f"  {suggestion}")
 
+        # Load style DNA for all authors in blend config
+        for author in authors:
+            exists, suggestion = registry.validate_author(author)
+            if not exists:
+                if verbose:
+                    print(f"Warning: Author '{author}' not found in registry.")
+                    if suggestion:
+                        print(f"  {suggestion}")
+
+            author_dna = registry.get_dna(author)
+            if not author_dna:
+                # Fallback: try to get from atlas
+                author_dna = atlas.author_style_dna.get(author, "")
+                if not author_dna:
+                    if verbose:
+                        print(f"Warning: No Style DNA found for '{author}'. Using empty DNA.")
+                        available = list(registry.get_all_profiles().keys())
+                        if available:
+                            print(f"Available authors in registry: {', '.join(sorted(available))}")
+                        print(f"Generate Style DNA using: python scripts/generate_style_dna.py --author '{author}'")
+            else:
+                if verbose:
+                    print(f"  ✓ Loaded Style DNA from registry for '{author}'")
+
+        # Get style DNA for primary author (for backward compatibility with single-author mode)
         style_dna = registry.get_dna(author_name)
         if not style_dna:
-            # Fallback: try to get from atlas
             style_dna = atlas.author_style_dna.get(author_name, "")
-            if not style_dna:
-                print(f"Warning: No Style DNA found for '{author_name}'. Using empty DNA.")
-                available = list(registry.get_all_profiles().keys())
-                if available:
-                    print(f"Available authors in registry: {', '.join(sorted(available))}")
-                print(f"Generate Style DNA using: python scripts/generate_style_dna.py --author '{author_name}'")
-                style_dna = ""
-        else:
-            if verbose:
-                print(f"  ✓ Loaded Style DNA from registry for '{author_name}'")
     else:
         style_dna = atlas.author_style_dna.get(author_name, "")
 
