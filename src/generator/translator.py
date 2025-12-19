@@ -2804,7 +2804,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                     signature = generate_structure_signature(candidate_rhythm_map)
                     diversity_score = 1.0  # Default: no penalty
                     if enabled and structure_tracker:
-                        diversity_score = structure_tracker.get_diversity_score(signature)
+                        diversity_score = structure_tracker.get_diversity_score(signature, candidate_rhythm_map)
 
                     # 3. Positional fit
                     opener_val = candidate_rhythm_map[0].get('opener') if candidate_rhythm_map else None
