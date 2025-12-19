@@ -166,6 +166,23 @@ class StyleTranslator:
                     if token.pos_ == "NOUN" and not token.is_stop:
                         blueprint_nouns.add(token.lemma_.lower())
 
+        # Also extract from core_keywords (handles cases where standalone words are mis-tagged)
+        # This is important because words like "object" can be tagged as VERB when standalone
+        # Only use this as a fallback when we haven't found enough nouns from SVO triples
+        if blueprint.core_keywords:
+            for keyword in blueprint.core_keywords:
+                if keyword:
+                    keyword_doc = nlp(keyword.lower())
+                    for token in keyword_doc:
+                        # Accept if it's a NOUN
+                        if token.pos_ == "NOUN" and not token.is_stop:
+                            blueprint_nouns.add(token.lemma_.lower())
+                        # Also accept if lemma matches an original noun (handles mis-tagging like "object" -> VERB)
+                        # But only if we haven't found enough nouns yet (to avoid over-matching)
+                        elif len(blueprint_nouns) == 0 and token.lemma_.lower() in original_nouns:
+                            # Only use this fallback if we have zero nouns from SVO (handles lemmatization case)
+                            blueprint_nouns.add(token.lemma_.lower())
+
         # Check: if blueprint has zero matching nouns, it's incomplete
         matching_nouns = original_nouns.intersection(blueprint_nouns)
         if len(matching_nouns) == 0 and len(original_nouns) > 0:
@@ -1121,7 +1138,7 @@ Output PURE JSON. A single list of strings:
         # Dynamic expansion thresholds: Allow more expansion for short inputs
         # Short sentences need more room to breathe when transformed to complex styles (e.g., Maoist dialectic)
         if input_len < 10:
-            max_ratio = 6.0  # Allow 6x expansion for very short inputs (e.g., 7 words -> 42 words)
+            max_ratio = 6.5  # Allow 6.5x expansion for very short inputs (e.g., 5 words -> 32 words, or 7 words -> 45 words)
         elif input_len < 20:
             max_ratio = 4.0  # Allow 4x expansion for short inputs
         else:
@@ -1762,9 +1779,9 @@ CRITICAL RULES:
         Returns:
             Style-transferred text (never returns original text verbatim).
         """
-        # If blueprint is incomplete, use style-preserving fallback
+        # If blueprint is incomplete, return original text (don't try to generate from broken blueprint)
         if self._is_blueprint_incomplete(blueprint):
-            return self._translate_style_fallback(blueprint, author_name, style_dna, rhetorical_type, examples)
+            return blueprint.original_text
 
         # FAILSAFE: If blueprint is empty, use style-preserving fallback
         if not blueprint.svo_triples and not blueprint.core_keywords:

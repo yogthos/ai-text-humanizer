@@ -464,7 +464,7 @@ class TestEvolutionConvergence(unittest.TestCase):
             if "reinforce" in text.lower() and "rule" in text.lower():
                 return {"raw_score": 0.96, "pass": True, "recall_score": 1.0, "fluency_score": 0.9, "precision_score": 0.8, "score": 0.90}
             return {"raw_score": 0.73, "pass": False, "recall_score": 0.60, "fluency_score": 0.9, "precision_score": 0.5, "score": 0.73}
-        
+
         mock_soft_scorer.evaluate_with_raw_score.side_effect = mock_eval_with_raw_score
         mock_soft_scorer.calculate_raw_score.return_value = (0.96, {
             "recall": 1.0, "fluency": 0.9, "similarity": 0.95
@@ -574,7 +574,7 @@ class TestEvolutionConvergence(unittest.TestCase):
             elif "object" in text_lower and "touch" in text_lower:
                 return {"raw_score": 0.82, "pass": False, "recall_score": 0.67, "fluency_score": 1.0, "precision_score": 1.0, "score": 0.92}
             return {"raw_score": 0.53, "pass": False, "recall_score": 0.0, "fluency_score": 0.0, "precision_score": 0.0, "score": 0.0}
-        
+
         mock_soft_scorer.evaluate_with_raw_score.side_effect = mock_eval_with_raw_score
         self.translator.soft_scorer = mock_soft_scorer
 
@@ -674,7 +674,7 @@ class TestEvolutionConvergence(unittest.TestCase):
             if has_all and "biological" in text_lower:
                 return {"raw_score": 0.93, "pass": True, "recall_score": 1.0, "fluency_score": 0.95, "precision_score": 0.90, "score": 0.92}
             return {"raw_score": 0.81, "pass": False, "recall_score": 1.0, "fluency_score": 0.70, "precision_score": 0.86, "score": 0.81}
-        
+
         mock_soft_scorer.evaluate_with_raw_score.side_effect = mock_eval_with_raw_score
         self.translator.soft_scorer = mock_soft_scorer
 
