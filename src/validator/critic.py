@@ -142,19 +142,60 @@ def _detect_hallucinated_words(generated_text: str, original_text: str) -> Tuple
         if clean_word[0].isupper() and len(clean_word) > 1:
             lower_word = clean_word.lower()
 
-            # EXEMPTION 1: It's the start of a sentence
-            if lower_word in sentence_starts:
-                continue
-
-            # EXEMPTION 2: It appears in the original (case-insensitive)
+            # EXEMPTION 1: It appears in the original (case-insensitive)
             if lower_word in orig_lower:
                 continue
 
-            # EXEMPTION 3: Common Stopwords (Safety Net)
+            # EXEMPTION 2: Common Stopwords (Safety Net)
             if lower_word in {'the', 'this', 'that', 'there', 'human', 'experience', 'nature'}:
                 continue
 
-            # If we get here, it's a capitalized word NOT in the original, NOT a sentence start.
+            # EXEMPTION 3: Check if word is a synonym using spaCy word similarity
+            # This allows legitimate synonyms (e.g., "essential" for "important")
+            # while still catching proper nouns (e.g., "Schneider")
+            # We check this BEFORE sentence start exemption to catch proper nouns at sentence start
+            is_synonym = False
+            if _spacy_nlp is not None:
+                try:
+                    # Get the word's vector representation
+                    word_token = _spacy_nlp.vocab[lower_word]
+                    if word_token.has_vector:
+                        # Check similarity with all words in original text
+                        # Use a threshold of 0.6 for synonym detection
+                        synonym_threshold = 0.6
+                        for orig_word in orig_lower:
+                            if orig_word and len(orig_word) > 2:  # Skip very short words
+                                orig_token = _spacy_nlp.vocab[orig_word]
+                                if orig_token.has_vector:
+                                    similarity = word_token.similarity(orig_token)
+                                    if similarity >= synonym_threshold:
+                                        is_synonym = True
+                                        break
+                except (KeyError, AttributeError, RuntimeError):
+                    # spaCy lookup failed, fall through to next check
+                    pass
+
+            if is_synonym:
+                continue
+
+            # EXEMPTION 4: It's the start of a sentence
+            # Only exempt sentence starts if:
+            # 1. It's a common word, OR
+            # 2. It's semantically similar to an original word (already checked above)
+            # This prevents proper nouns like "Schneider" from being exempted
+            if lower_word in sentence_starts:
+                # Check if it's a common word that can legitimately start a sentence
+                common_words = {'the', 'this', 'that', 'there', 'human', 'experience', 'nature',
+                               'it', 'a', 'an', 'in', 'on', 'at', 'for', 'to', 'of', 'and', 'or', 'but',
+                               'he', 'she', 'they', 'we', 'i', 'you', 'what', 'when', 'where', 'why', 'how'}
+                if lower_word in common_words:
+                    # It's a common word at sentence start - exempt it
+                    continue
+                # If it's at sentence start but NOT a common word and NOT a synonym,
+                # it's likely a hallucinated proper noun - don't exempt it, flag it
+
+            # If we get here, it's a capitalized word NOT in the original, NOT a synonym,
+            # and either NOT at sentence start OR at sentence start but not a common word.
             # Likely a hallucinated name (e.g., "Schneider", "August").
             hallucinated.append(clean_word)
 
