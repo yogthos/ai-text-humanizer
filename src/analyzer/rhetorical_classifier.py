@@ -12,6 +12,22 @@ from typing import Optional
 from src.generator.llm_interface import LLMProvider
 
 
+def _load_prompt_template(template_name: str) -> str:
+    """Load a prompt template from the prompts directory.
+
+    Args:
+        template_name: Name of the template file (e.g., 'rhetorical_classifier_system.md')
+
+    Returns:
+        Template content as string.
+    """
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    template_path = prompts_dir / template_name
+    if not template_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {template_path}")
+    return template_path.read_text().strip()
+
+
 class RhetoricalClassifier:
     """Classifies text into rhetorical modes using heuristics and LLM fallback."""
 
@@ -144,14 +160,7 @@ class RhetoricalClassifier:
             return heuristic_result
 
         # Heuristic was ambiguous - use LLM fallback
-        system_prompt = """You are a rhetorical mode classifier. Classify the text into one of these modes:
-
-- NARRATIVE: Telling a story, sequence of events (e.g., "I went," "Then," "He said")
-- ARGUMENTATIVE: Persuading, logical proofs, conditionals (e.g., "Therefore," "Unless," "It follows")
-- DESCRIPTIVE: Painting a picture, static features (e.g., "The tree was tall," "It consists of")
-
-Respond with ONLY one word: NARRATIVE, ARGUMENTATIVE, or DESCRIPTIVE."""
-
+        system_prompt = _load_prompt_template("rhetorical_classifier_system.md")
         user_prompt = f"Classify this text:\n\n{text}"
 
         try:

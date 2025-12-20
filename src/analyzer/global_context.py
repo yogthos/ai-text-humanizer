@@ -5,8 +5,25 @@ to provide context for paragraph fusion generation and evaluation.
 """
 
 import json
+from pathlib import Path
 from typing import Dict, Optional
 from src.generator.llm_provider import LLMProvider
+
+
+def _load_prompt_template(template_name: str) -> str:
+    """Load a prompt template from the prompts directory.
+
+    Args:
+        template_name: Name of the template file (e.g., 'global_context_system.md')
+
+    Returns:
+        Template content as string.
+    """
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    template_path = prompts_dir / template_name
+    if not template_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {template_path}")
+    return template_path.read_text().strip()
 
 
 class GlobalContextAnalyzer:
@@ -53,23 +70,9 @@ class GlobalContextAnalyzer:
             # Keep first 10k and last 5k chars
             text_to_analyze = full_text[:10000] + "\n\n[... document truncated ...]\n\n" + full_text[-5000:]
 
-        system_prompt = "You are a document analyst. Analyze the following text and extract its core structure. Return your analysis as valid JSON only."
-
-        user_prompt = f"""Analyze the following text and extract:
-
-1. **The Thesis:** What is the main argument or central theme? (Maximum 2 sentences)
-2. **The Intent:** Is the author primarily persuading, informing, or narrating?
-3. **Key Terminology:** List 5 central concepts or terms that must remain consistent throughout the document.
-
-Text to analyze:
-{text_to_analyze}
-
-Return your analysis as JSON with this exact structure:
-{{
-    "thesis": "Main argument in 1-2 sentences",
-    "intent": "persuading" or "informing" or "narrating",
-    "keywords": ["concept1", "concept2", "concept3", "concept4", "concept5"]
-}}"""
+        system_prompt = _load_prompt_template("global_context_system.md")
+        user_template = _load_prompt_template("global_context_user.md")
+        user_prompt = user_template.format(text_to_analyze=text_to_analyze)
 
         try:
             response = self.llm_provider.call(

@@ -6,6 +6,7 @@ based on semantic blueprints rather than text overlap.
 
 import json
 import re
+from pathlib import Path
 from typing import Dict, Tuple, Optional, Set, List
 from src.ingestion.blueprint import SemanticBlueprint, BlueprintExtractor
 
@@ -35,6 +36,22 @@ DOMAIN_GLUE_WORDS = {
 
 # Use NLPManager for shared spaCy model (lazy loading)
 _spacy_nlp = None
+
+
+def _load_prompt_template(template_name: str) -> str:
+    """Load a prompt template from the prompts directory.
+
+    Args:
+        template_name: Name of the template file (e.g., 'semantic_critic_coherence.md')
+
+    Returns:
+        Template content as string.
+    """
+    prompts_dir = Path(__file__).parent.parent.parent / "prompts"
+    template_path = prompts_dir / template_name
+    if not template_path.exists():
+        raise FileNotFoundError(f"Prompt template not found: {template_path}")
+    return template_path.read_text().strip()
 
 
 def _get_significant_tokens(text: str) -> Set[str]:
@@ -369,15 +386,7 @@ class SemanticCritic:
         if not text or not text.strip():
             return 0.0, "Empty text"
 
-        system_prompt = """You are a strict copy editor. Analyze the text below for **Coherence** and **Hallucinations**.
-
-1. Is the text grammatically fluent?
-2. Does it make logical sense, or is it 'word salad'?
-3. Does it contain random technical jargon (e.g., 'turing complete', 'namespace', 'dependency injection') that doesn't fit the narrative?
-4. **CRITICAL:** Does the text insert abstract academic jargon (e.g., 'emergent complexity', 'systems theory', 'dialectical materialism') into a simple narrative? If yes, mark as Incoherent.
-
-**Output JSON:** {'is_coherent': bool, 'score': float (0.0-1.0), 'reason': '...'}"""
-
+        system_prompt = _load_prompt_template("semantic_critic_coherence.md")
         user_prompt = f"Analyze this text for coherence:\n\n{text}"
 
         try:
@@ -965,27 +974,19 @@ class SemanticCritic:
         if not self.llm_provider:
             return True, 0.5, 1.0, "LLM verification unavailable"
 
-        system_prompt = "You are a semantic validator. Your task is to determine if two sentences convey the same core meaning, even if they use different words or stylistic structures. Pay special attention to logical relationships, conditional statements, and meaning shifts."
+        system_prompt = _load_prompt_template("semantic_critic_meaning_system.md")
 
-        user_prompt = f"""Task 1: Verify factual recall.
-Compare these two sentences and determine if the generated text preserves the core meaning of the original.
+        # Build user prompt from template
+        user_template = _load_prompt_template("semantic_critic_meaning_user.md")
 
-Original: "{original_text}"
-
-Generated: "{generated_text}"
-
-Does the generated text preserve the core meaning of the original? Pay attention to:
-- Logical relationships: Does it add conditions (e.g., "only when", "if... then") that weren't in the original?
-- Meaning shifts: Does it change a universal statement into a conditional, or vice versa?
-- Contradictions: Does it imply something that contradicts the original meaning?"""
-
-        # Add global context if available
+        # Build context section
+        global_context_section = ""
         if global_context and global_context.get('thesis'):
-            context_note = f"\n\nCONTEXT: The document is about {global_context['thesis']}. Verify that the generated text aligns with this context and doesn't introduce off-topic content."
-            user_prompt += context_note
+            global_context_section = f"\n\nCONTEXT: The document is about {global_context['thesis']}. Verify that the generated text aligns with this context and doesn't introduce off-topic content."
 
-        # Add intent assessment if intent is provided
+        # Build intent task
         intent_task = ""
+        intent_score_field = ""
         if intent:
             intent_task = f"""
 
@@ -995,22 +996,15 @@ Does the generated text align with the intent '{intent}'? Consider:
 - "narrating": Does it tell a story or describe events in sequence?
 - "informing": Does it present facts, explanations, or educational content?
 - "analyzing": Does it break down concepts, compare, or examine relationships?"""
-            user_prompt += intent_task
+            intent_score_field = '"intent_score": 1.0/0.5/0.0,  // 1.0 = Yes, 0.5 = Partial, 0.0 = No\n    '
 
-        user_prompt += """
-
-Respond with JSON:
-{{
-    "meaning_preserved": true/false,
-    "confidence": 0.0-1.0,"""
-
-        if intent:
-            user_prompt += """
-    "intent_score": 1.0/0.5/0.0,  // 1.0 = Yes, 0.5 = Partial, 0.0 = No"""
-
-        user_prompt += """,
-    "explanation": "brief reason (mention if conditional relationship, logic mismatch, meaning shift, or intent mismatch detected)"
-}}"""
+        user_prompt = user_template.format(
+            original_text=original_text,
+            generated_text=generated_text,
+            global_context_section=global_context_section,
+            intent_task=intent_task,
+            intent_score_field=intent_score_field
+        )
 
         try:
             response = self.llm_provider.call(
@@ -1146,45 +1140,20 @@ Respond with JSON:
         if not self.llm_provider:
             return False  # No LLM available, don't block on logic
 
-        LOGIC_VERIFICATION_PROMPT = """
-You are a strict Logic Validator. Your job is to check if the Generated Text preserves the **Truth Value** and **Causality** of the Original Text.
+        logic_template = _load_prompt_template("semantic_critic_logic.md")
 
-### INPUTS
-Original: "{original_text}"
-Generated: "{generated_text}"
-Target Rhetorical Structure: {skeleton_type}
-
-### RULES
-1. **Ignore Stylistic Wrappers:**
-   - If the Target Structure is 'RHETORICAL_QUESTION', the output MUST be a question. This is NOT a meaning shift.
-   - If the Target Structure is 'CONDITIONAL' (e.g., "If X, then Y"), checking for conditions is expected.
-
-2. **Focus on Truth & Causality:**
-   - **FAIL** if the causality is reversed (e.g., "Fire causes smoke" -> "Smoke causes fire").
-   - **FAIL** if the truth is denied (e.g., "It is finite" -> "It is infinite").
-   - **FAIL** if a *universal* truth becomes *contingent* on a new, unrelated condition (e.g., "Humans die" -> "Humans die ONLY if it rains").
-
-3. **PASS** if the core message remains true, even if wrapped in complex syntax.
-
-### OUTPUT
-Return JSON:
-{{
-    "logic_fail": boolean,  // True only if truth/causality is broken
-    "reason": "string"      // Explanation
-}}
-"""
+        # Build global context section
+        global_context_section = ""
+        if global_context and global_context.get('thesis'):
+            global_context_section = f"\n\nCONTEXT: The document is about {global_context['thesis']}. Verify that the generated text aligns with this context."
 
         try:
-            prompt = LOGIC_VERIFICATION_PROMPT.format(
+            prompt = logic_template.format(
                 original_text=original_text,
                 generated_text=generated_text,
-                skeleton_type=skeleton_type
+                skeleton_type=skeleton_type,
+                global_context_section=global_context_section
             )
-
-            # Add global context if available
-            if global_context and global_context.get('thesis'):
-                context_note = f"\n\nCONTEXT: The document is about {global_context['thesis']}. Verify that the generated text aligns with this context."
-                prompt += context_note
 
             response = self.llm_provider.call(
                 system_prompt="You are a precision logic validator. Output ONLY valid JSON.",

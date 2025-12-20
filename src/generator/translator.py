@@ -9,7 +9,15 @@ import re
 import time
 import requests
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional, Set
+from typing import List, Tuple, Dict, Optional, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+else:
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
 from src.ingestion.blueprint import SemanticBlueprint
 from src.atlas.rhetoric import RhetoricalType
 from src.generator.llm_provider import LLMProvider
@@ -3691,6 +3699,9 @@ Keywords: {keywords_text}
 - This context is the **Atmosphere**, not the **Script** - use it for tone, not content.
 """
 
+        # Get num_variations from config to pass to prompt
+        num_variations = self.paragraph_fusion_config.get("num_variations", 5)
+
         prompt = PARAGRAPH_FUSION_PROMPT.format(
             propositions_list=propositions_list,
             proposition_count=len(propositions),
@@ -3700,7 +3711,8 @@ Keywords: {keywords_text}
             rhetorical_connectors=rhetorical_connectors,
             citation_instruction=citation_instruction,
             citation_output_instruction=citation_output_instruction,
-            structural_blueprint=structural_blueprint
+            structural_blueprint=structural_blueprint,
+            num_variations=num_variations
         )
 
         if verbose:
@@ -3930,17 +3942,51 @@ Keywords: {keywords_text}
                     print(f"  ✓ Selected qualified candidate #{candidate_num}: recall={best_candidate['recall']:.2f}, "
                           f"score={best_candidate['score']:.2f}")
 
-                # Remove phantom citations before returning
-                final_text = self._remove_phantom_citations(best_candidate["text"], expected_citations)
-                # Restore valid citations if needed
-                from src.ingestion.blueprint import BlueprintExtractor
-                extractor = BlueprintExtractor()
-                blueprint = extractor.extract(paragraph)
-                final_text = self._restore_citations_and_quotes(final_text, blueprint)
+                # NEW: Check style threshold even if meaning passes
+                style_threshold = self.paragraph_fusion_config.get("style_alignment_threshold", 0.7)
+                best_style = best_candidate.get("style_alignment", 0.0)
 
-                # Return with internal_recall from best candidate
-                internal_recall = best_candidate.get("recall", 0.0)
-                return final_text, rhythm_map, teacher_example, internal_recall
+                if best_candidate["recall"] >= proposition_recall_threshold:
+                    if best_style >= style_threshold:
+                        # Both meaning and style pass - return
+                        if verbose:
+                            print(f"  ✓ Both meaning (recall={best_candidate['recall']:.2f}) and style ({best_style:.2f}) pass thresholds")
+                        # Remove phantom citations before returning
+                        final_text = self._remove_phantom_citations(best_candidate["text"], expected_citations)
+                        # Restore valid citations if needed
+                        from src.ingestion.blueprint import BlueprintExtractor
+                        extractor = BlueprintExtractor()
+                        blueprint = extractor.extract(paragraph)
+                        final_text = self._restore_citations_and_quotes(final_text, blueprint)
+                        internal_recall = best_candidate.get("recall", 0.0)
+                        return final_text, rhythm_map, teacher_example, internal_recall
+                    else:
+                        # Meaning passes, but style fails - enter style refinement
+                        if verbose:
+                            print(f"  ⚠ Meaning passed (recall={best_candidate['recall']:.2f}), but style low ({best_style:.2f} < {style_threshold}). Entering Style Refinement...")
+                        return self._refine_style_only(
+                            best_candidate,
+                            propositions,
+                            blueprint,
+                            style_lexicon,
+                            author_style_vector,
+                            rhythm_map,
+                            teacher_example,
+                            expected_citations,
+                            paragraph,
+                            verbose=verbose
+                        )
+                else:
+                    # Meaning didn't pass - this shouldn't happen in qualified_candidates, but handle it
+                    # Remove phantom citations before returning
+                    final_text = self._remove_phantom_citations(best_candidate["text"], expected_citations)
+                    # Restore valid citations if needed
+                    from src.ingestion.blueprint import BlueprintExtractor
+                    extractor = BlueprintExtractor()
+                    blueprint = extractor.extract(paragraph)
+                    final_text = self._restore_citations_and_quotes(final_text, blueprint)
+                    internal_recall = best_candidate.get("recall", 0.0)
+                    return final_text, rhythm_map, teacher_example, internal_recall
             else:
                 # 3. Fallback: No qualified candidates, pick highest recall (salvage meaning)
                 best_candidate = max(evaluated_candidates, key=lambda x: x["recall"])
@@ -4345,6 +4391,182 @@ Output as a single paragraph (not JSON array):"""
             if verbose:
                 print(f"  ⚠ Artifact repair failed: {e}")
             return None  # Return None to indicate repair failed
+
+    def _refine_style_only(
+        self,
+        candidate: Dict,
+        propositions: List[str],
+        blueprint: SemanticBlueprint,
+        style_lexicon: Optional[List[str]],
+        author_style_vector: Optional['np.ndarray'],
+        rhythm_map: Optional[List[str]],
+        teacher_example: Optional[str],
+        expected_citations: set,
+        paragraph: str,
+        verbose: bool = False
+    ) -> tuple[str, Optional[List[Dict]], Optional[str], float]:
+        """Refine style while preserving meaning.
+
+        The candidate has good meaning (recall >= threshold) but poor style.
+        Iteratively improve style without changing facts.
+
+        SAFEGUARD: "Do No Harm" Rule
+        - Track original candidate
+        - Filter out any refined variations where recall < 0.85
+        - If all refined variations fail meaning check, return original candidate
+        - Better to be boring and true than stylish and false
+
+        Args:
+            candidate: Original candidate dict with text, recall, style_alignment, etc.
+            propositions: List of atomic propositions that must be preserved
+            blueprint: Semantic blueprint for evaluation
+            style_lexicon: Optional list of style words
+            author_style_vector: Optional author style vector
+            rhythm_map: Optional rhythm map from teacher example
+            teacher_example: Optional teacher example text
+            expected_citations: Set of expected citation markers
+            paragraph: Original paragraph text
+            verbose: Whether to print debug information
+
+        Returns:
+            Tuple of (refined_text, rhythm_map, teacher_example, recall)
+        """
+        original_candidate = candidate  # Track for fallback
+        original_recall = candidate.get("recall", 0.0)
+        original_text = candidate.get("text", "")
+        max_iterations = self.paragraph_fusion_config.get("max_style_refinement_iterations", 3)
+        proposition_recall_threshold = self.paragraph_fusion_config.get("proposition_recall_threshold", 0.85)
+
+        if verbose:
+            print(f"  🎨 Style Refinement: Starting with recall={original_recall:.2f}, style={candidate.get('style_alignment', 0.0):.2f}")
+
+        # Build style refinement prompt
+        propositions_list = "\n".join([f"{i+1}. {prop}" for i, prop in enumerate(propositions)])
+        lexicon_text = ", ".join(style_lexicon[:20]) if style_lexicon else "None"
+
+        rhythm_map_text = ""
+        if rhythm_map:
+            rhythm_map_text = f"\n**Rhythm Map:** {', '.join(rhythm_map[:5])}..."
+
+        style_refinement_prompt = f"""The text below is **Factually Accurate** but **Stylistically Boring**.
+It fails to match the voice of the target author.
+
+**Current Text:**
+{original_text}
+
+**Input Propositions (MUST preserve all - do NOT add or remove facts):**
+{propositions_list}
+
+**Task:** Rewrite the text to maximize Style Density.
+1. Use the Author's Lexicon: {lexicon_text}
+2. Use the Author's Rhetorical Structure (Imperatives like "It is necessary to", Conditionals, Complex subordination).
+3. **CRITICAL:** Do NOT add or remove facts. Keep the meaning exact.
+4. Match the rhythm map if provided: {rhythm_map_text}
+5. Use complex, flowing sentences like the teacher example.
+
+**CRITICAL CONSTRAINTS:**
+- You MUST include ALL {len(propositions)} propositions listed above
+- Do NOT invent new facts to make it more interesting
+- Do NOT remove existing facts
+- Only change the STYLE (vocabulary, sentence structure, rhetorical framing)
+
+Generate 3 style-enhanced variations as a JSON array of strings:
+[
+  "Style-enhanced variation 1...",
+  "Style-enhanced variation 2...",
+  "Style-enhanced variation 3..."
+]"""
+
+        try:
+            # Generate style-focused variations
+            refinement_response = self.llm_provider.call(
+                system_prompt="You are a ghostwriter improving style while preserving all facts. Output ONLY valid JSON arrays.",
+                user_prompt=style_refinement_prompt,
+                model_type="editor",
+                require_json=True,
+                temperature=0.7,  # Moderate temperature for style variation
+                max_tokens=self.translator_config.get("max_tokens", 500)
+            )
+
+            refined_variations = self._extract_json_list(refinement_response)
+            refined_variations = refined_variations[:3]  # Limit to 3
+
+            if not refined_variations:
+                if verbose:
+                    print(f"  ⚠ No style refinements generated. Returning original candidate.")
+                # Fallback to original
+                final_text = self._remove_phantom_citations(original_text, expected_citations)
+                final_text = self._restore_citations_and_quotes(final_text, blueprint)
+                return final_text, rhythm_map, teacher_example, original_recall
+
+            if verbose:
+                print(f"  Generated {len(refined_variations)} style refinements, evaluating...")
+
+            # Evaluate refined variations with critic
+            from src.validator.semantic_critic import SemanticCritic
+            critic = SemanticCritic(config_path=self.config_path)
+            if rhythm_map:
+                critic._rhythm_map = rhythm_map
+
+            valid_refinements = []
+            for i, refined_var in enumerate(refined_variations):
+                cleaned_refined = re.sub(r'^Style-enhanced variation \d+:\s*', '', refined_var.strip())
+
+                # Evaluate with critic
+                refined_result = critic.evaluate(
+                    generated_text=cleaned_refined,
+                    input_blueprint=blueprint,
+                    propositions=propositions,
+                    is_paragraph=True,
+                    author_style_vector=author_style_vector,
+                    style_lexicon=style_lexicon,
+                    verbose=verbose
+                )
+
+                refined_recall = refined_result.get("proposition_recall", 0.0)
+                refined_style = refined_result.get("style_alignment", 0.0)
+
+                # SAFEGUARD: Only keep variations where recall >= 0.85
+                if refined_recall >= proposition_recall_threshold:
+                    valid_refinements.append({
+                        "text": cleaned_refined,
+                        "recall": refined_recall,
+                        "style_alignment": refined_style,
+                        "score": refined_result.get("score", 0.0),
+                        "result": refined_result
+                    })
+                    if verbose:
+                        print(f"    Refinement {i+1}: recall={refined_recall:.2f}, style={refined_style:.2f} ✓ VALID")
+                else:
+                    if verbose:
+                        print(f"    Refinement {i+1}: recall={refined_recall:.2f} < {proposition_recall_threshold} ✗ REJECTED (broke meaning)")
+
+            # Select best valid refinement (by style score)
+            if valid_refinements:
+                best_refinement = max(valid_refinements, key=lambda x: x["style_alignment"])
+                if verbose:
+                    print(f"  ✓ Style refinement successful: recall={best_refinement['recall']:.2f}, style={best_refinement['style_alignment']:.2f}")
+
+                # Clean up and return
+                final_text = self._remove_phantom_citations(best_refinement["text"], expected_citations)
+                final_text = self._restore_citations_and_quotes(final_text, blueprint)
+                return final_text, rhythm_map, teacher_example, best_refinement["recall"]
+            else:
+                # FALLBACK: All refinements broke meaning - return original
+                if verbose:
+                    print(f"  ⚠ All style refinements failed meaning check (recall < {proposition_recall_threshold}). Returning original candidate (Do No Harm).")
+
+                final_text = self._remove_phantom_citations(original_text, expected_citations)
+                final_text = self._restore_citations_and_quotes(final_text, blueprint)
+                return final_text, rhythm_map, teacher_example, original_recall
+
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠ Style refinement failed with exception: {e}. Returning original candidate.")
+            # Fallback to original on any error
+            final_text = self._remove_phantom_citations(original_text, expected_citations)
+            final_text = self._restore_citations_and_quotes(final_text, blueprint)
+            return final_text, rhythm_map, teacher_example, original_recall
 
     def _count_words(self, text: str) -> int:
         """Count words in text.
