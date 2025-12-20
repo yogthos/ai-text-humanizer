@@ -1052,6 +1052,14 @@ class StyleTranslator:
                 print(f"      ✅ CANDIDATE SURVIVED ALL FILTERS")
                 print(f"         📊 Scores: Adherence {adherence_score:.2f}, Recall {recall_score:.2f}, Style {style_density:.2f}, Overall {critic_result.get('score', 0.0):.2f}")
 
+            # Store meaning failure flags for hierarchical filtering
+            context_leak_detected = critic_result.get("context_leak_detected", False)
+            hallucination = critic_result.get("score", 0.0) == 0.0 and recall_score < min_keyword_presence
+            meaning_failure = (critic_result.get("score", 0.0) == 0.0 or
+                              recall_score < min_keyword_presence or
+                              context_leak_detected or
+                              hallucination)
+
             survivors.append({
                 "text": candidate_text,
                 "skeleton": skeleton,
@@ -1061,23 +1069,44 @@ class StyleTranslator:
                 "style_density": style_density,
                 "score": critic_result.get("score", 0.0),
                 "semantic_similarity": semantic_similarity,
-                "critic_result": critic_result
+                "critic_result": critic_result,
+                "context_leak_detected": context_leak_detected,
+                "hallucination": hallucination,
+                "meaning_failure": meaning_failure,
+                "repair_attempts": 1 if meaning_failure else 0  # Initialize repair attempts
             })
 
-        # Sort survivors by style_density (descending) and return Top K
-        survivors.sort(key=lambda x: x["style_density"], reverse=True)
+        # MEANING GATE: Filter by meaning FIRST, then rank by style
+        min_viable_recall = evolutionary_config.get("min_viable_recall", 0.85)
+        valid_candidates = [
+            c for c in survivors
+            if c['recall_score'] >= min_viable_recall
+            and not c.get('context_leak_detected', False)
+            and not c.get('hallucination', False)
+        ]
 
-        if verbose:
-            print(f"  🏟️  Arena Results: {len(survivors)} survivors from {len(candidates)} candidates")
-            if survivors:
-                print(f"    🏆 Top {min(3, len(survivors))} survivors:")
-                for i, surv in enumerate(survivors[:3]):
-                    print(f"      {i+1}. Style: {surv['style_density']:.2f}, Recall: {surv['recall_score']:.2f}, Score: {surv['score']:.2f}")
-                    print(f"         Text: {surv['text'][:80]}...")
-            else:
-                print(f"    ⚠ No survivors - all candidates failed filters")
-
-        return survivors[:top_k]
+        if valid_candidates:
+            # Sort by style (meaning-valid candidates compete on style)
+            valid_candidates.sort(key=lambda x: x["style_density"], reverse=True)
+            if verbose:
+                print(f"  🏟️  Arena Results: {len(valid_candidates)} meaning-valid survivors from {len(candidates)} candidates")
+                if valid_candidates:
+                    print(f"    🏆 Top {min(3, len(valid_candidates))} survivors (meaning-valid):")
+                    for i, surv in enumerate(valid_candidates[:3]):
+                        print(f"      {i+1}. Style: {surv['style_density']:.2f}, Recall: {surv['recall_score']:.2f}, Score: {surv['score']:.2f}")
+                        print(f"         Text: {surv['text'][:80]}...")
+            return valid_candidates[:top_k]
+        else:
+            # Emergency: All failed meaning - select best recall for repair
+            survivors.sort(key=lambda x: x["recall_score"], reverse=True)
+            if verbose:
+                print(f"  🏟️  Arena Results: {len(survivors)} survivors (ALL FAILED MEANING GATE - entering repair mode)")
+                if survivors:
+                    print(f"    🔧 Top {min(3, len(survivors))} candidates for repair (sorted by recall):")
+                    for i, surv in enumerate(survivors[:3]):
+                        print(f"      {i+1}. Recall: {surv['recall_score']:.2f}, Style: {surv['style_density']:.2f}, Score: {surv['score']:.2f}")
+                        print(f"         Text: {surv['text'][:80]}...")
+            return survivors[:top_k]
 
     def _breed_children(
         self,
@@ -1124,19 +1153,44 @@ class StyleTranslator:
             recall_score = parent.get("recall_score", 0.0)
             style_density = parent.get("style_density", 0.0)
             logic_fail = critic_result.get("logic_fail", False)
+            context_leak_detected = parent.get("context_leak_detected", False)
+            hallucination = parent.get("hallucination", False)
+            repair_attempts = parent.get("repair_attempts", 0)
+            feedback = critic_result.get("feedback", "")
 
             deltas = []
-            if recall_score < 0.8:
-                # Missing keywords - extract missing ones from blueprint
-                missing_keywords = []
-                blueprint_keywords = list(blueprint.core_keywords)[:5]
-                text_lower = text.lower()
-                for keyword in blueprint_keywords:
-                    if keyword.lower() not in text_lower:
-                        missing_keywords.append(keyword)
-                if missing_keywords:
-                    deltas.append(f"Missing keywords: {', '.join(missing_keywords[:3])}")
+            meaning_failure = False
 
+            # MEANING GATE FAILURES (critical - must repair)
+            if recall_score < 0.85:
+                meaning_failure = True
+                # Missing propositions - extract from recall details if available
+                recall_details = critic_result.get("recall_details", {})
+                missing_propositions = recall_details.get("missing", [])
+                if missing_propositions:
+                    deltas.append(f"Missing propositions: {', '.join(missing_propositions[:3])}")
+                else:
+                    # Fallback: extract missing keywords from blueprint
+                    missing_keywords = []
+                    blueprint_keywords = list(blueprint.core_keywords)[:5]
+                    text_lower = text.lower()
+                    for keyword in blueprint_keywords:
+                        if keyword.lower() not in text_lower:
+                            missing_keywords.append(keyword)
+                    if missing_keywords:
+                        deltas.append(f"Missing keywords: {', '.join(missing_keywords[:3])}")
+                    else:
+                        deltas.append(f"Proposition recall too low ({recall_score:.2f} < 0.85)")
+
+            if context_leak_detected or hallucination:
+                meaning_failure = True
+                leaked_keywords = critic_result.get("leaked_keywords", [])
+                if leaked_keywords:
+                    deltas.append(f"Hallucination detected: {', '.join(leaked_keywords[:3])}")
+                else:
+                    deltas.append("Hallucination detected (context leak)")
+
+            # STYLE ISSUES (non-critical)
             if style_density < 0.1:
                 deltas.append("Boring style, needs jargon")
 
@@ -1146,7 +1200,9 @@ class StyleTranslator:
             parent_deltas.append({
                 "text": text,
                 "deltas": deltas,
-                "strengths": []
+                "strengths": [],
+                "meaning_failure": meaning_failure,
+                "repair_attempts": repair_attempts
             })
 
             # Identify strengths
@@ -1156,6 +1212,24 @@ class StyleTranslator:
                 parent_deltas[-1]["strengths"].append("Perfect keywords")
             if parent.get("adherence_score", 0.0) > 0.9:
                 parent_deltas[-1]["strengths"].append("Strong structure")
+
+        # Check if we need repair mode or structure swap
+        best_parent = parent_deltas[0] if parent_deltas else None
+        needs_repair = best_parent and best_parent.get("meaning_failure", False)
+        repair_attempts = best_parent.get("repair_attempts", 0) if best_parent else 0
+        use_structure_swap = needs_repair and repair_attempts >= 2
+
+        # Extract missing propositions for repair prompts
+        missing_propositions = []
+        if needs_repair and best_parent:
+            for delta in best_parent.get("deltas", []):
+                if "Missing propositions:" in delta:
+                    # Extract propositions from delta text
+                    prop_text = delta.split("Missing propositions:")[1].strip()
+                    missing_propositions = [p.strip() for p in prop_text.split(",")[:5]]
+                elif "Missing keywords:" in delta:
+                    kw_text = delta.split("Missing keywords:")[1].strip()
+                    missing_propositions = [k.strip() for k in kw_text.split(",")[:5]]
 
         # Build breeding prompt
         parent_descriptions = []
@@ -1168,7 +1242,68 @@ class StyleTranslator:
                 f"  Defects: {deltas_text}"
             )
 
-        breeding_prompt = f"""You are a master literary breeder. Your task is to generate children that combine the strengths of multiple parent sentences while fixing their specific defects.
+        if use_structure_swap:
+            # STRUCTURE SWAP MODE: Discard template, use simple S-V-O structure
+            breeding_prompt = f"""CRITICAL STRUCTURE SWAP:
+The structure template is incompatible with the meaning. Previous repair attempts failed.
+
+### ERROR
+{best_parent.get('deltas', ['Meaning failure'])[0] if best_parent else 'Meaning failure'}
+
+### ORIGINAL PROPOSITIONS
+{', '.join(missing_propositions) if missing_propositions else blueprint.original_text}
+
+### TASK
+Generate {num_children} children that:
+1. DISCARD the template structure entirely (do NOT use the parent's structure).
+2. Rewrite the propositions using simple Subject-Verb-Object structure.
+3. Ensure ALL propositions are preserved: {', '.join(missing_propositions) if missing_propositions else 'all original meaning'}.
+4. THEN apply the target style and vocabulary: {', '.join(style_lexicon[:20]) if style_lexicon else 'None'}.
+5. Do NOT force incompatible rhetorical structures (e.g., don't use list format for narratives).
+
+### OUTPUT FORMAT
+Output PURE JSON. A single list of strings:
+[
+  "Child 1 text...",
+  "Child 2 text...",
+  ...
+  "Child {num_children} text..."
+]
+"""
+        elif needs_repair:
+            # REPAIR MODE: Fix meaning while preserving structure
+            error_msg = best_parent.get('deltas', ['Meaning failure'])[0] if best_parent else 'Meaning failure'
+            breeding_prompt = f"""CRITICAL REPAIR TASK:
+The text below has correct Structure but failed the Meaning Check.
+
+### ERROR
+{error_msg}
+
+### ORIGINAL TEXT
+{best_parent.get('text', '') if best_parent else ''}
+
+### INPUT PROPOSITIONS
+{', '.join(missing_propositions) if missing_propositions else blueprint.original_text}
+
+### TASK
+Generate {num_children} children that:
+1. Keep the exact sentence structure and rhythm from the original text.
+2. Remove hallucinated words/phrases (if any).
+3. Replace them with correct facts from Input Propositions: {', '.join(missing_propositions) if missing_propositions else 'all original meaning'}.
+4. Do NOT change the style or vocabulary: {', '.join(style_lexicon[:20]) if style_lexicon else 'None'}.
+
+### OUTPUT FORMAT
+Output PURE JSON. A single list of strings:
+[
+  "Child 1 text...",
+  "Child 2 text...",
+  ...
+  "Child {num_children} text..."
+]
+"""
+        else:
+            # STANDARD BREEDING MODE
+            breeding_prompt = f"""You are a master literary breeder. Your task is to generate children that combine the strengths of multiple parent sentences while fixing their specific defects.
 
 ### PARENTS TO BREED:
 {chr(10).join(parent_descriptions)}
@@ -1599,6 +1734,30 @@ Output PURE JSON. A single list of strings:
                         style_dna_dict=style_dna_dict,
                         verbose=verbose
                     )
+
+                    # Track repair attempts: if parent had meaning failure, increment repair_attempts for children
+                    parent_repair_attempts = best_survivor.get("repair_attempts", 0)
+                    parent_meaning_failure = (best_survivor.get("score", 0.0) == 0.0 or
+                                             best_survivor.get("recall_score", 0.0) < 0.85 or
+                                             best_survivor.get("context_leak_detected", False) or
+                                             best_survivor.get("hallucination", False))
+
+                    for child in child_survivors:
+                        # If child also has meaning failure, increment repair attempts
+                        child_meaning_failure = (child.get("score", 0.0) == 0.0 or
+                                                child.get("recall_score", 0.0) < 0.85 or
+                                                child.get("context_leak_detected", False) or
+                                                child.get("hallucination", False))
+                        if child_meaning_failure:
+                            if parent_meaning_failure:
+                                # Both parent and child failed - increment repair attempts
+                                child["repair_attempts"] = parent_repair_attempts + 1
+                            else:
+                                # New failure - start tracking
+                                child["repair_attempts"] = 1
+                        else:
+                            # Child passed meaning gate - reset repair attempts
+                            child["repair_attempts"] = 0
 
                     # Update survivors (keep best from parents + children)
                     all_survivors = survivors + child_survivors
@@ -3519,12 +3678,17 @@ These connectors match the author's style and help create flowing, complex sente
         if global_context and global_context.get('thesis'):
             keywords_text = ', '.join(global_context.get('keywords', [])[:5])
             global_context_section = f"""
-### DOCUMENT CONTEXT:
-The overall text is about: {global_context['thesis']}
-The author's intent is: {global_context['intent']}
-Keep these key terms consistent: {keywords_text}
+### BACKGROUND CONTEXT (TONE ONLY):
+Thesis: {global_context['thesis']}
+Intent: {global_context['intent']}
+Keywords: {keywords_text}
 
-Use this context to resolve ambiguities in the propositions. If a proposition is vague, interpret it in light of this overall document theme.
+**INSTRUCTION:** This context is provided ONLY to help you understand the author's general worldview and tone.
+- **DO NOT** use these keywords in your output unless they explicitly appear in the Input Propositions above.
+- **DO NOT** try to "link" the story to these abstract concepts.
+- **DO NOT** inject phrases from this context (thesis, keywords) into the paragraph.
+- Your ONLY job is to narrate the Input Propositions using the author's syntax and tone.
+- This context is the **Atmosphere**, not the **Script** - use it for tone, not content.
 """
 
         prompt = PARAGRAPH_FUSION_PROMPT.format(

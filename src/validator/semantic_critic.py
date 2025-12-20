@@ -286,6 +286,65 @@ class SemanticCritic:
         coverage = found_count / len(keywords) if keywords else 1.0
         return min(1.0, max(0.0, coverage))
 
+    def _check_context_leak(
+        self,
+        generated_text: str,
+        global_context: Optional[Dict],
+        input_propositions: List[str]
+    ) -> Tuple[bool, List[str], float, str]:
+        """Check if global context keywords leaked into generated text.
+
+        Detects keywords from global context that appear in output but NOT in input.
+        This is a specific form of hallucination where context leaks into content.
+
+        Args:
+            generated_text: Generated text to check
+            global_context: Optional global context dict with 'keywords' list
+            input_propositions: List of input propositions (source of truth)
+
+        Returns:
+            Tuple of (has_leak: bool, leaked_keywords: List[str], score: float, reason: str)
+            - has_leak: True if context leak detected
+            - leaked_keywords: List of keywords that leaked
+            - score: 0.0 if leak detected, 1.0 otherwise
+            - reason: Explanation of leak or "No leak detected"
+        """
+        if not global_context or not global_context.get('keywords'):
+            return False, [], 1.0, "No global context keywords to check"
+
+        # Extract keywords from global context (handle both list and string formats)
+        context_keywords = global_context.get('keywords', [])
+        if isinstance(context_keywords, str):
+            # If it's a comma-separated string, split it
+            context_keywords = [k.strip() for k in context_keywords.split(',')]
+
+        if not context_keywords:
+            return False, [], 1.0, "No global context keywords to check"
+
+        # Normalize keywords: lowercase, handle multi-word phrases
+        context_keywords_lower = [k.lower().strip() for k in context_keywords if k.strip()]
+
+        # Create a combined string of all input propositions for searching
+        input_text_combined = " ".join(input_propositions).lower()
+
+        # Check each context keyword
+        leaked_keywords = []
+        generated_lower = generated_text.lower()
+
+        for keyword in context_keywords_lower:
+            # Check if keyword appears in generated text
+            if keyword in generated_lower:
+                # Check if keyword also appears in input propositions
+                if keyword not in input_text_combined:
+                    # LEAK DETECTED: Keyword in output and global context, but NOT in input
+                    leaked_keywords.append(keyword)
+
+        if leaked_keywords:
+            reason = f"Context leak detected: Keywords from global context ({', '.join(leaked_keywords[:3])}) appear in output but not in input propositions"
+            return True, leaked_keywords, 0.0, reason
+
+        return False, [], 1.0, "No context leak detected"
+
     def _verify_coherence(self, text: str) -> Tuple[float, str]:
         """Verify text coherence using LLM-based evaluation.
 
@@ -293,6 +352,7 @@ class SemanticCritic:
         1. Grammatical fluency
         2. Logical consistency (detects "word salad")
         3. Jargon hallucinations (technical terms that don't fit the narrative)
+        4. Abstract academic jargon inserted into narrative
 
         Args:
             text: Text to evaluate for coherence.
@@ -313,6 +373,7 @@ class SemanticCritic:
 1. Is the text grammatically fluent?
 2. Does it make logical sense, or is it 'word salad'?
 3. Does it contain random technical jargon (e.g., 'turing complete', 'namespace', 'dependency injection') that doesn't fit the narrative?
+4. **CRITICAL:** Does the text insert abstract academic jargon (e.g., 'emergent complexity', 'systems theory', 'dialectical materialism') into a simple narrative? If yes, mark as Incoherent.
 
 **Output JSON:** {'is_coherent': bool, 'score': float (0.0-1.0), 'reason': '...'}"""
 
@@ -479,7 +540,8 @@ class SemanticCritic:
                 style_lexicon=style_lexicon,
                 secondary_author_vector=secondary_author_vector,
                 blend_ratio=blend_ratio,
-                verbose=verbose
+                verbose=verbose,
+                global_context=global_context
             )
 
         # SENTENCE MODE: Continue with existing sentence-level logic
@@ -1858,7 +1920,8 @@ Return JSON:
         style_lexicon: Optional[List[str]] = None,
         secondary_author_vector: Optional[np.ndarray] = None,
         blend_ratio: float = 0.5,
-        verbose: bool = False
+        verbose: bool = False,
+        global_context: Optional[Dict] = None
     ) -> Dict[str, any]:
         """Evaluate paragraph in paragraph mode using proposition recall and style alignment.
 
@@ -1877,8 +1940,28 @@ Return JSON:
             config = json.load(f)
         paragraph_config = config.get("paragraph_fusion", {})
         proposition_recall_threshold = paragraph_config.get("proposition_recall_threshold", 0.8)
-        meaning_weight = paragraph_config.get("meaning_weight", 0.6)
-        style_weight = paragraph_config.get("style_alignment_weight", 0.4)
+        meaning_weight = paragraph_config.get("meaning_weight", 0.9)  # Default 0.9 for meaning-first
+        style_weight = paragraph_config.get("style_alignment_weight", 0.1)  # Default 0.1 (garnish only)
+
+        # HARD GATE 0: Context Leak Detection (run first, before any other checks)
+        if global_context:
+            has_leak, leaked_keywords, leak_score, leak_reason = self._check_context_leak(
+                generated_text, global_context, propositions
+            )
+            if has_leak:
+                if verbose:
+                    print(f"      ⚠ Context Leak Detected: {leak_reason}")
+                return {
+                    "pass": False,
+                    "score": 0.0,
+                    "proposition_recall": 0.0,  # Don't calculate if leak detected
+                    "style_alignment": 0.0,
+                    "coherence_score": 0.0,
+                    "topic_similarity": 0.0,
+                    "feedback": f"CRITICAL: {leak_reason}. Remove all keywords from global context that don't appear in input propositions.",
+                    "context_leak_detected": True,
+                    "leaked_keywords": leaked_keywords
+                }
 
         # Metric 1: Proposition Recall (use relaxed threshold 0.30 for paragraph mode)
         proposition_recall, recall_details = self._check_proposition_recall(
@@ -1887,7 +1970,50 @@ Return JSON:
             similarity_threshold=0.30  # More lenient for paragraph mode to avoid false negatives
         )
 
-        # Metric 2: Style Alignment
+        # MEANING GATE: Hard floor check for proposition recall BEFORE style calculation
+        # If recall is too low, meaning is lost - fail immediately
+        if proposition_recall < proposition_recall_threshold:
+            if verbose:
+                print(f"      ⚠ Proposition Recall FAILED: {proposition_recall:.2f} < {proposition_recall_threshold:.2f} → score=0.0")
+            missing = recall_details.get("missing", [])
+            feedback_msg = f"CRITICAL: Proposition recall too low ({proposition_recall:.2f} < {proposition_recall_threshold}). Lost meaning."
+            if missing:
+                feedback_msg += f" Missing propositions: {', '.join(missing[:3])}"
+            return {
+                "pass": False,
+                "score": 0.0,
+                "proposition_recall": proposition_recall,
+                "style_alignment": 0.0,  # Don't calculate if meaning fails
+                "coherence_score": 0.0,
+                "topic_similarity": 0.0,
+                "feedback": feedback_msg,
+                "recall_details": recall_details
+            }
+
+        # Get thresholds from config
+        coherence_threshold = paragraph_config.get("coherence_threshold", 0.8)
+        topic_similarity_threshold = paragraph_config.get("topic_similarity_threshold", 0.6)
+
+        # MEANING FIRST: Run coherence check BEFORE style calculation
+        coherence_score, coherence_reason = self._verify_coherence(generated_text)
+        topic_similarity = self._calculate_semantic_similarity(original_text, generated_text)
+
+        # HARD GATE: If incoherent, fail immediately (no style calculation needed)
+        if coherence_score < coherence_threshold:
+            if verbose:
+                print(f"      ⚠ Coherence FAILED: {coherence_score:.2f} < {coherence_threshold:.2f} → score=0.0")
+            return {
+                "pass": False,
+                "score": 0.0,
+                "proposition_recall": proposition_recall,
+                "style_alignment": 0.0,  # Don't calculate if incoherent
+                "coherence_score": coherence_score,
+                "topic_similarity": topic_similarity,
+                "feedback": f"CRITICAL: Text is incoherent ({coherence_reason}). Meaning preservation requires coherent text.",
+                "coherence_reason": coherence_reason
+            }
+
+        # Only calculate style if coherence passes
         style_alignment, style_details = self._check_style_alignment(
             generated_text,
             author_style_vector,
@@ -1896,72 +2022,19 @@ Return JSON:
             blend_ratio=blend_ratio
         )
 
-        # Initial score from cheap checks
-        initial_score = (proposition_recall * meaning_weight) + (style_alignment * style_weight)
+        # Log coherence and topic similarity (already calculated above)
+        if verbose:
+            print(f"      Coherence: {coherence_score:.2f} (threshold: {coherence_threshold:.2f}), Topic similarity: {topic_similarity:.2f} (threshold: {topic_similarity_threshold:.2f})")
 
-        # Get thresholds from config
-        coherence_threshold = paragraph_config.get("coherence_threshold", 0.8)
-        topic_similarity_threshold = paragraph_config.get("topic_similarity_threshold", 0.6)
-
-        # Initialize coherence and topic similarity (default to passing if checks not run)
-        coherence_score = 1.0
-        coherence_reason = "Not checked"
-        topic_similarity = 1.0
-
-        # Sanity Gate: Only run expensive checks if cheap checks pass
-        if proposition_recall >= 0.85 and style_alignment >= 0.7:
-            # Expensive checks only on promising candidates
-            coherence_score, coherence_reason = self._verify_coherence(generated_text)
-            topic_similarity = self._calculate_semantic_similarity(original_text, generated_text)
-
+        # Check topic similarity threshold (coherence already checked above)
+        if topic_similarity < topic_similarity_threshold:
             if verbose:
-                print(f"      Coherence: {coherence_score:.2f} (threshold: {coherence_threshold:.2f}), Topic similarity: {topic_similarity:.2f} (threshold: {topic_similarity_threshold:.2f})")
-
-            # Sanity Gate: Fail immediately if coherence or topic similarity is too low
-            # Use lower threshold (0.6) for strict kill, but penalize (0.6-0.8) range
-            strict_kill_threshold = 0.6  # Lowered from coherence_threshold (0.8) for local LLM
-            penalty_threshold = coherence_threshold  # 0.8 - penalize but don't kill
-
-            if coherence_score < strict_kill_threshold or topic_similarity < topic_similarity_threshold:
-                # Strictly bad text - kill it immediately
-                if verbose:
-                    print(f"      ⚠ Sanity gate triggered (strict kill): coherence {coherence_score:.2f} < {strict_kill_threshold:.2f} OR topic_sim {topic_similarity:.2f} < {topic_similarity_threshold:.2f} → score=0.0")
-                final_score = 0.0
-                passes = False
-            else:
-                # Calculate base score with coherence and topic similarity
-                weight_sum = (meaning_weight * 0.7) + (style_weight * 0.2) + 0.1 + 0.1
-                if weight_sum > 0:
-                    base_score = (
-                        proposition_recall * (meaning_weight * 0.7 / weight_sum) +
-                        style_alignment * (style_weight * 0.2 / weight_sum) +
-                        coherence_score * (0.1 / weight_sum) +
-                        topic_similarity * (0.1 / weight_sum)
-                    )
-                else:
-                    # Fallback: simple average if weights are invalid
-                    base_score = (
-                        proposition_recall + style_alignment + coherence_score + topic_similarity
-                    ) / 4.0
-
-                # Apply penalty if coherence is in warning range (0.6-0.8)
-                if coherence_score < penalty_threshold:
-                    # Penalize but don't kill - text has coherence issues but might be salvageable
-                    if verbose:
-                        print(f"      ⚠ Coherence penalty: coherence {coherence_score:.2f} < {penalty_threshold:.2f} → score *= 0.5")
-                    final_score = base_score * 0.5
-                else:
-                    final_score = base_score
-
-                passes = proposition_recall >= proposition_recall_threshold
+                print(f"      ⚠ Topic similarity FAILED: {topic_similarity:.2f} < {topic_similarity_threshold:.2f} → score=0.0")
+            final_score = 0.0
+            passes = False
         else:
-            # Cheap checks failed, use original scoring
-            # Normalize initial_score to ensure it's in [0, 1] range
-            weight_sum = meaning_weight + style_weight
-            if weight_sum > 0:
-                final_score = initial_score / weight_sum
-            else:
-                final_score = initial_score
+            # Final score with Meaning First weighting (0.9 meaning, 0.1 style)
+            final_score = (proposition_recall * meaning_weight) + (style_alignment * style_weight)
             passes = proposition_recall >= proposition_recall_threshold
 
         # Build feedback
