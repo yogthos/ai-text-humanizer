@@ -21,6 +21,7 @@ from src.atlas.style_registry import StyleRegistry
 from src.analyzer.style_extractor import StyleExtractor
 from src.analysis.semantic_analyzer import PropositionExtractor
 from src.utils.structure_tracker import StructureTracker
+from src.analyzer.global_context import GlobalContextAnalyzer
 
 
 def _split_into_paragraphs(text: str) -> List[str]:
@@ -190,6 +191,30 @@ def process_text(
     if not paragraphs:
         return []
 
+    # Extract global context if enabled (Read First step)
+    global_context = None
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        global_context_config = config.get("global_context", {})
+        if global_context_config.get("enabled", True):
+            if verbose:
+                print("  Extracting Global Context...")
+            analyzer = GlobalContextAnalyzer(config_path=config_path)
+            global_context = analyzer.analyze_document(input_text, verbose=verbose)
+            if verbose:
+                thesis_preview = global_context.get('thesis', '')[:100] if global_context.get('thesis') else ''
+                if thesis_preview:
+                    print(f"  Context Thesis: {thesis_preview}...")
+                print(f"  Context Intent: {global_context.get('intent', 'informing')}")
+                keywords = global_context.get('keywords', [])[:5]
+                if keywords:
+                    print(f"  Context Keywords: {', '.join(keywords)}")
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠ Global context extraction failed: {e}, continuing without context")
+        global_context = None
+
     generated_paragraphs = []
     current_paragraph_sentences = []  # Track sentences for current paragraph
     is_first_paragraph = True
@@ -228,17 +253,53 @@ def process_text(
             if verbose:
                 print(f"  Context reset (new paragraph)")
 
-        # Check if this is a multi-sentence paragraph (use paragraph fusion)
-        is_multi_sentence = len(sentences) > 1
-        min_sentences_for_fusion = 2
+        # Check if we should transcribe single-sentence paragraphs as-is (likely headings)
+        # Load config once for both heading detection and paragraph fusion settings
+        paragraph_fusion_config = {}
         try:
             with open(config_path, 'r') as f:
                 config = json.load(f)
             paragraph_fusion_config = config.get("paragraph_fusion", {})
-            if paragraph_fusion_config.get("enabled", True):
-                min_sentences_for_fusion = paragraph_fusion_config.get("min_sentences_for_fusion", 2)
         except Exception:
             pass
+
+        transcribe_headings_as_is = paragraph_fusion_config.get("transcribe_headings_as_is", False)
+
+        # If enabled and single sentence, check if it looks like a heading
+        if transcribe_headings_as_is and len(sentences) == 1:
+            single_sentence = sentences[0].strip()
+            # Heuristics for heading detection:
+            # 1. Short length (typically headings are < 100 chars)
+            # 2. All caps or no lowercase letters (common in headings)
+            # 3. Ends with no sentence-ending punctuation or just colon
+            is_short = len(single_sentence) < 100
+            is_all_caps = single_sentence.isupper() and len(single_sentence) > 3
+            has_no_lowercase = not any(c.islower() for c in single_sentence)
+            stripped = single_sentence.rstrip()
+            ends_with_colon = stripped.endswith(':')
+            ends_with_sentence_punct = stripped.endswith(('.', '!', '?'))
+            # Heading if: ends with colon OR doesn't end with sentence punctuation
+            ends_like_heading = ends_with_colon or not ends_with_sentence_punct
+
+            # Consider it a heading if it's short and (all caps OR no lowercase) and ends like a heading
+            looks_like_heading = is_short and (is_all_caps or has_no_lowercase) and ends_like_heading
+
+            if looks_like_heading:
+                if verbose:
+                    print(f"  ℹ Detected heading, transcribing as-is: {single_sentence[:50]}{'...' if len(single_sentence) > 50 else ''}")
+                generated_paragraphs.append(single_sentence)
+                if write_callback:
+                    is_new_paragraph = True
+                    write_callback(single_sentence, is_new_paragraph, is_first_paragraph)
+                    if is_first_paragraph:
+                        is_first_paragraph = False
+                continue  # Skip restyling for this paragraph
+
+        # Check if this is a multi-sentence paragraph (use paragraph fusion)
+        is_multi_sentence = len(sentences) > 1
+        min_sentences_for_fusion = 2
+        if paragraph_fusion_config.get("enabled", True):
+            min_sentences_for_fusion = paragraph_fusion_config.get("min_sentences_for_fusion", 2)
 
         # Use paragraph fusion if enabled and paragraph has multiple sentences
         if is_multi_sentence and len(sentences) >= min_sentences_for_fusion:
@@ -270,7 +331,7 @@ def process_text(
 
             # Translate paragraph holistically
             try:
-                generated_paragraph, teacher_rhythm_map, teacher_example = translator.translate_paragraph(
+                generated_paragraph, teacher_rhythm_map, teacher_example, internal_recall = translator.translate_paragraph(
                     paragraph,
                     atlas,
                     author_name,
@@ -280,43 +341,103 @@ def process_text(
                     used_examples=used_examples,
                     secondary_author=secondary_author,
                     blend_ratio=blend_ratio,
-                    verbose=verbose
+                    verbose=verbose,
+                    global_context=global_context,
+                    is_opener=(para_idx == 0)
                 )
 
-                # Evaluate with paragraph mode
-                propositions = proposition_extractor.extract_atomic_propositions(paragraph)
-                # Get style vectors for both authors if blending
-                author_style_vector = None
-                secondary_author_vector = None
+                # Use internal_recall from translator (includes repair loop context and relaxed thresholds)
+                # Re-evaluate to get coherence and topic similarity scores for sanity gate
+                # Load thresholds from config for tiered evaluation
                 try:
-                    author_style_vector = atlas.get_author_style_vector(author_name)
-                    if secondary_author:
-                        secondary_author_vector = atlas.get_author_style_vector(secondary_author)
-                except Exception as e:
-                    if verbose:
-                        print(f"  ⚠ Could not get style vectors: {e}")
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                    paragraph_fusion_config = config.get("paragraph_fusion", {})
+                    ideal_threshold = paragraph_fusion_config.get("proposition_recall_threshold", 0.85)
+                    min_viable = paragraph_fusion_config.get("min_viable_recall_threshold", 0.70)
+                    coherence_threshold = paragraph_fusion_config.get("coherence_threshold", 0.8)
+                    topic_similarity_threshold = paragraph_fusion_config.get("topic_similarity_threshold", 0.6)
+                except Exception:
+                    # Fallback to defaults if config read fails
+                    ideal_threshold = 0.85
+                    min_viable = 0.70
+                    coherence_threshold = 0.8
+                    topic_similarity_threshold = 0.6
 
+                # Re-evaluate final paragraph to get coherence and topic similarity
+                # (These are expensive checks that only run on promising candidates)
+                # Note: critic and proposition_extractor are already initialized at function start
+                propositions = proposition_extractor.extract_atomic_propositions(paragraph)
+
+                # Create blueprint for evaluation
+                blueprint = extractor.extract(paragraph)
+
+                # Re-evaluate to get coherence and topic similarity
                 critic_result = critic.evaluate(
-                    generated_paragraph,
-                    extractor.extract(paragraph),
+                    generated_text=generated_paragraph,
+                    input_blueprint=blueprint,
                     propositions=propositions,
                     is_paragraph=True,
-                    author_style_vector=author_style_vector,
-                    secondary_author_vector=secondary_author_vector,
-                    blend_ratio=blend_ratio
+                    author_style_vector=None,  # Not needed for coherence check
+                    style_lexicon=None
                 )
 
+                # Get coherence and topic similarity from critic result
+                coherence_score = critic_result.get('coherence_score', 1.0)
+                topic_similarity = critic_result.get('topic_similarity', 1.0)
+
+                # internal_recall is already available from translate_paragraph return value
+                # This is the best recall achieved during the repair loop, with proper context
+
+                # Tiered evaluation logic with sanity gate
+                if internal_recall >= ideal_threshold and coherence_score >= coherence_threshold and topic_similarity >= topic_similarity_threshold:
+                    # Scenario A: Perfect Pass (high recall, coherent, and preserves topic)
+                    if verbose:
+                        print(f"  ✓ Fusion Success: Recall {internal_recall:.2f} >= {ideal_threshold}, Coherence {coherence_score:.2f} >= {coherence_threshold}, Topic similarity {topic_similarity:.2f} >= {topic_similarity_threshold}")
+                    # Override critic_result to ensure pass=True
+                    critic_result["pass"] = True
+                    critic_result["score"] = 1.0  # Perfect score
+                    pass_status = "PERFECT PASS"
+                elif internal_recall >= ideal_threshold:
+                    # High recall but low coherence/similarity = gibberish
+                    if verbose:
+                        print(f"  ⚠ High recall ({internal_recall:.2f}) but coherence ({coherence_score:.2f}) or topic similarity ({topic_similarity:.2f}) too low")
+                    pass_status = "COHERENCE FAIL"
+                    critic_result["pass"] = False
+                    # Don't override score - let it reflect the failure
+
+                elif internal_recall >= min_viable:
+                    # Scenario B: Soft Pass (The Fix)
+                    if verbose:
+                        print(f"  ⚠ Soft Pass: Recall {internal_recall:.2f} is below ideal ({ideal_threshold}) but viable (>= {min_viable}). Accepting.")
+                    # Create critic_result for soft pass
+                    critic_result = {"pass": True, "score": 0.8, "proposition_recall": internal_recall}
+                    pass_status = "SOFT PASS"
+
+                else:
+                    # Scenario C: Hard Fail -> Trigger Sentence-by-Sentence Fallback
+                    if verbose:
+                        print(f"  ✗ Fusion Failed: Recall {internal_recall:.2f} below viability floor ({min_viable}).")
+                    # Create a minimal critic_result for logging consistency
+                    critic_result = {"pass": False, "score": 0.0, "proposition_recall": internal_recall}
+                    pass_status = "HARD FAIL"
+
+                # Logging with status indicator
                 if verbose:
                     pass_value = critic_result.get('pass', False)
-                    # Color codes: green for True, red for False
-                    pass_color = '\033[92m' if pass_value else '\033[91m'  # Green or Red
+                    # Color codes: green for Perfect/Soft Pass, red for Hard Fail
+                    if pass_value:
+                        pass_color = '\033[92m'  # Green
+                    else:
+                        pass_color = '\033[91m'  # Red
                     reset_color = '\033[0m'
                     pass_str = f"{pass_color}{pass_value}{reset_color}"
-                    print(f"  Paragraph fusion result: pass={pass_str}, "
-                          f"score={critic_result.get('score', 0.0):.2f}, "
-                          f"proposition_recall={critic_result.get('proposition_recall', 0.0):.2f}")
+                    composite_score = critic_result.get('score', 0.0)
+                    print(f"  Paragraph fusion result: {pass_status}, pass={pass_str}, "
+                          f"recall={internal_recall:.2f}, "
+                          f"composite_score={composite_score:.2f}")
 
-                # Use generated paragraph if it passes, otherwise fall back to sentence-by-sentence
+                # Use generated paragraph if it passes (Perfect or Soft Pass), otherwise fall back
                 if critic_result.get('pass', False):
                     # Record structure for diversity tracking
                     if teacher_rhythm_map:

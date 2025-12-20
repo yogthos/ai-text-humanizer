@@ -133,6 +133,25 @@ class SemanticCritic:
         self.accuracy_weight = critic_config.get("accuracy_weight", 0.7)
         self.fluency_weight = critic_config.get("fluency_weight", 0.3)
 
+        # Load new weights structure (with backward compatibility)
+        weights_config = critic_config.get("weights")
+        if weights_config:
+            self.weights = weights_config
+        else:
+            # Backward compatibility: create weights dict from old fields
+            self.weights = {
+                "accuracy": self.accuracy_weight,
+                "fluency": self.fluency_weight,
+                "style": 0.0,
+                "thesis_alignment": 0.0,
+                "intent_compliance": 0.0,
+                "keyword_coverage": 0.0
+            }
+
+        # Initialize thesis vector caching
+        self._cached_thesis_vector = None
+        self._cached_thesis_text = None
+
         if SENTENCE_TRANSFORMERS_AVAILABLE:
             try:
                 self.semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -151,6 +170,258 @@ class SemanticCritic:
             except Exception:
                 # LLM provider unavailable - verification will be skipped
                 self.llm_provider = None
+
+    def _calculate_thesis_alignment(self, text: str, thesis: str) -> float:
+        """Calculate alignment between text and document thesis using vector similarity.
+
+        Uses cached thesis vector to avoid re-encoding the same thesis multiple times
+        during document processing.
+
+        Args:
+            text: Generated text to evaluate.
+            thesis: Document thesis statement.
+
+        Returns:
+            Alignment score 0.0-1.0 (cosine similarity). Returns 1.0 if thesis is empty
+            or semantic model unavailable (neutral score).
+        """
+        if not thesis or not thesis.strip():
+            return 1.0  # Neutral score for empty thesis
+
+        if not self.semantic_model:
+            return 1.0  # Fallback if semantic model unavailable
+
+        try:
+            # Check cache: if thesis text matches, reuse cached vector
+            if self._cached_thesis_text == thesis:
+                thesis_vector = self._cached_thesis_vector
+            else:
+                # Encode thesis and cache it
+                thesis_vector = self.semantic_model.encode(thesis, convert_to_tensor=True)
+                self._cached_thesis_vector = thesis_vector
+                self._cached_thesis_text = thesis
+
+            # Encode text
+            text_vector = self.semantic_model.encode(text, convert_to_tensor=True)
+
+            # Calculate cosine similarity
+            similarity = util.cos_sim(text_vector, thesis_vector).item()
+
+            # Ensure result is in [0, 1] range (cosine similarity can be [-1, 1])
+            return max(0.0, min(1.0, similarity))
+        except Exception:
+            # Fallback on any error
+            return 1.0
+
+    def _calculate_keyword_coverage(self, text: str, keywords: List[str]) -> float:
+        """Calculate how many context keywords appear in the text.
+
+        Uses hybrid matching: phrase matching for multi-word keywords,
+        lemmatization for single-word keywords.
+
+        Args:
+            text: Generated text to evaluate.
+            keywords: List of context keywords from global context.
+
+        Returns:
+            Coverage score 0.0-1.0 (fraction of keywords found). Returns 1.0
+            if keywords list is empty (neutral score).
+        """
+        if not keywords or len(keywords) == 0:
+            return 1.0  # Neutral score for empty keywords
+
+        if not text or not text.strip():
+            return 0.0  # No keywords found in empty text
+
+        found_count = 0
+        text_lower = text.lower()
+
+        try:
+            # Get spaCy model for lemmatization
+            from src.utils.nlp_manager import NLPManager
+            nlp = NLPManager.get_nlp()
+
+            if nlp:
+                # Process text once for lemmatization
+                doc = nlp(text_lower)
+                text_lemmas = set()
+                for token in doc:
+                    if not token.is_stop and not token.is_punct:
+                        text_lemmas.add(token.lemma_.lower())
+            else:
+                # Fallback: simple word splitting
+                text_lemmas = set(text_lower.split())
+        except Exception:
+            # Fallback: simple word splitting if NLP unavailable
+            text_lemmas = set(text_lower.split())
+
+        # Check each keyword
+        for kw in keywords:
+            if not kw or not kw.strip():
+                continue
+
+            kw_lower = kw.lower().strip()
+
+            # Multi-word keyword: use phrase matching
+            if " " in kw_lower:
+                if kw_lower in text_lower:
+                    found_count += 1
+            else:
+                # Single-word keyword: use lemmatization matching
+                # Try to lemmatize the keyword
+                try:
+                    if nlp:
+                        kw_doc = nlp(kw_lower)
+                        kw_lemma = kw_doc[0].lemma_.lower() if len(kw_doc) > 0 else kw_lower
+                    else:
+                        kw_lemma = kw_lower
+                except Exception:
+                    kw_lemma = kw_lower
+
+                # Check if keyword lemma exists in text lemmas
+                if kw_lemma in text_lemmas or kw_lower in text_lower.split():
+                    found_count += 1
+
+        # Return fraction of keywords found (capped at 1.0)
+        coverage = found_count / len(keywords) if keywords else 1.0
+        return min(1.0, max(0.0, coverage))
+
+    def _check_context_leak(
+        self,
+        generated_text: str,
+        global_context: Optional[Dict],
+        input_propositions: List[str]
+    ) -> Tuple[bool, List[str], float, str]:
+        """Check if global context keywords leaked into generated text.
+
+        Detects keywords from global context that appear in output but NOT in input.
+        This is a specific form of hallucination where context leaks into content.
+
+        Args:
+            generated_text: Generated text to check
+            global_context: Optional global context dict with 'keywords' list
+            input_propositions: List of input propositions (source of truth)
+
+        Returns:
+            Tuple of (has_leak: bool, leaked_keywords: List[str], score: float, reason: str)
+            - has_leak: True if context leak detected
+            - leaked_keywords: List of keywords that leaked
+            - score: 0.0 if leak detected, 1.0 otherwise
+            - reason: Explanation of leak or "No leak detected"
+        """
+        if not global_context or not global_context.get('keywords'):
+            return False, [], 1.0, "No global context keywords to check"
+
+        # Extract keywords from global context (handle both list and string formats)
+        context_keywords = global_context.get('keywords', [])
+        if isinstance(context_keywords, str):
+            # If it's a comma-separated string, split it
+            context_keywords = [k.strip() for k in context_keywords.split(',')]
+
+        if not context_keywords:
+            return False, [], 1.0, "No global context keywords to check"
+
+        # Normalize keywords: lowercase, handle multi-word phrases
+        context_keywords_lower = [k.lower().strip() for k in context_keywords if k.strip()]
+
+        # Create a combined string of all input propositions for searching
+        input_text_combined = " ".join(input_propositions).lower()
+
+        # Check each context keyword
+        leaked_keywords = []
+        generated_lower = generated_text.lower()
+
+        for keyword in context_keywords_lower:
+            # Check if keyword appears in generated text
+            if keyword in generated_lower:
+                # Check if keyword also appears in input propositions
+                if keyword not in input_text_combined:
+                    # LEAK DETECTED: Keyword in output and global context, but NOT in input
+                    leaked_keywords.append(keyword)
+
+        if leaked_keywords:
+            reason = f"Context leak detected: Keywords from global context ({', '.join(leaked_keywords[:3])}) appear in output but not in input propositions"
+            return True, leaked_keywords, 0.0, reason
+
+        return False, [], 1.0, "No context leak detected"
+
+    def _verify_coherence(self, text: str, verbose: bool = False) -> Tuple[float, str]:
+        """Verify text coherence using LLM-based evaluation.
+
+        Checks for:
+        1. Grammatical fluency
+        2. Logical consistency (detects "word salad")
+        3. Jargon hallucinations (technical terms that don't fit the narrative)
+        4. Abstract academic jargon inserted into narrative
+
+        Args:
+            text: Text to evaluate for coherence.
+            verbose: Whether to print debug information.
+
+        Returns:
+            Tuple of (coherence_score: float, reason: str).
+            Returns (1.0, "Coherent") if LLM unavailable (neutral score).
+        """
+        if not self.llm_provider:
+            # Fallback: return neutral score if LLM unavailable
+            return 1.0, "LLM unavailable, assuming coherent"
+
+        if not text or not text.strip():
+            return 0.0, "Empty text"
+
+        system_prompt = """You are a strict copy editor. Analyze the text below for **Coherence** and **Hallucinations**.
+
+1. Is the text grammatically fluent?
+2. Does it make logical sense, or is it 'word salad'?
+3. Does it contain random technical jargon (e.g., 'turing complete', 'namespace', 'dependency injection') that doesn't fit the narrative?
+4. **CRITICAL:** Does the text insert abstract academic jargon (e.g., 'emergent complexity', 'systems theory', 'dialectical materialism') into a simple narrative? If yes, mark as Incoherent.
+
+**Output JSON:** {'is_coherent': bool, 'score': float (0.0-1.0), 'reason': '...'}"""
+
+        user_prompt = f"Analyze this text for coherence:\n\n{text}"
+
+        try:
+            response = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="critic",
+                require_json=True,
+                temperature=0.2,  # Low temperature for consistent evaluation
+                max_tokens=200,
+                timeout=30
+            )
+
+            # Parse JSON response
+            try:
+                result = json.loads(response)
+            except json.JSONDecodeError:
+                # Try to extract JSON from response
+                json_match = re.search(r'\{[^}]+\}', response, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                else:
+                    # Fallback: assume coherent if parsing fails
+                    return 0.5, "Could not parse LLM response, assuming partial coherence"
+
+            # Extract score and reason
+            is_coherent = result.get('is_coherent', True)
+            score = float(result.get('score', 0.5))
+            reason = result.get('reason', 'No reason provided')
+
+            # Ensure score is in valid range
+            score = max(0.0, min(1.0, score))
+
+            # DEBUG: Log low coherence scores to help diagnose issues
+            if verbose and score < 0.5:
+                print(f"      DEBUG Coherence: score={score:.2f}, reason={reason}")
+                print(f"      DEBUG Text evaluated: {text[:200]}...")
+                print(f"      DEBUG LLM response: {response[:300]}...")
+
+            return score, reason
+
+        except Exception as e:
+            # On any error, return neutral score
+            return 0.5, f"Coherence check failed: {str(e)}"
 
     def _calculate_semantic_similarity(self, original: str, generated: str) -> float:
         """Calculate semantic similarity between original and generated text.
@@ -201,7 +472,9 @@ class SemanticCritic:
         author_style_vector: Optional[np.ndarray] = None,
         style_lexicon: Optional[List[str]] = None,
         secondary_author_vector: Optional[np.ndarray] = None,
-        blend_ratio: float = 0.5
+        blend_ratio: float = 0.5,
+        global_context: Optional[Dict] = None,
+        verbose: bool = False
     ) -> Dict[str, any]:
         """Evaluate generated text against input blueprint.
 
@@ -273,7 +546,9 @@ class SemanticCritic:
                 generated_text, original_text, propositions, author_style_vector,
                 style_lexicon=style_lexicon,
                 secondary_author_vector=secondary_author_vector,
-                blend_ratio=blend_ratio
+                blend_ratio=blend_ratio,
+                verbose=verbose,
+                global_context=global_context
             )
 
         # SENTENCE MODE: Continue with existing sentence-level logic
@@ -566,17 +841,20 @@ class SemanticCritic:
         # Hard gate: If adherence < 0.8, fail
         passes = (recall_score >= 0.7 and adherence_score >= 0.8)
 
-        # Final score formula: (adherence * 0.5) + (recall * 0.5)
-        final_score = (adherence_score * 0.5) + (recall_score * 0.5)
-
         # Final Heuristic: LLM Meaning Verification
         llm_meaning_preserved = True
         llm_confidence = 1.0
+        llm_intent_score = 1.0
         llm_explanation = ""
         logic_fail = False
         if self.use_llm_verification and self.llm_provider:
-            llm_meaning_preserved, llm_confidence, llm_explanation = self._verify_meaning_with_llm(
-                original_text, generated_text
+            # Extract intent from global_context if available
+            intent = None
+            if global_context:
+                intent = global_context.get('intent')
+
+            llm_meaning_preserved, llm_confidence, llm_intent_score, llm_explanation = self._verify_meaning_with_llm(
+                original_text, generated_text, global_context=global_context, intent=intent
             )
             # If LLM detects meaning loss with high confidence, override pass status
             if not llm_meaning_preserved and llm_confidence > 0.7:
@@ -589,14 +867,58 @@ class SemanticCritic:
                 inferred_skeleton_type = self._infer_skeleton_type(skeleton, generated_text)
 
             logic_fail, logic_reason = self._verify_logic(
-                original_text, generated_text, inferred_skeleton_type or "DECLARATIVE"
+                original_text, generated_text, inferred_skeleton_type or "DECLARATIVE", global_context=global_context
             )
             if logic_fail:
-                # HARD CAP: Force score to 0.45 if logic is wrong, regardless of Recall
-                final_score = min(final_score, 0.45)
                 passes = False
                 # Store logic reason for feedback
                 llm_explanation = logic_reason  # Override with logic reason
+
+        # Calculate context-aware metrics if global_context is available
+        thesis_alignment = None
+        keyword_coverage = None
+        intent_score = None
+
+        if global_context:
+            # Thesis alignment
+            thesis = global_context.get('thesis')
+            if thesis:
+                thesis_alignment = self._calculate_thesis_alignment(generated_text, thesis)
+
+            # Keyword coverage
+            keywords = global_context.get('keywords')
+            if keywords and isinstance(keywords, list):
+                keyword_coverage = self._calculate_keyword_coverage(generated_text, keywords)
+
+            # Intent score (already calculated in LLM verification if intent provided)
+            if global_context.get('intent'):
+                intent_score = llm_intent_score
+
+        # Calculate composite score with dynamic weight normalization
+        final_score = self._calculate_composite_score({
+            "accuracy": (adherence_score * 0.5) + (recall_score * 0.5),  # Combined accuracy metric
+            "fluency": precision_score,  # Precision as fluency proxy
+            "style": 1.0,  # Placeholder for style score (not calculated here)
+            "thesis_alignment": thesis_alignment,
+            "intent_compliance": intent_score,
+            "keyword_coverage": keyword_coverage
+        })
+
+        # Apply logic veto cap after composite score calculation
+        if logic_fail:
+            # HARD CAP: Force score to 0.45 if logic is wrong, regardless of other scores
+            final_score = min(final_score, 0.45)
+
+        # Build metrics dictionary
+        metrics = {
+            "recall_score": recall_score,
+            "precision_score": precision_score,
+            "adherence_score": adherence_score,
+            "llm_meaning_score": llm_confidence,
+            "thesis_alignment": thesis_alignment,
+            "intent_score": intent_score,
+            "keyword_coverage": keyword_coverage
+        }
 
         feedback_parts = []
         if recall_score < 0.7:
@@ -618,27 +940,35 @@ class SemanticCritic:
             "llm_meaning_score": llm_confidence,
             "logic_fail": logic_fail,
             "score": final_score,
+            "metrics": metrics,
+            "thesis_alignment": thesis_alignment,
+            "intent_score": intent_score,
+            "keyword_coverage": keyword_coverage,
             "feedback": " ".join(feedback_parts) if feedback_parts else "Passed semantic validation."
         }
 
-    def _verify_meaning_with_llm(self, original_text: str, generated_text: str) -> Tuple[bool, float, str]:
+    def _verify_meaning_with_llm(self, original_text: str, generated_text: str, global_context: Optional[Dict] = None, intent: Optional[str] = None) -> Tuple[bool, float, float, str]:
         """Verify meaning preservation using LLM (Final Heuristic).
 
         Uses LLM to compare original and generated text, confirming core meaning is unchanged.
+        Also assesses intent alignment if intent is provided.
 
         Args:
             original_text: Original input text.
             generated_text: Generated text to verify.
+            global_context: Optional global context dictionary.
+            intent: Optional intent string (e.g., "persuading", "narrating", "informing").
 
         Returns:
-            Tuple of (meaning_preserved: bool, confidence: float, explanation: str).
+            Tuple of (meaning_preserved: bool, confidence: float, intent_score: float, explanation: str).
         """
         if not self.llm_provider:
-            return True, 0.5, "LLM verification unavailable"
+            return True, 0.5, 1.0, "LLM verification unavailable"
 
         system_prompt = "You are a semantic validator. Your task is to determine if two sentences convey the same core meaning, even if they use different words or stylistic structures. Pay special attention to logical relationships, conditional statements, and meaning shifts."
 
-        user_prompt = f"""Compare these two sentences and determine if the generated text preserves the core meaning of the original.
+        user_prompt = f"""Task 1: Verify factual recall.
+Compare these two sentences and determine if the generated text preserves the core meaning of the original.
 
 Original: "{original_text}"
 
@@ -647,13 +977,39 @@ Generated: "{generated_text}"
 Does the generated text preserve the core meaning of the original? Pay attention to:
 - Logical relationships: Does it add conditions (e.g., "only when", "if... then") that weren't in the original?
 - Meaning shifts: Does it change a universal statement into a conditional, or vice versa?
-- Contradictions: Does it imply something that contradicts the original meaning?
+- Contradictions: Does it imply something that contradicts the original meaning?"""
+
+        # Add global context if available
+        if global_context and global_context.get('thesis'):
+            context_note = f"\n\nCONTEXT: The document is about {global_context['thesis']}. Verify that the generated text aligns with this context and doesn't introduce off-topic content."
+            user_prompt += context_note
+
+        # Add intent assessment if intent is provided
+        intent_task = ""
+        if intent:
+            intent_task = f"""
+
+Task 2: Assess intent alignment.
+Does the generated text align with the intent '{intent}'? Consider:
+- "persuading": Does it use persuasive language, arguments, or calls to action?
+- "narrating": Does it tell a story or describe events in sequence?
+- "informing": Does it present facts, explanations, or educational content?
+- "analyzing": Does it break down concepts, compare, or examine relationships?"""
+            user_prompt += intent_task
+
+        user_prompt += """
 
 Respond with JSON:
 {{
     "meaning_preserved": true/false,
-    "confidence": 0.0-1.0,
-    "explanation": "brief reason (mention if conditional relationship, logic mismatch, or meaning shift detected)"
+    "confidence": 0.0-1.0,"""
+
+        if intent:
+            user_prompt += """
+    "intent_score": 1.0/0.5/0.0,  // 1.0 = Yes, 0.5 = Partial, 0.0 = No"""
+
+        user_prompt += """,
+    "explanation": "brief reason (mention if conditional relationship, logic mismatch, meaning shift, or intent mismatch detected)"
 }}"""
 
         try:
@@ -681,12 +1037,66 @@ Respond with JSON:
 
             meaning_preserved = result.get("meaning_preserved", True)
             confidence = float(result.get("confidence", 0.5))
+            intent_score = float(result.get("intent_score", 1.0)) if intent else 1.0
             explanation = result.get("explanation", "")
 
-            return meaning_preserved, confidence, explanation
+            return meaning_preserved, confidence, intent_score, explanation
         except Exception as e:
             # Handle errors gracefully - don't block evaluation
-            return True, 0.5, f"LLM verification unavailable: {str(e)}"
+            return True, 0.5, 1.0, f"LLM verification unavailable: {str(e)}"
+
+    def _calculate_composite_score(self, metrics: Dict[str, Optional[float]]) -> float:
+        """Calculate composite score with dynamic weight normalization.
+
+        Only includes metrics that are not None in the weighted average.
+        This ensures scores are mathematically sound regardless of whether
+        context is enabled or disabled (no artificial score inflation).
+
+        Args:
+            metrics: Dictionary of metric names to scores (None if not available).
+
+        Returns:
+            Composite score 0.0-1.0 (weighted average of available metrics).
+        """
+        # Identify active metrics (keys where value is not None)
+        active_metrics = {k: v for k, v in metrics.items() if v is not None}
+
+        if not active_metrics:
+            # No active metrics - return neutral score
+            return 0.5
+
+        # Get weights for active metrics
+        active_weights = {}
+        for key in active_metrics.keys():
+            if key in self.weights:
+                active_weights[key] = self.weights[key]
+            else:
+                # Fallback: use default weight if not in config
+                # This handles backward compatibility
+                default_weights = {
+                    "accuracy": self.accuracy_weight if hasattr(self, 'accuracy_weight') else 0.7,
+                    "fluency": self.fluency_weight if hasattr(self, 'fluency_weight') else 0.3,
+                    "style": 0.0,
+                    "thesis_alignment": 0.0,
+                    "intent_compliance": 0.0,
+                    "keyword_coverage": 0.0
+                }
+                active_weights[key] = default_weights.get(key, 0.0)
+
+        # Calculate total weight of active metrics
+        total_weight = sum(active_weights.values())
+
+        if total_weight == 0:
+            # No weights configured - return simple average
+            return sum(active_metrics.values()) / len(active_metrics)
+
+        # Normalize weights and calculate weighted average
+        composite = sum(
+            metrics[k] * (active_weights[k] / total_weight)
+            for k in active_metrics.keys()
+        )
+
+        return max(0.0, min(1.0, composite))
 
     def _infer_skeleton_type(self, skeleton: str, generated_text: str) -> str:
         """Infer skeleton type from skeleton pattern and generated text.
@@ -718,7 +1128,8 @@ Respond with JSON:
         self,
         original_text: str,
         generated_text: str,
-        skeleton_type: str = "DECLARATIVE"
+        skeleton_type: str = "DECLARATIVE",
+        global_context: Optional[Dict] = None
     ) -> Tuple[bool, str]:
         """Verify logic preservation with rhetorical context awareness.
 
@@ -769,6 +1180,11 @@ Return JSON:
                 generated_text=generated_text,
                 skeleton_type=skeleton_type
             )
+
+            # Add global context if available
+            if global_context and global_context.get('thesis'):
+                context_note = f"\n\nCONTEXT: The document is about {global_context['thesis']}. Verify that the generated text aligns with this context."
+                prompt += context_note
 
             response = self.llm_provider.call(
                 system_prompt="You are a precision logic validator. Output ONLY valid JSON.",
@@ -1510,7 +1926,9 @@ Return JSON:
         author_style_vector: Optional[np.ndarray] = None,
         style_lexicon: Optional[List[str]] = None,
         secondary_author_vector: Optional[np.ndarray] = None,
-        blend_ratio: float = 0.5
+        blend_ratio: float = 0.5,
+        verbose: bool = False,
+        global_context: Optional[Dict] = None
     ) -> Dict[str, any]:
         """Evaluate paragraph in paragraph mode using proposition recall and style alignment.
 
@@ -1529,8 +1947,28 @@ Return JSON:
             config = json.load(f)
         paragraph_config = config.get("paragraph_fusion", {})
         proposition_recall_threshold = paragraph_config.get("proposition_recall_threshold", 0.8)
-        meaning_weight = paragraph_config.get("meaning_weight", 0.6)
-        style_weight = paragraph_config.get("style_alignment_weight", 0.4)
+        meaning_weight = paragraph_config.get("meaning_weight", 0.9)  # Default 0.9 for meaning-first
+        style_weight = paragraph_config.get("style_alignment_weight", 0.1)  # Default 0.1 (garnish only)
+
+        # HARD GATE 0: Context Leak Detection (run first, before any other checks)
+        if global_context:
+            has_leak, leaked_keywords, leak_score, leak_reason = self._check_context_leak(
+                generated_text, global_context, propositions
+            )
+            if has_leak:
+                if verbose:
+                    print(f"      ⚠ Context Leak Detected: {leak_reason}")
+                return {
+                    "pass": False,
+                    "score": 0.0,
+                    "proposition_recall": 0.0,  # Don't calculate if leak detected
+                    "style_alignment": 0.0,
+                    "coherence_score": 0.0,
+                    "topic_similarity": 0.0,
+                    "feedback": f"CRITICAL: {leak_reason}. Remove all keywords from global context that don't appear in input propositions.",
+                    "context_leak_detected": True,
+                    "leaked_keywords": leaked_keywords
+                }
 
         # Metric 1: Proposition Recall (use relaxed threshold 0.30 for paragraph mode)
         proposition_recall, recall_details = self._check_proposition_recall(
@@ -1539,7 +1977,52 @@ Return JSON:
             similarity_threshold=0.30  # More lenient for paragraph mode to avoid false negatives
         )
 
-        # Metric 2: Style Alignment
+        # MEANING GATE: Hard floor check for proposition recall BEFORE style calculation
+        # If recall is too low, meaning is lost - fail immediately
+        if proposition_recall < proposition_recall_threshold:
+            if verbose:
+                print(f"      ⚠ Proposition Recall FAILED: {proposition_recall:.2f} < {proposition_recall_threshold:.2f} → score=0.0")
+            missing = recall_details.get("missing", [])
+            feedback_msg = f"CRITICAL: Proposition recall too low ({proposition_recall:.2f} < {proposition_recall_threshold}). Lost meaning."
+            if missing:
+                feedback_msg += f" Missing propositions: {', '.join(missing[:3])}"
+            return {
+                "pass": False,
+                "score": 0.0,
+                "proposition_recall": proposition_recall,
+                "style_alignment": 0.0,  # Don't calculate if meaning fails
+                "coherence_score": 0.0,
+                "topic_similarity": 0.0,
+                "feedback": feedback_msg,
+                "recall_details": recall_details
+            }
+
+        # Get thresholds from config
+        coherence_threshold = paragraph_config.get("coherence_threshold", 0.8)
+        topic_similarity_threshold = paragraph_config.get("topic_similarity_threshold", 0.6)
+
+        # MEANING FIRST: Run coherence check BEFORE style calculation
+        coherence_score, coherence_reason = self._verify_coherence(generated_text, verbose=verbose)
+        topic_similarity = self._calculate_semantic_similarity(original_text, generated_text)
+
+        # HARD GATE: If incoherent, fail immediately (no style calculation needed)
+        if coherence_score < coherence_threshold:
+            if verbose:
+                print(f"      ⚠ Coherence FAILED: {coherence_score:.2f} < {coherence_threshold:.2f} → score=0.0")
+                print(f"      Generated text (first 200 chars): {generated_text[:200]}...")
+                print(f"      Coherence reason: {coherence_reason}")
+            return {
+                "pass": False,
+                "score": 0.0,
+                "proposition_recall": proposition_recall,
+                "style_alignment": 0.0,  # Don't calculate if incoherent
+                "coherence_score": coherence_score,
+                "topic_similarity": topic_similarity,
+                "feedback": f"CRITICAL: Text is incoherent ({coherence_reason}). Meaning preservation requires coherent text.",
+                "coherence_reason": coherence_reason
+            }
+
+        # Only calculate style if coherence passes
         style_alignment, style_details = self._check_style_alignment(
             generated_text,
             author_style_vector,
@@ -1548,11 +2031,20 @@ Return JSON:
             blend_ratio=blend_ratio
         )
 
-        # Final score: (Meaning * 0.6) + (Style * 0.4)
-        final_score = (proposition_recall * meaning_weight) + (style_alignment * style_weight)
+        # Log coherence and topic similarity (already calculated above)
+        if verbose:
+            print(f"      Coherence: {coherence_score:.2f} (threshold: {coherence_threshold:.2f}), Topic similarity: {topic_similarity:.2f} (threshold: {topic_similarity_threshold:.2f})")
 
-        # Pass threshold: proposition_recall > 0.8
-        passes = proposition_recall >= proposition_recall_threshold
+        # Check topic similarity threshold (coherence already checked above)
+        if topic_similarity < topic_similarity_threshold:
+            if verbose:
+                print(f"      ⚠ Topic similarity FAILED: {topic_similarity:.2f} < {topic_similarity_threshold:.2f} → score=0.0")
+            final_score = 0.0
+            passes = False
+        else:
+            # Final score with Meaning First weighting (0.9 meaning, 0.1 style)
+            final_score = (proposition_recall * meaning_weight) + (style_alignment * style_weight)
+            passes = proposition_recall >= proposition_recall_threshold
 
         # Build feedback
         feedback_parts = []
@@ -1570,6 +2062,17 @@ Return JSON:
         if style_alignment < 0.7:
             feedback_parts.append(
                 f"Style alignment low ({style_alignment:.2f}). Average sentence length: {style_details.get('avg_sentence_length', 0):.1f} words."
+            )
+
+        # Add coherence and topic similarity feedback
+        if coherence_score < coherence_threshold:
+            feedback_parts.append(
+                f"Coherence too low ({coherence_score:.2f} < {coherence_threshold}): {coherence_reason}"
+            )
+
+        if topic_similarity < topic_similarity_threshold:
+            feedback_parts.append(
+                f"Topic similarity too low ({topic_similarity:.2f} < {topic_similarity_threshold}): Topic has drifted from original"
             )
 
         # Optional: Verify structural blueprint match (soft check)
@@ -1594,12 +2097,15 @@ Return JSON:
             "pass": passes,
             "proposition_recall": proposition_recall,
             "style_alignment": style_alignment,
+            "coherence_score": coherence_score,
+            "topic_similarity": topic_similarity,
             "recall_score": proposition_recall,  # For compatibility
             "precision_score": 1.0,  # Not used in paragraph mode
             "adherence_score": 1.0,  # Not used in paragraph mode
             "score": final_score,
             "feedback": " ".join(feedback_parts) if feedback_parts else "Passed paragraph validation.",
             "recall_details": recall_details,
-            "style_details": style_details
+            "style_details": style_details,
+            "coherence_reason": coherence_reason
         }
 

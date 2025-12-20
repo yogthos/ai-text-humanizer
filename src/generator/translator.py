@@ -91,6 +91,12 @@ class StyleTranslator:
         self.structuralizer = Structuralizer(config_path=config_path)
         # Initialize proposition extractor for paragraph fusion
         self.proposition_extractor = PropositionExtractor(config_path=config_path)
+        # Initialize structure extractor for template bleaching
+        from src.analyzer.structure_extractor import StructureExtractor
+        self.structure_extractor = StructureExtractor(config_path=config_path)
+        # Initialize rhetorical classifier for mode matching
+        from src.analyzer.rhetorical_classifier import RhetoricalClassifier
+        self.rhetorical_classifier = RhetoricalClassifier(config_path=config_path)
         # Load paragraph fusion config
         self.paragraph_fusion_config = self.config.get("paragraph_fusion", {})
         # Load LLM provider config (for retry settings)
@@ -229,17 +235,32 @@ class StyleTranslator:
         input_len = len(blueprint.original_text.split())
 
         # Step 1: Length Filter (Pre-filter before skeleton extraction)
-        # This saves token costs by filtering before expensive skeleton extraction
+        # Adaptive filter: more lenient for very short sentences
         length_filtered = []
         for example in examples:
             example_len = len(example.split())
 
-            # Filter: 0.5x to 2.5x length (stricter than complexity gate)
-            if 0.5 * input_len <= example_len <= 2.5 * input_len:
+            # Adaptive length filter: more lenient for very short sentences
+            if input_len < 5:
+                # For short inputs, we WANT expansion.
+                # Ensure min_len allows at least short valid sentences (e.g. 5 words)
+                # Ensure max_len allows enough room (e.g. at least 15 words for very short inputs)
+                # This handles edge case where input_len could be 0
+                min_len = 5
+                max_len = max(15, int(5.0 * input_len))
+            else:
+                # Standard filter: 0.5x to 2.5x length
+                min_len = int(0.5 * input_len)
+                max_len = int(2.5 * input_len)
+
+            if min_len <= example_len <= max_len:
                 length_filtered.append(example)
 
         if verbose:
-            print(f"    Length filter: {len(length_filtered)}/{len(examples)} examples passed (0.5x-2.5x length range)")
+            if input_len < 5:
+                print(f"    Length filter: {len(length_filtered)}/{len(examples)} examples passed (adaptive: {min_len}-{max_len} words for {input_len}-word input)")
+            else:
+                print(f"    Length filter: {len(length_filtered)}/{len(examples)} examples passed (0.5x-2.5x length range)")
 
         # Step 2: Extract skeletons from length-filtered examples
         skeleton_candidates = []
@@ -275,6 +296,44 @@ class StyleTranslator:
 
         if verbose:
             print(f"    Complexity gate: {len(skeleton_candidates)} skeletons passed (0.5x-3.0x slots)")
+
+        # Step 2.5: Type Compatibility Filter
+        # Detect input type once
+        input_type = self._detect_sentence_type(blueprint.original_text)
+        original_count = len(skeleton_candidates)
+        compatible_candidates = []
+
+        for skeleton, example, slots in skeleton_candidates:
+            skeleton_type = self._detect_sentence_type(skeleton)
+
+            # Logic:
+            # 1. Exact match is always allowed (Decl -> Decl, Quest -> Quest, Cond -> Cond)
+            # 2. Conditional -> Declarative is allowed (Common style expansion)
+            # 3. Question -> Declarative is BANNED (Causes the logic errors seen in logs)
+
+            is_compatible = False
+
+            if input_type == skeleton_type:
+                is_compatible = True
+            elif input_type == "DECLARATIVE" and skeleton_type == "CONDITIONAL":
+                is_compatible = True  # Allow expanding facts into conditionals
+            # Note: Explicitly NOT allowing Declarative -> Question
+
+            if is_compatible:
+                compatible_candidates.append((skeleton, example, slots))
+            elif verbose:
+                print(f"    Type Mismatch: Dropped {skeleton_type} skeleton for {input_type} input.")
+
+        # Fallback: If we filtered EVERYTHING, relax the constraint to avoid crashing
+        if not compatible_candidates and verbose:
+            print("    ⚠ Warning: All skeletons filtered by type. Relaxing filter.")
+            # Keep empty list to trigger standard generation fallback
+
+        if verbose:
+            print(f"    Type filter: {len(compatible_candidates)}/{original_count} skeletons passed type compatibility")
+
+        # Replace the list for the next steps
+        skeleton_candidates = compatible_candidates
 
         # Step 3: Deduplication - Remove similar skeletons (preserving order)
         # Process in order to preserve ChromaDB relevance ranking
@@ -335,11 +394,109 @@ class StyleTranslator:
 
         return intersection / union if union > 0 else 0.0
 
+    def _detect_voice(self, text: str) -> str:
+        """Detect the voice/perspective of a text (1st, 2nd, 3rd person, or neutral).
+
+        Args:
+            text: Input text to analyze.
+
+        Returns:
+            "1st", "2nd", "3rd", or "neutral" based on pronoun usage.
+        """
+        if not text or not text.strip():
+            return "neutral"
+
+        import re
+        text_lower = text.lower()
+
+        # First-person markers (use word boundaries to avoid false matches)
+        first_person_patterns = [
+            r'\bi\b', r'\bme\b', r'\bmy\b', r'\bmine\b',
+            r'\bwe\b', r'\bus\b', r'\bour\b', r'\bours\b'
+        ]
+        first_count = sum(len(re.findall(pattern, text_lower)) for pattern in first_person_patterns)
+
+        # Second-person markers
+        second_person_patterns = [
+            r'\byou\b', r'\byour\b', r'\byours\b'
+        ]
+        second_count = sum(len(re.findall(pattern, text_lower)) for pattern in second_person_patterns)
+
+        # Third-person markers (explicitly ignore "it" to avoid noise)
+        third_person_patterns = [
+            r'\bhe\b', r'\bhim\b', r'\bhis\b',
+            r'\bshe\b', r'\bher\b', r'\bhers\b',
+            r'\bthey\b', r'\bthem\b', r'\btheir\b', r'\btheirs\b'
+        ]
+        third_count = sum(len(re.findall(pattern, text_lower)) for pattern in third_person_patterns)
+
+        # Return the category with the highest count
+        counts = {
+            "1st": first_count,
+            "2nd": second_count,
+            "3rd": third_count
+        }
+
+        max_count = max(counts.values())
+        if max_count == 0:
+            return "neutral"
+
+        # Return the category with the highest count
+        for voice, count in counts.items():
+            if count == max_count:
+                return voice
+
+        return "neutral"
+
+    def _detect_sentence_type(self, text: str) -> str:
+        """Robustly detects if a sentence/skeleton is QUESTION, CONDITIONAL, or DECLARATIVE.
+
+        Args:
+            text: Sentence text or skeleton to analyze.
+
+        Returns:
+            "QUESTION", "DECLARATIVE", or "CONDITIONAL"
+        """
+        if not text or not text.strip():
+            return "DECLARATIVE"
+
+        text = text.strip().lower()
+
+        # 1. Explicit Question: ends with ? or starts with question words
+        # Check for question mark first (most definitive)
+        if text.endswith("?"):
+            return "QUESTION"
+
+        # Check for question words at start (who, what, where, why, how)
+        # Note: "when" is ambiguous, so handle it separately
+        if text.startswith(("who ", "what ", "where ", "why ", "how ")):
+            return "QUESTION"
+
+        # "when" can be question or conditional - check for question pattern first
+        # Questions: "when did/do/does/will/would/can/could/should..."
+        # Conditionals: "when [subject] [verb]..." (no auxiliary)
+        if text.startswith("when "):
+            # Check if it's a question pattern (auxiliary verb after "when")
+            if re.match(r"^when\s+(did|do|does|will|would|can|could|should|is|are|was|were|has|have|had)\s", text):
+                return "QUESTION"
+            # Otherwise treat as conditional
+            return "CONDITIONAL"
+
+        # 2. Conditional: Check for structure at start
+        # Matches: "If X, Y" or "Unless X, Y" or "Provided that X, Y"
+        if re.match(r"^(if|unless|provided that|should)\s", text):
+            return "CONDITIONAL"
+
+        return "DECLARATIVE"
+
     def _calculate_skeleton_adherence(self, candidate: str, skeleton: str) -> float:
         """Calculate skeleton adherence score using anchor word overlap.
 
         Extracts function words (anchor words) from skeleton and checks
         what percentage appear in candidate in roughly the same order.
+
+        Also checks type compatibility - if skeleton type doesn't match candidate type,
+        returns a lower score to penalize type mismatches.
 
         Args:
             candidate: Generated candidate text.
@@ -350,6 +507,15 @@ class StyleTranslator:
         """
         if not candidate or not skeleton:
             return 0.0
+
+        # Type compatibility check: if types don't match, penalize heavily
+        skeleton_type = self._detect_sentence_type(skeleton)
+        candidate_type = self._detect_sentence_type(candidate)
+
+        if skeleton_type != candidate_type:
+            # Type mismatch - return a low score to indicate poor adherence
+            # This helps filter out candidates that don't match the skeleton's sentence type
+            return 0.3  # Low score for type mismatch
 
         # Function words (anchor words) that should be preserved
         # These are structural words that appear in the skeleton
@@ -886,6 +1052,14 @@ class StyleTranslator:
                 print(f"      ✅ CANDIDATE SURVIVED ALL FILTERS")
                 print(f"         📊 Scores: Adherence {adherence_score:.2f}, Recall {recall_score:.2f}, Style {style_density:.2f}, Overall {critic_result.get('score', 0.0):.2f}")
 
+            # Store meaning failure flags for hierarchical filtering
+            context_leak_detected = critic_result.get("context_leak_detected", False)
+            hallucination = critic_result.get("score", 0.0) == 0.0 and recall_score < min_keyword_presence
+            meaning_failure = (critic_result.get("score", 0.0) == 0.0 or
+                              recall_score < min_keyword_presence or
+                              context_leak_detected or
+                              hallucination)
+
             survivors.append({
                 "text": candidate_text,
                 "skeleton": skeleton,
@@ -895,23 +1069,44 @@ class StyleTranslator:
                 "style_density": style_density,
                 "score": critic_result.get("score", 0.0),
                 "semantic_similarity": semantic_similarity,
-                "critic_result": critic_result
+                "critic_result": critic_result,
+                "context_leak_detected": context_leak_detected,
+                "hallucination": hallucination,
+                "meaning_failure": meaning_failure,
+                "repair_attempts": 1 if meaning_failure else 0  # Initialize repair attempts
             })
 
-        # Sort survivors by style_density (descending) and return Top K
-        survivors.sort(key=lambda x: x["style_density"], reverse=True)
+        # MEANING GATE: Filter by meaning FIRST, then rank by style
+        min_viable_recall = evolutionary_config.get("min_viable_recall", 0.85)
+        valid_candidates = [
+            c for c in survivors
+            if c['recall_score'] >= min_viable_recall
+            and not c.get('context_leak_detected', False)
+            and not c.get('hallucination', False)
+        ]
 
-        if verbose:
-            print(f"  🏟️  Arena Results: {len(survivors)} survivors from {len(candidates)} candidates")
-            if survivors:
-                print(f"    🏆 Top {min(3, len(survivors))} survivors:")
-                for i, surv in enumerate(survivors[:3]):
-                    print(f"      {i+1}. Style: {surv['style_density']:.2f}, Recall: {surv['recall_score']:.2f}, Score: {surv['score']:.2f}")
-                    print(f"         Text: {surv['text'][:80]}...")
-            else:
-                print(f"    ⚠ No survivors - all candidates failed filters")
-
-        return survivors[:top_k]
+        if valid_candidates:
+            # Sort by style (meaning-valid candidates compete on style)
+            valid_candidates.sort(key=lambda x: x["style_density"], reverse=True)
+            if verbose:
+                print(f"  🏟️  Arena Results: {len(valid_candidates)} meaning-valid survivors from {len(candidates)} candidates")
+                if valid_candidates:
+                    print(f"    🏆 Top {min(3, len(valid_candidates))} survivors (meaning-valid):")
+                    for i, surv in enumerate(valid_candidates[:3]):
+                        print(f"      {i+1}. Style: {surv['style_density']:.2f}, Recall: {surv['recall_score']:.2f}, Score: {surv['score']:.2f}")
+                        print(f"         Text: {surv['text'][:80]}...")
+            return valid_candidates[:top_k]
+        else:
+            # Emergency: All failed meaning - select best recall for repair
+            survivors.sort(key=lambda x: x["recall_score"], reverse=True)
+            if verbose:
+                print(f"  🏟️  Arena Results: {len(survivors)} survivors (ALL FAILED MEANING GATE - entering repair mode)")
+                if survivors:
+                    print(f"    🔧 Top {min(3, len(survivors))} candidates for repair (sorted by recall):")
+                    for i, surv in enumerate(survivors[:3]):
+                        print(f"      {i+1}. Recall: {surv['recall_score']:.2f}, Style: {surv['style_density']:.2f}, Score: {surv['score']:.2f}")
+                        print(f"         Text: {surv['text'][:80]}...")
+            return survivors[:top_k]
 
     def _breed_children(
         self,
@@ -958,19 +1153,44 @@ class StyleTranslator:
             recall_score = parent.get("recall_score", 0.0)
             style_density = parent.get("style_density", 0.0)
             logic_fail = critic_result.get("logic_fail", False)
+            context_leak_detected = parent.get("context_leak_detected", False)
+            hallucination = parent.get("hallucination", False)
+            repair_attempts = parent.get("repair_attempts", 0)
+            feedback = critic_result.get("feedback", "")
 
             deltas = []
-            if recall_score < 0.8:
-                # Missing keywords - extract missing ones from blueprint
-                missing_keywords = []
-                blueprint_keywords = list(blueprint.core_keywords)[:5]
-                text_lower = text.lower()
-                for keyword in blueprint_keywords:
-                    if keyword.lower() not in text_lower:
-                        missing_keywords.append(keyword)
-                if missing_keywords:
-                    deltas.append(f"Missing keywords: {', '.join(missing_keywords[:3])}")
+            meaning_failure = False
 
+            # MEANING GATE FAILURES (critical - must repair)
+            if recall_score < 0.85:
+                meaning_failure = True
+                # Missing propositions - extract from recall details if available
+                recall_details = critic_result.get("recall_details", {})
+                missing_propositions = recall_details.get("missing", [])
+                if missing_propositions:
+                    deltas.append(f"Missing propositions: {', '.join(missing_propositions[:3])}")
+                else:
+                    # Fallback: extract missing keywords from blueprint
+                    missing_keywords = []
+                    blueprint_keywords = list(blueprint.core_keywords)[:5]
+                    text_lower = text.lower()
+                    for keyword in blueprint_keywords:
+                        if keyword.lower() not in text_lower:
+                            missing_keywords.append(keyword)
+                    if missing_keywords:
+                        deltas.append(f"Missing keywords: {', '.join(missing_keywords[:3])}")
+                    else:
+                        deltas.append(f"Proposition recall too low ({recall_score:.2f} < 0.85)")
+
+            if context_leak_detected or hallucination:
+                meaning_failure = True
+                leaked_keywords = critic_result.get("leaked_keywords", [])
+                if leaked_keywords:
+                    deltas.append(f"Hallucination detected: {', '.join(leaked_keywords[:3])}")
+                else:
+                    deltas.append("Hallucination detected (context leak)")
+
+            # STYLE ISSUES (non-critical)
             if style_density < 0.1:
                 deltas.append("Boring style, needs jargon")
 
@@ -980,7 +1200,9 @@ class StyleTranslator:
             parent_deltas.append({
                 "text": text,
                 "deltas": deltas,
-                "strengths": []
+                "strengths": [],
+                "meaning_failure": meaning_failure,
+                "repair_attempts": repair_attempts
             })
 
             # Identify strengths
@@ -990,6 +1212,24 @@ class StyleTranslator:
                 parent_deltas[-1]["strengths"].append("Perfect keywords")
             if parent.get("adherence_score", 0.0) > 0.9:
                 parent_deltas[-1]["strengths"].append("Strong structure")
+
+        # Check if we need repair mode or structure swap
+        best_parent = parent_deltas[0] if parent_deltas else None
+        needs_repair = best_parent and best_parent.get("meaning_failure", False)
+        repair_attempts = best_parent.get("repair_attempts", 0) if best_parent else 0
+        use_structure_swap = needs_repair and repair_attempts >= 2
+
+        # Extract missing propositions for repair prompts
+        missing_propositions = []
+        if needs_repair and best_parent:
+            for delta in best_parent.get("deltas", []):
+                if "Missing propositions:" in delta:
+                    # Extract propositions from delta text
+                    prop_text = delta.split("Missing propositions:")[1].strip()
+                    missing_propositions = [p.strip() for p in prop_text.split(",")[:5]]
+                elif "Missing keywords:" in delta:
+                    kw_text = delta.split("Missing keywords:")[1].strip()
+                    missing_propositions = [k.strip() for k in kw_text.split(",")[:5]]
 
         # Build breeding prompt
         parent_descriptions = []
@@ -1002,7 +1242,68 @@ class StyleTranslator:
                 f"  Defects: {deltas_text}"
             )
 
-        breeding_prompt = f"""You are a master literary breeder. Your task is to generate children that combine the strengths of multiple parent sentences while fixing their specific defects.
+        if use_structure_swap:
+            # STRUCTURE SWAP MODE: Discard template, use simple S-V-O structure
+            breeding_prompt = f"""CRITICAL STRUCTURE SWAP:
+The structure template is incompatible with the meaning. Previous repair attempts failed.
+
+### ERROR
+{best_parent.get('deltas', ['Meaning failure'])[0] if best_parent else 'Meaning failure'}
+
+### ORIGINAL PROPOSITIONS
+{', '.join(missing_propositions) if missing_propositions else blueprint.original_text}
+
+### TASK
+Generate {num_children} children that:
+1. DISCARD the template structure entirely (do NOT use the parent's structure).
+2. Rewrite the propositions using simple Subject-Verb-Object structure.
+3. Ensure ALL propositions are preserved: {', '.join(missing_propositions) if missing_propositions else 'all original meaning'}.
+4. THEN apply the target style and vocabulary: {', '.join(style_lexicon[:20]) if style_lexicon else 'None'}.
+5. Do NOT force incompatible rhetorical structures (e.g., don't use list format for narratives).
+
+### OUTPUT FORMAT
+Output PURE JSON. A single list of strings:
+[
+  "Child 1 text...",
+  "Child 2 text...",
+  ...
+  "Child {num_children} text..."
+]
+"""
+        elif needs_repair:
+            # REPAIR MODE: Fix meaning while preserving structure
+            error_msg = best_parent.get('deltas', ['Meaning failure'])[0] if best_parent else 'Meaning failure'
+            breeding_prompt = f"""CRITICAL REPAIR TASK:
+The text below has correct Structure but failed the Meaning Check.
+
+### ERROR
+{error_msg}
+
+### ORIGINAL TEXT
+{best_parent.get('text', '') if best_parent else ''}
+
+### INPUT PROPOSITIONS
+{', '.join(missing_propositions) if missing_propositions else blueprint.original_text}
+
+### TASK
+Generate {num_children} children that:
+1. Keep the exact sentence structure and rhythm from the original text.
+2. Remove hallucinated words/phrases (if any).
+3. Replace them with correct facts from Input Propositions: {', '.join(missing_propositions) if missing_propositions else 'all original meaning'}.
+4. Do NOT change the style or vocabulary: {', '.join(style_lexicon[:20]) if style_lexicon else 'None'}.
+
+### OUTPUT FORMAT
+Output PURE JSON. A single list of strings:
+[
+  "Child 1 text...",
+  "Child 2 text...",
+  ...
+  "Child {num_children} text..."
+]
+"""
+        else:
+            # STANDARD BREEDING MODE
+            breeding_prompt = f"""You are a master literary breeder. Your task is to generate children that combine the strengths of multiple parent sentences while fixing their specific defects.
 
 ### PARENTS TO BREED:
 {chr(10).join(parent_descriptions)}
@@ -1322,7 +1623,24 @@ Output PURE JSON. A single list of strings:
                 style_lexicon = style_dna_dict.get("lexicon")
 
             all_candidates = []
+            input_type = self._detect_sentence_type(blueprint.original_text)
+
             for skeleton, source_example in compatible_skeletons:
+                # Early rejection: Check skeleton type vs input type before generating candidates
+                skeleton_type = self._detect_sentence_type(skeleton)
+
+                # Same logic as in _extract_multiple_skeletons: reject Question -> Declarative
+                is_compatible = False
+                if input_type == skeleton_type:
+                    is_compatible = True
+                elif input_type == "DECLARATIVE" and skeleton_type == "CONDITIONAL":
+                    is_compatible = True
+
+                if not is_compatible:
+                    if verbose:
+                        print(f"  Skipping skeleton: type mismatch ({skeleton_type} skeleton for {input_type} input)")
+                    continue
+
                 if verbose:
                     print(f"  Generating batch of {batch_size} variants for skeleton: {skeleton[:60]}...")
 
@@ -1416,6 +1734,30 @@ Output PURE JSON. A single list of strings:
                         style_dna_dict=style_dna_dict,
                         verbose=verbose
                     )
+
+                    # Track repair attempts: if parent had meaning failure, increment repair_attempts for children
+                    parent_repair_attempts = best_survivor.get("repair_attempts", 0)
+                    parent_meaning_failure = (best_survivor.get("score", 0.0) == 0.0 or
+                                             best_survivor.get("recall_score", 0.0) < 0.85 or
+                                             best_survivor.get("context_leak_detected", False) or
+                                             best_survivor.get("hallucination", False))
+
+                    for child in child_survivors:
+                        # If child also has meaning failure, increment repair attempts
+                        child_meaning_failure = (child.get("score", 0.0) == 0.0 or
+                                                child.get("recall_score", 0.0) < 0.85 or
+                                                child.get("context_leak_detected", False) or
+                                                child.get("hallucination", False))
+                        if child_meaning_failure:
+                            if parent_meaning_failure:
+                                # Both parent and child failed - increment repair attempts
+                                child["repair_attempts"] = parent_repair_attempts + 1
+                            else:
+                                # New failure - start tracking
+                                child["repair_attempts"] = 1
+                        else:
+                            # Child passed meaning gate - reset repair attempts
+                            child["repair_attempts"] = 0
 
                     # Update survivors (keep best from parents + children)
                     all_survivors = survivors + child_survivors
@@ -2711,8 +3053,10 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         used_examples: Optional[Set[str]] = None,
         secondary_author: Optional[str] = None,
         blend_ratio: float = 0.5,
-        verbose: bool = False
-    ) -> tuple[str, Optional[List[Dict]], Optional[str]]:
+        verbose: bool = False,
+        global_context: Optional[Dict] = None,
+        is_opener: bool = False
+    ) -> tuple[str, Optional[List[Dict]], Optional[str], float]:
         """Translate a paragraph holistically using paragraph fusion.
 
         Extracts atomic propositions from the paragraph, retrieves complex style examples,
@@ -2727,10 +3071,11 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
             verbose: Whether to print debug information.
 
         Returns:
-            Generated paragraph in target style.
+            Tuple of (generated_paragraph, rhythm_map, teacher_example, internal_recall).
+            internal_recall is the best proposition recall achieved during evaluation/repair loop.
         """
         if not paragraph or not paragraph.strip():
-            return paragraph, None, None
+            return paragraph, None, None, 0.0
 
         # Step 1: Extract atomic propositions (with citations bound to facts)
         if verbose:
@@ -2741,7 +3086,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
 
         if not propositions:
             # Fallback: use original paragraph
-            return paragraph, None, None
+            return paragraph, None, None, 0.0
 
         # Step 1.5: Extract direct quotations separately (for quote preservation)
         quote_pattern = r'["\'](?:[^"\']|(?<=\\)["\'])*["\']'
@@ -2858,8 +3203,20 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         n_props = len(propositions)
         target_sentences = math.ceil(n_props * 0.6)  # Target ratio: ~1.5 props per sentence
 
+        # Classify input rhetorical mode ONCE (before loop)
+        input_mode = self.rhetorical_classifier.classify_mode(paragraph)
+        if verbose:
+            print(f"  Input rhetorical mode: {input_mode}")
+
+        # Load rhetorical mode penalties from config
+        mode_penalties_config = self.paragraph_fusion_config.get("rhetorical_mode_penalties", {})
+        narrative_vs_argumentative = mode_penalties_config.get("narrative_vs_argumentative", 0.1)
+        argumentative_vs_narrative = mode_penalties_config.get("argumentative_vs_narrative", 0.5)
+        descriptive_mismatch = mode_penalties_config.get("descriptive_mismatch", 0.8)
+
         teacher_example = None  # Will be set when best_match is selected
         rhythm_map = None
+        selected_template_mode = None  # Will store the selected example's mode for prompt construction
 
         if complex_examples:
             # Composite scoring: sentence count + diversity + positional fit + freshness
@@ -2888,12 +3245,12 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                     example_sentences = sent_tokenize(example)
                     sentence_count = len([s for s in example_sentences if s.strip()])
 
-                    # Hard filter: Reject examples that are too short to hold the content
-                    # (Prevent 13 propositions -> 2 sentence template)
-                    min_sentences = max(2, int(target_sentences * 0.5))
-                    if sentence_count < min_sentences:
+                    # Safety floor: Only reject 1-sentence fragments
+                    # Sentence count suitability (3 vs 8) is handled by composite scorer ranking
+                    # This allows high-density templates to compete if they have good style alignment
+                    if sentence_count < 2:
                         if verbose:
-                            print(f"    Skipping example with {sentence_count} sentences (minimum: {min_sentences})")
+                            print(f"    Skipping fragment (1 sentence).")
                         continue
 
                     count_diff = abs(sentence_count - target_sentences)
@@ -2947,13 +3304,52 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                     is_used = used_examples and (example in used_examples)
                     freshness_score = 0.0 if is_used else 1.0
 
-                    # 6. Composite score
+                    # 6. Voice compatibility check (asymmetric penalties)
+                    input_voice = self._detect_voice(paragraph)
+                    example_voice = self._detect_voice(example)
+
+                    voice_penalty = 1.0  # Default: no penalty
+                    if example_voice == "2nd" and input_voice != "2nd":
+                        # "You" templates are toxic for narrative. Heavy penalty.
+                        voice_penalty = 0.1
+                        if verbose:
+                            print(f"    Voice Clash: Rejecting 2nd-person template for {input_voice}-person input (penalty: 0.1x)")
+                    elif input_voice == "2nd" and example_voice != "2nd":
+                        # Input is 2nd person, template is not - moderate penalty
+                        voice_penalty = 0.7
+                        if verbose:
+                            print(f"    Voice Mismatch: 2nd-person input with {example_voice}-person template (penalty: 0.7x)")
+                    elif input_voice != example_voice and example_voice != "neutral" and input_voice != "neutral":
+                        # 1st vs 3rd mismatch is usually fine (they adapt well), mild penalty
+                        voice_penalty = 0.9
+                        if verbose:
+                            print(f"    Voice Mismatch: {input_voice}-person input with {example_voice}-person template (penalty: 0.9x)")
+
+                    # 7. Rhetorical mode compatibility check
+                    example_mode = self.rhetorical_classifier.classify_mode(example)
+                    mode_penalty = 1.0  # Default: no penalty
+                    if input_mode != example_mode:
+                        if input_mode == "NARRATIVE" and example_mode == "ARGUMENTATIVE":
+                            mode_penalty = narrative_vs_argumentative  # Severe penalty - can't tell story using logical proof
+                            if verbose:
+                                print(f"    Rhetorical Mismatch: {input_mode} vs {example_mode} (penalty: {narrative_vs_argumentative}x)")
+                        elif input_mode == "ARGUMENTATIVE" and example_mode == "NARRATIVE":
+                            mode_penalty = argumentative_vs_narrative  # Less severe but still bad
+                            if verbose:
+                                print(f"    Rhetorical Mismatch: {input_mode} vs {example_mode} (penalty: {argumentative_vs_narrative}x)")
+                        else:
+                            # DESCRIPTIVE mismatches are less critical
+                            mode_penalty = descriptive_mismatch
+                            if verbose:
+                                print(f"    Rhetorical Mismatch: {input_mode} vs {example_mode} (penalty: {descriptive_mismatch}x)")
+
+                    # 8. Composite score (apply voice and mode penalties)
                     composite_score = (
                         count_match * count_weight +
                         diversity_score * diversity_weight +
                         positional_fit * positional_weight +
                         freshness_score * freshness_weight
-                    )
+                    ) * voice_penalty * mode_penalty
 
                     # Track best candidate
                     if composite_score > best_score:
@@ -2961,6 +3357,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                         best_match = example
                         rhythm_map = candidate_rhythm_map  # Store rhythm map for best match
                         teacher_example = example  # Store for tracking
+                        selected_template_mode = example_mode  # Store mode for prompt construction
 
                 except Exception as e:
                     # If analysis fails, skip this example
@@ -2973,26 +3370,41 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                 if verbose:
                     print(f"  ⚠ Composite scoring failed for all examples. Falling back to simple length matching.")
 
-                # Fallback: simple sentence count matching (original behavior)
-                best_match = None
+                # Fallback: Find the first candidate that isn't a fragment (safety floor)
+                # Then pick the one closest to target length
+                fallback_choice = None
                 best_diff = float('inf')
 
                 for example in complex_examples:
                     try:
                         example_sentences = sent_tokenize(example)
                         sentence_count = len([s for s in example_sentences if s.strip()])
-                        diff = abs(sentence_count - target_sentences)
 
+                        # Safety floor: must have at least 2 sentences
+                        if sentence_count < 2:
+                            continue
+
+                        diff = abs(sentence_count - target_sentences)
                         if diff < best_diff:
                             best_diff = diff
-                            best_match = example
+                            fallback_choice = example
                     except Exception:
                         continue
+
+                # Emergency safety: If literally everything is 1 sentence, take the longest one
+                if not fallback_choice and complex_examples:
+                    fallback_choice = max(complex_examples, key=len)
+                    if verbose:
+                        print(f"  ⚠ Emergency fallback: All examples are fragments, selecting longest.")
+
+                best_match = fallback_choice
 
                 if best_match:
                     teacher_example = best_match
                     from src.analyzer.structuralizer import extract_paragraph_rhythm
                     rhythm_map = extract_paragraph_rhythm(teacher_example)
+                    # Classify mode for fallback choice
+                    selected_template_mode = self.rhetorical_classifier.classify_mode(teacher_example)
                     if verbose:
                         sentence_count = len(rhythm_map) if rhythm_map else 0
                         print(f"  Selected fallback teacher example with {sentence_count} sentences (target: {target_sentences})")
@@ -3013,6 +3425,11 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                         sentence_count = len(rhythm_map)
                         mismatch = abs(sentence_count - target_sentences)
                         print(f"  Selected teacher example with {sentence_count} sentences (target: {target_sentences})")
+
+                        # Capacity warning: Log if selected template is significantly denser than target
+                        if sentence_count < target_sentences * 0.5:
+                            print(f"  ℹ Note: Selected high-density template ({sentence_count} sentences for {target_sentences} target).")
+
                         if mismatch > 2:
                             print(f"  ⚠ Warning: Large sentence count mismatch ({mismatch} sentences). Quality may be affected.")
                         rhythm_summary = [f"{r['length']} {r['type']}" for r in rhythm_map[:3]]
@@ -3072,6 +3489,75 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         # Step 4: Format and call LLM with PARAGRAPH_FUSION_PROMPT
         propositions_list = "\n".join([f"- {prop}" for prop in propositions])
         style_examples_text = "\n\n".join([f"Example {i+1}: \"{ex}\"" for i, ex in enumerate(complex_examples[:3])])
+
+        # Step 4.5: Build style section dynamically (structural template or raw examples)
+        use_structural_templates = self.paragraph_fusion_config.get("use_structural_templates", False)
+        style_section = ""
+
+        if use_structural_templates and teacher_example:
+            try:
+                if verbose:
+                    print(f"  Bleaching semantic content from teacher example...")
+                structural_template = self.structure_extractor.extract_template(teacher_example)
+                if structural_template and structural_template.strip():
+                    # Build mode override instruction if there's a mismatch
+                    mode_override_instruction = ""
+                    if input_mode and selected_template_mode and input_mode != selected_template_mode:
+                        if input_mode == "NARRATIVE" and selected_template_mode == "ARGUMENTATIVE":
+                            mode_override_instruction = """
+**MODE OVERRIDE:** The Input is a STORY (Narrative), but the Template is an ARGUMENT.
+You MUST ignore the Template's logical connectors (Therefore, Unless, Because, If...then).
+Keep the sentence *complexity* and *length*, but replace logical connectors with time-based transitions (Then, Later, After, When, As).
+Do NOT force a narrative into a conditional structure."""
+                        elif input_mode == "ARGUMENTATIVE" and selected_template_mode == "NARRATIVE":
+                            mode_override_instruction = """
+**MODE OVERRIDE:** The Input is an ARGUMENT (logical proof), but the Template is a STORY.
+You MUST replace time-based transitions (Then, Later, After) with logical connectors (Therefore, Because, Since, It follows that).
+Keep the sentence complexity, but adapt the connectors to match the argumentative structure."""
+
+                    # Build opener instruction
+                    opener_instruction = ""
+                    if is_opener:
+                        opener_instruction = """
+**OPENER RULE:** This is the first paragraph.
+1. Do NOT use 'Then', 'Therefore', 'However', 'Furthermore' at the start.
+2. Start with the Setting or Subject immediately.
+3. If the template starts with a connector, DELETE IT.
+4. Begin directly with the main subject or action."""
+
+                    style_section = f"""### STRUCTURAL BLUEPRINT:
+I have provided a 'Structural Template' below. It contains the **Rhythm** and **Syntax** you must use, but with the content removed (marked as `[NP]`, `[VP]`, etc.).
+
+**Template:** {structural_template}
+
+**Task:** Inject the input propositions into this template structure.
+
+**CRITICAL:** Use the Template's **Sentence Rhythm** (length, complexity), but use the Input's **Logical Flow**.
+* If the template says 'For example' but your input is a sequence of events, CHANGE 'For example' to 'Then' or 'Consequently'.
+* Do NOT force a narrative into a list format.
+* You MUST preserve the specific verbs and nouns from the Input.
+* **Adapt pronouns** to match the Input's voice (e.g., if template has '[NP] will observe', and input is 'I', write 'I observed').
+* You may change pronouns and subject-verb agreement to match the Input's perspective.
+* Replace the `[NP]`/`[VP]` placeholders with the specific details from the input story.
+* Do NOT use the placeholders in the final output."""
+                    if mode_override_instruction:
+                        style_section += mode_override_instruction
+                    if opener_instruction:
+                        style_section += opener_instruction
+                    if verbose:
+                        print(f"  Template: {structural_template[:100]}{'...' if len(structural_template) > 100 else ''}")
+                else:
+                    raise ValueError("Template extraction returned empty string")
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠ Template extraction failed: {e}, falling back to raw text")
+                # Safety fallback: use raw example
+                style_section = f"""### STYLE EXAMPLES:
+Example 1: "{teacher_example}\""""
+        else:
+            # Standard behavior: use style examples
+            style_section = f"""### STYLE EXAMPLES:
+{style_examples_text}"""
 
         # Extract lexicon and format mandatory vocabulary section
         mandatory_vocabulary = ""
@@ -3138,7 +3624,25 @@ These connectors match the author's style and help create flowing, complex sente
         if rhythm_map and len(rhythm_map) > 0:
             blueprint_lines = []
             blueprint_lines.append("### STRUCTURAL BLUEPRINT:")
-            blueprint_lines.append("You must structure your paragraph to match this rhythm exactly. Distribute your Atomic Propositions into this container. Merge or split them as needed to fit the sentence types. Follow this sentence-by-sentence blueprint exactly. If the blueprint asks for a Short Sentence, do not write a long one.")
+
+            # Check if first proposition is a simple declarative fact (not conditional)
+            first_prop_is_declarative = False
+            if propositions and len(propositions) > 0:
+                first_prop = propositions[0].lower().strip()
+                # Simple heuristics: if it doesn't start with "if", "when", "unless", etc., it's likely declarative
+                conditional_markers = ['if ', 'when ', 'unless ', 'provided that', 'in case']
+                first_prop_is_declarative = not any(first_prop.startswith(marker) for marker in conditional_markers)
+
+            # Check if blueprint's first sentence is conditional but proposition is declarative
+            first_spec = rhythm_map[0]
+            blueprint_has_conditional_first = first_spec.get('type') == 'conditional'
+
+            if blueprint_has_conditional_first and first_prop_is_declarative:
+                # Relax blueprint enforcement: allow declarative for first sentence even if blueprint suggests conditional
+                blueprint_lines.append("You must structure your paragraph to match this rhythm. However, if the first Atomic Proposition is a simple declarative fact (not a conditional statement), you may use a declarative sentence for the first sentence even if the blueprint suggests conditional. For subsequent sentences, follow the blueprint more strictly.")
+            else:
+                blueprint_lines.append("You must structure your paragraph to match this rhythm exactly. Distribute your Atomic Propositions into this container. Merge or split them as needed to fit the sentence types. Follow this sentence-by-sentence blueprint exactly. If the blueprint asks for a Short Sentence, do not write a long one.")
+
             blueprint_lines.append("")
             for i, spec in enumerate(rhythm_map):
                 length = spec['length']
@@ -3150,7 +3654,11 @@ These connectors match the author's style and help create flowing, complex sente
                 if sent_type == 'question':
                     desc_parts.append('rhetorical question')
                 elif sent_type == 'conditional':
-                    desc_parts.append('conditional')
+                    # For first sentence, add note if proposition is declarative
+                    if i == 0 and first_prop_is_declarative:
+                        desc_parts.append('conditional (but you may use declarative if the proposition is a simple fact)')
+                    else:
+                        desc_parts.append('conditional')
                 else:
                     desc_parts.append('declarative statement')
 
@@ -3165,11 +3673,30 @@ These connectors match the author's style and help create flowing, complex sente
             # Fallback: no structural blueprint
             structural_blueprint = ""
 
+        # Build global context section if available
+        global_context_section = ""
+        if global_context and global_context.get('thesis'):
+            keywords_text = ', '.join(global_context.get('keywords', [])[:5])
+            global_context_section = f"""
+### BACKGROUND CONTEXT (TONE ONLY):
+Thesis: {global_context['thesis']}
+Intent: {global_context['intent']}
+Keywords: {keywords_text}
+
+**INSTRUCTION:** This context is provided ONLY to help you understand the author's general worldview and tone.
+- **DO NOT** use these keywords in your output unless they explicitly appear in the Input Propositions above.
+- **DO NOT** try to "link" the story to these abstract concepts.
+- **DO NOT** inject phrases from this context (thesis, keywords) into the paragraph.
+- Your ONLY job is to narrate the Input Propositions using the author's syntax and tone.
+- This context is the **Atmosphere**, not the **Script** - use it for tone, not content.
+"""
+
         prompt = PARAGRAPH_FUSION_PROMPT.format(
             propositions_list=propositions_list,
             proposition_count=len(propositions),
-            style_examples=style_examples_text,
+            style_section=style_section,
             mandatory_vocabulary=mandatory_vocabulary,
+            global_context=global_context_section,
             rhetorical_connectors=rhetorical_connectors,
             citation_instruction=citation_instruction,
             citation_output_instruction=citation_output_instruction,
@@ -3197,7 +3724,7 @@ These connectors match the author's style and help create flowing, complex sente
                         user_prompt=prompt,
                         model_type="editor",
                         require_json=True,
-                        temperature=0.7,  # Moderate temperature for style variation
+                        temperature=0.9,  # Higher entropy to prevent identical variations
                         max_tokens=self.translator_config.get("max_tokens", 500),
                         timeout=api_timeout
                     )
@@ -3221,12 +3748,12 @@ These connectors match the author's style and help create flowing, complex sente
             # Gracefully handle LLM generation failure
             if verbose:
                 print(f"  ⚠ LLM generation failed: {e}, returning original paragraph")
-            return paragraph, rhythm_map, teacher_example  # Fallback to original
+            return paragraph, rhythm_map, teacher_example, 0.0  # Fallback to original
 
         if response is None:
             if verbose:
                 print(f"  ⚠ No response from LLM, returning original paragraph")
-            return paragraph, rhythm_map, teacher_example  # Fallback to original
+            return paragraph, rhythm_map, teacher_example, 0.0  # Fallback to original
 
         try:
 
@@ -3235,10 +3762,56 @@ These connectors match the author's style and help create flowing, complex sente
             num_variations = self.paragraph_fusion_config.get("num_variations", 5)
             variations = variations[:num_variations]
 
+            # NEW: Log what we actually received
+            if verbose:
+                print(f"  Parsed {len(variations)} variations from LLM response:")
+                for i, v in enumerate(variations):
+                    preview = v.strip()[:80] if v else "(empty)"
+                    print(f"    Candidate {i+1} preview: {preview}...")
+
+            # NEW: Log diversity check before deduplication
+            if verbose and len(variations) > 1:
+                # Check if variations are identical (normalized comparison)
+                normalized_variations = [" ".join(v.split()).lower() for v in variations if v]
+                unique_normalized = len(set(normalized_variations))
+                if unique_normalized == 1:
+                    print(f"  ⚠ WARNING: All {len(variations)} variations are identical (mode collapse detected)")
+                elif unique_normalized < len(variations):
+                    print(f"  ⚠ WARNING: Only {unique_normalized}/{len(variations)} variations are unique")
+                else:
+                    print(f"  ✓ All {len(variations)} variations are unique before deduplication")
+
+            # NEW: Deduplicate variations to save compute
+            unique_variations = []
+            seen_hashes = set()
+
+            for v in variations:
+                if not v or not v.strip():
+                    continue  # Skip empty variations
+
+                # Normalize for comparison (ignore whitespace/case differences)
+                v_clean = " ".join(v.split()).lower()
+                v_hash = hash(v_clean)
+
+                if v_hash not in seen_hashes:
+                    seen_hashes.add(v_hash)
+                    unique_variations.append(v)
+                elif verbose:
+                    print(f"    ⚠ Skipped duplicate variation (hash: {v_hash})")
+
+            # Update the list
+            variations = unique_variations
+
+            # Safety fallback: if deduplication removed everything, use raw response
+            if not variations:
+                if verbose:
+                    print(f"  ⚠ All variations were duplicates or empty. Using raw response as single variation.")
+                variations = [response.strip()] if response else []
+
             if not variations:
                 if verbose:
                     print(f"  ⚠ No variations generated, using fallback")
-                return paragraph, rhythm_map, teacher_example  # Fallback to original
+                return paragraph, rhythm_map, teacher_example, 0.0  # Fallback to original
 
             # Step 5: Evaluate all variations and select best using tiered selection logic
             if verbose:
@@ -3300,7 +3873,8 @@ These connectors match the author's style and help create flowing, complex sente
                     propositions=propositions,
                     is_paragraph=True,
                     author_style_vector=author_style_vector,
-                    style_lexicon=style_lexicon
+                    style_lexicon=style_lexicon,
+                    verbose=verbose
                 )
 
                 evaluated_candidates.append({
@@ -3311,7 +3885,8 @@ These connectors match the author's style and help create flowing, complex sente
                     "result": critic_result,
                     "missing_citations": missing_citations,
                     "missing_quotes": missing_quotes,
-                    "needs_artifact_repair": needs_artifact_repair
+                    "needs_artifact_repair": needs_artifact_repair,
+                    "index": i + 1  # Track original variation number (1-based)
                 })
 
                 if verbose:
@@ -3351,7 +3926,8 @@ These connectors match the author's style and help create flowing, complex sente
                             print(f"  ✓ Repaired missing citations/quotes")
 
                 if verbose:
-                    print(f"  ✓ Selected qualified candidate: recall={best_candidate['recall']:.2f}, "
+                    candidate_num = best_candidate.get("index", "?")
+                    print(f"  ✓ Selected qualified candidate #{candidate_num}: recall={best_candidate['recall']:.2f}, "
                           f"score={best_candidate['score']:.2f}")
 
                 # Remove phantom citations before returning
@@ -3362,13 +3938,16 @@ These connectors match the author's style and help create flowing, complex sente
                 blueprint = extractor.extract(paragraph)
                 final_text = self._restore_citations_and_quotes(final_text, blueprint)
 
-                return final_text, rhythm_map, teacher_example
+                # Return with internal_recall from best candidate
+                internal_recall = best_candidate.get("recall", 0.0)
+                return final_text, rhythm_map, teacher_example, internal_recall
             else:
                 # 3. Fallback: No qualified candidates, pick highest recall (salvage meaning)
                 best_candidate = max(evaluated_candidates, key=lambda x: x["recall"])
                 if verbose:
+                    candidate_num = best_candidate.get("index", "?")
                     print(f"  ⚠ No qualified candidates (recall >= {proposition_recall_threshold}), "
-                          f"using best recall: {best_candidate['recall']:.2f}")
+                          f"using best recall from candidate #{candidate_num}: {best_candidate['recall']:.2f}")
 
                 # Task 3: "Delta" Repair Loop - if recall < threshold, attempt repair
                 repair_threshold = 0.7
@@ -3450,6 +4029,7 @@ For each missing proposition above, you must include its KEY WORDS explicitly. F
 - If the proposition is "The core message is an admission", you MUST include the words "core", "message", and "admission" in close proximity.
 - Do NOT paraphrase too heavily - the semantic similarity detector needs to see the actual content words.
 - You can embed them in complex sentences like: "At its heart, this admission's core message reveals that..." or "The fundamental essence of this recognition is an admission that..."
+- **CRITICAL**: If a proposition is a simple declarative fact (e.g., "I was thirteen", "The door opened"), do NOT convert it into a conditional statement (e.g., "If I was thirteen..."). Use declarative statements for declarative facts.
 
 **Style Constraint:** Maintain the complex sentence structure and vocabulary you used before. Do not simplify the text just to add the facts.{style_preservation}
 
@@ -3591,7 +4171,9 @@ Generate 3 new variations that include ALL facts from the checklist. Output as a
                                 blueprint = extractor.extract(paragraph)
                                 final_text = self._restore_citations_and_quotes(final_text, blueprint)
 
-                                return final_text, rhythm_map, teacher_example
+                                # Return with internal_recall from best repair candidate
+                                internal_recall = best_after_repair.get("recall", 0.0)
+                                return final_text, rhythm_map, teacher_example, internal_recall
                             else:
                                 # Still no qualified, but pick best from all (including repairs)
                                 best_after_repair = max(evaluated_candidates, key=lambda x: x["recall"])
@@ -3646,7 +4228,9 @@ Generate 3 new variations that include ALL facts from the checklist. Output as a
                 # Return best candidate (either original or after repair attempts)
                 if verbose and current_best["recall"] < proposition_recall_threshold:
                     print(f"  ⚠ Final recall {current_best['recall']:.2f} below threshold {proposition_recall_threshold:.2f}, returning best available")
-                return final_text, rhythm_map, teacher_example
+                # Return with internal_recall from current_best (best available after repair loop)
+                internal_recall = current_best.get("recall", 0.0)
+                return final_text, rhythm_map, teacher_example, internal_recall
 
         except Exception as e:
             error_str = str(e)
@@ -3657,7 +4241,7 @@ Generate 3 new variations that include ALL facts from the checklist. Output as a
                     print(f"  ✗ Paragraph fusion failed: Network timeout after {max_retries} retry attempts. Using fallback.")
                 else:
                     print(f"  ✗ Paragraph fusion failed: {error_str[:200]}, using fallback")
-            return paragraph, None, None  # Fallback to original
+            return paragraph, None, None, 0.0  # Fallback to original
 
     def _repair_missing_artifacts(
         self,
