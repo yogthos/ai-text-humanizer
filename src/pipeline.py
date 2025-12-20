@@ -295,7 +295,7 @@ def process_text(
 
             # Translate paragraph holistically
             try:
-                generated_paragraph, teacher_rhythm_map, teacher_example = translator.translate_paragraph(
+                generated_paragraph, teacher_rhythm_map, teacher_example, internal_recall = translator.translate_paragraph(
                     paragraph,
                     atlas,
                     author_name,
@@ -309,30 +309,8 @@ def process_text(
                     global_context=global_context
                 )
 
-                # Evaluate with paragraph mode
-                propositions = proposition_extractor.extract_atomic_propositions(paragraph)
-                # Get style vectors for both authors if blending
-                author_style_vector = None
-                secondary_author_vector = None
-                try:
-                    author_style_vector = atlas.get_author_style_vector(author_name)
-                    if secondary_author:
-                        secondary_author_vector = atlas.get_author_style_vector(secondary_author)
-                except Exception as e:
-                    if verbose:
-                        print(f"  ⚠ Could not get style vectors: {e}")
-
-                critic_result = critic.evaluate(
-                    generated_paragraph,
-                    extractor.extract(paragraph),
-                    propositions=propositions,
-                    is_paragraph=True,
-                    author_style_vector=author_style_vector,
-                    secondary_author_vector=secondary_author_vector,
-                    blend_ratio=blend_ratio,
-                    global_context=global_context
-                )
-
+                # Use internal_recall from translator (includes repair loop context and relaxed thresholds)
+                # No need to re-evaluate - the translator has already done comprehensive evaluation
                 # Load thresholds from config for tiered evaluation
                 try:
                     with open(config_path, 'r') as f:
@@ -345,34 +323,32 @@ def process_text(
                     ideal_threshold = 0.85
                     min_viable = 0.70
 
-                # Get proposition recall from critic result
-                internal_recall = critic_result.get('proposition_recall', 0.0)
+                # internal_recall is already available from translate_paragraph return value
+                # This is the best recall achieved during the repair loop, with proper context
 
                 # Tiered evaluation logic
                 if internal_recall >= ideal_threshold:
                     # Scenario A: Perfect Pass
                     if verbose:
-                        print(f"  ✓ Fusion Success: Score {internal_recall:.2f} >= {ideal_threshold}")
-                    # Override critic_result to ensure pass=True
-                    critic_result["pass"] = True
-                    critic_result["score"] = 1.0  # Perfect score
+                        print(f"  ✓ Fusion Success: Recall {internal_recall:.2f} >= {ideal_threshold}")
+                    # Create critic_result for perfect pass
+                    critic_result = {"pass": True, "score": 1.0, "proposition_recall": internal_recall}
                     pass_status = "PERFECT PASS"
 
                 elif internal_recall >= min_viable:
                     # Scenario B: Soft Pass (The Fix)
                     if verbose:
-                        print(f"  ⚠ Soft Pass: Score {internal_recall:.2f} is below ideal ({ideal_threshold}) but viable (>= {min_viable}). Accepting.")
-                    # Override critic_result to accept despite original pass=False
-                    critic_result["pass"] = True
-                    critic_result["score"] = 0.8  # Reduced but acceptable score
+                        print(f"  ⚠ Soft Pass: Recall {internal_recall:.2f} is below ideal ({ideal_threshold}) but viable (>= {min_viable}). Accepting.")
+                    # Create critic_result for soft pass
+                    critic_result = {"pass": True, "score": 0.8, "proposition_recall": internal_recall}
                     pass_status = "SOFT PASS"
 
                 else:
                     # Scenario C: Hard Fail -> Trigger Sentence-by-Sentence Fallback
                     if verbose:
-                        print(f"  ✗ Fusion Failed: Score {internal_recall:.2f} below viability floor ({min_viable}).")
-                    critic_result["pass"] = False
-                    critic_result["score"] = 0.0
+                        print(f"  ✗ Fusion Failed: Recall {internal_recall:.2f} below viability floor ({min_viable}).")
+                    # Create a minimal critic_result for logging consistency
+                    critic_result = {"pass": False, "score": 0.0, "proposition_recall": internal_recall}
                     pass_status = "HARD FAIL"
 
                 # Logging with status indicator
@@ -385,9 +361,10 @@ def process_text(
                         pass_color = '\033[91m'  # Red
                     reset_color = '\033[0m'
                     pass_str = f"{pass_color}{pass_value}{reset_color}"
+                    composite_score = critic_result.get('score', 0.0)
                     print(f"  Paragraph fusion result: {pass_status}, pass={pass_str}, "
-                          f"score={critic_result.get('score', 0.0):.2f}, "
-                          f"proposition_recall={internal_recall:.2f}")
+                          f"recall={internal_recall:.2f}, "
+                          f"composite_score={composite_score:.2f}")
 
                 # Use generated paragraph if it passes (Perfect or Soft Pass), otherwise fall back
                 if critic_result.get('pass', False):

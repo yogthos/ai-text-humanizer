@@ -133,6 +133,107 @@ def test_dynamic_expansion_thresholds():
     print("✓ test_dynamic_expansion_thresholds passed")
 
 
+def test_adaptive_length_filter_short_sentences():
+    """Test that adaptive length filter allows expansion for short sentences (< 5 words)."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_adaptive_length_filter_short_sentences (missing dependencies)")
+        return
+    from src.generator.translator import StyleTranslator
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test with very short input (3 words) - should use adaptive filter
+    short_blueprint = SemanticBlueprint(
+        original_text="I was thirteen",
+        svo_triples=[("I", "was", "thirteen")],
+        named_entities=[],
+        core_keywords={"I", "was", "thirteen"},
+        citations=[],
+        quotes=[]
+    )
+
+    input_len = len(short_blueprint.original_text.split())
+    assert input_len == 3, f"Expected 3 words, got {input_len}"
+
+    # For 3-word input, adaptive filter should be:
+    # min_len = 5
+    # max_len = max(15, 5.0 * 3) = max(15, 15) = 15
+    expected_min = 5
+    expected_max = max(15, int(5.0 * input_len))
+
+    # Create examples with various lengths
+    examples = [
+        "Short.",  # 1 word - should be filtered (too short)
+        "This is short.",  # 3 words - should be filtered (too short, < min_len)
+        "This is a valid example sentence.",  # 6 words - should pass (5 <= 6 <= 15)
+        "This is a longer valid example sentence with more words.",  # 10 words - should pass
+        "This is a very long example sentence that contains many words and should be filtered out because it exceeds the maximum length allowed by the adaptive filter.",  # 20 words - should be filtered (too long)
+        "Another valid example here.",  # 4 words - should be filtered (too short, < min_len)
+        "This example has exactly fifteen words total count here now.",  # 15 words - should pass (at max)
+    ]
+
+    # Mock the structuralizer to avoid actual skeleton extraction
+    # We just want to test the length filtering
+    original_extract = translator.structuralizer.extract_skeleton
+    translator.structuralizer.extract_skeleton = Mock(return_value="[NP] [VP] [NP]")
+    translator.structuralizer.count_skeleton_slots = Mock(return_value=3)
+
+    try:
+        # Call _extract_multiple_skeletons which applies the length filter
+        result = translator._extract_multiple_skeletons(
+            examples=examples,
+            blueprint=short_blueprint,
+            verbose=False
+        )
+
+        # Check that examples within range (5-15 words) passed
+        # The result contains (skeleton, source_example) tuples
+        passed_examples = [example for _, example in result]
+
+        # Count word lengths for passed examples
+        passed_lengths = [len(example.split()) for example in passed_examples]
+
+        # Examples that should pass length filter: 6, 10, and 15 word examples
+        # (Note: skeleton extraction or complexity filtering might remove some)
+        expected_passing_lengths = [6, 10, 15]
+
+        # Examples that should be filtered by length: 1, 3, 4, 20 word examples
+        expected_filtered_lengths = [1, 3, 4, 20]
+
+        # Verify that examples in the expected passing range (5-15 words) are present
+        # We expect at least some examples in the 5-15 word range to pass
+        examples_in_range = [l for l in passed_lengths if expected_min <= l <= expected_max]
+        assert len(examples_in_range) > 0, \
+            f"No examples in range {expected_min}-{expected_max} words passed. " \
+            f"Passed examples lengths: {passed_lengths}"
+
+        # Verify that examples outside the range (too short or too long) were filtered
+        examples_outside_range = [l for l in passed_lengths if l < expected_min or l > expected_max]
+        assert len(examples_outside_range) == 0, \
+            f"Examples outside range {expected_min}-{expected_max} words should be filtered. " \
+            f"Found: {examples_outside_range}"
+
+        # Verify specific examples that should definitely pass length filter
+        # (6-word example should pass if skeleton extraction works)
+        six_word_example = "This is a valid example sentence."
+        six_word_passed = any(six_word_example in example for example in passed_examples)
+
+        # Verify examples that should definitely be filtered
+        one_word_example = "Short."
+        one_word_passed = any(one_word_example in example for example in passed_examples)
+        assert not one_word_passed, \
+            f"1-word example '{one_word_example}' should be filtered (too short, < {expected_min} words)"
+
+        print(f"✓ test_adaptive_length_filter_short_sentences passed")
+        print(f"  Input: {input_len} words, Filter range: {expected_min}-{expected_max} words")
+        print(f"  Examples passed: {len(passed_examples)}/{len(examples)}")
+        print(f"  Passed example lengths: {passed_lengths}")
+
+    finally:
+        # Restore original method
+        translator.structuralizer.extract_skeleton = original_extract
+
+
 def test_rescue_logic():
     """Test that high-adherence/low-semantic candidates are marked for repair."""
     if not DEPENDENCIES_AVAILABLE:
@@ -1298,6 +1399,280 @@ def test_full_translation_with_judge():
     print("✓ test_full_translation_with_judge passed")
 
 
+def test_detect_sentence_type_question():
+    """Test _detect_sentence_type correctly identifies questions."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_detect_sentence_type_question (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test explicit question mark
+    assert translator._detect_sentence_type("Where did the morning require?") == "QUESTION"
+    assert translator._detect_sentence_type("What is this?") == "QUESTION"
+
+    # Test question words at start
+    assert translator._detect_sentence_type("where did the morning require") == "QUESTION"
+    assert translator._detect_sentence_type("what is this") == "QUESTION"
+    assert translator._detect_sentence_type("who are you") == "QUESTION"
+    assert translator._detect_sentence_type("when did it happen") == "QUESTION"
+    assert translator._detect_sentence_type("why is this") == "QUESTION"
+    assert translator._detect_sentence_type("how does it work") == "QUESTION"
+
+    # Test that question words in middle don't trigger
+    assert translator._detect_sentence_type("I know where it is") == "DECLARATIVE"
+    assert translator._detect_sentence_type("Tell me what happened") == "DECLARATIVE"
+
+    print("✓ test_detect_sentence_type_question passed")
+
+
+def test_detect_sentence_type_conditional():
+    """Test _detect_sentence_type correctly identifies conditionals."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_detect_sentence_type_conditional (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test conditional markers at start
+    assert translator._detect_sentence_type("if this happens, then that") == "CONDITIONAL"
+    assert translator._detect_sentence_type("when it rains, we stay inside") == "CONDITIONAL"
+    assert translator._detect_sentence_type("unless you agree, we cannot proceed") == "CONDITIONAL"
+    assert translator._detect_sentence_type("provided that you agree, we can proceed") == "CONDITIONAL"
+    assert translator._detect_sentence_type("should you agree, we proceed") == "CONDITIONAL"
+
+    # Test that conditional words in middle don't trigger
+    assert translator._detect_sentence_type("I know if it happens") == "DECLARATIVE"
+    assert translator._detect_sentence_type("Tell me when it happens") == "DECLARATIVE"
+
+    print("✓ test_detect_sentence_type_conditional passed")
+
+
+def test_detect_sentence_type_declarative():
+    """Test _detect_sentence_type correctly identifies declarative sentences."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_detect_sentence_type_declarative (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test standard declarative
+    assert translator._detect_sentence_type("Every morning required a pilgrimage") == "DECLARATIVE"
+    assert translator._detect_sentence_type("The cat sat on the mat") == "DECLARATIVE"
+    assert translator._detect_sentence_type("I went to the store") == "DECLARATIVE"
+
+    # Test with question words in middle (should still be declarative)
+    assert translator._detect_sentence_type("I know where it is") == "DECLARATIVE"
+    assert translator._detect_sentence_type("Tell me what happened") == "DECLARATIVE"
+
+    # Test with conditional words in middle (should still be declarative)
+    assert translator._detect_sentence_type("I know if it happens") == "DECLARATIVE"
+
+    print("✓ test_detect_sentence_type_declarative passed")
+
+
+def test_type_compatibility_filter_blocks_question_for_declarative():
+    """Test that type filter blocks question skeletons for declarative inputs."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_type_compatibility_filter_blocks_question_for_declarative (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Create declarative blueprint
+    declarative_blueprint = SemanticBlueprint(
+        original_text="Every morning required a pilgrimage to the general store with grandmother.",
+        svo_triples=[("morning", "required", "pilgrimage")],
+        named_entities=[],
+        core_keywords={"morning", "required", "pilgrimage", "store", "grandmother"},
+        citations=[],
+        quotes=[]
+    )
+
+    # Create examples: mix of question and declarative skeletons
+    examples = [
+        "Where did the morning require a pilgrimage?",  # Question - should be filtered
+        "Every morning, we made a pilgrimage to the store.",  # Declarative - should pass
+        "What did the morning require?",  # Question - should be filtered
+        "Each morning brought a necessary journey to the general store.",  # Declarative - should pass
+    ]
+
+    # Mock structuralizer to return skeletons matching the examples
+    def mock_extract_skeleton(example, input_text=None):
+        if "?" in example or example.lower().startswith(("where", "what")):
+            return "Where [VP] [NP] [VP] [NP]?"
+        else:
+            return "[ADJ] [NP], [NP] [VP] [NP] [PP] [NP]."
+
+    translator.structuralizer.extract_skeleton = Mock(side_effect=mock_extract_skeleton)
+    translator.structuralizer.count_skeleton_slots = Mock(return_value=5)
+
+    # Extract skeletons
+    result = translator._extract_multiple_skeletons(
+        examples=examples,
+        blueprint=declarative_blueprint,
+        verbose=False
+    )
+
+    # Should only have declarative skeletons (2 out of 4 examples)
+    assert len(result) <= 2, f"Expected at most 2 declarative skeletons, got {len(result)}"
+
+    # Verify all returned skeletons are declarative (no question marks)
+    for skeleton, _ in result:
+        assert "?" not in skeleton, f"Found question skeleton in results: {skeleton}"
+        assert not skeleton.lower().startswith(("where", "what", "who", "when", "why", "how")), \
+            f"Found question skeleton in results: {skeleton}"
+
+    print("✓ test_type_compatibility_filter_blocks_question_for_declarative passed")
+
+
+def test_type_compatibility_filter_allows_conditional_for_declarative():
+    """Test that type filter allows conditional skeletons for declarative inputs (style expansion)."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_type_compatibility_filter_allows_conditional_for_declarative (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Create declarative blueprint
+    declarative_blueprint = SemanticBlueprint(
+        original_text="Every morning required a pilgrimage.",
+        svo_triples=[("morning", "required", "pilgrimage")],
+        named_entities=[],
+        core_keywords={"morning", "required", "pilgrimage"},
+        citations=[],
+        quotes=[]
+    )
+
+    # Create examples: mix of conditional and declarative
+    examples = [
+        "If morning comes, we make a pilgrimage.",  # Conditional - should pass
+        "Every morning, we made a pilgrimage.",  # Declarative - should pass
+        "When morning arrives, the pilgrimage begins.",  # Conditional - should pass
+    ]
+
+    # Mock structuralizer
+    def mock_extract_skeleton(example, input_text=None):
+        if example.lower().startswith(("if", "when")):
+            return "If [NP] [VP], [NP] [VP] [NP]."
+        else:
+            return "[ADJ] [NP], [NP] [VP] [NP]."
+
+    translator.structuralizer.extract_skeleton = Mock(side_effect=mock_extract_skeleton)
+    translator.structuralizer.count_skeleton_slots = Mock(return_value=5)
+
+    # Extract skeletons
+    result = translator._extract_multiple_skeletons(
+        examples=examples,
+        blueprint=declarative_blueprint,
+        verbose=False
+    )
+
+    # Should have both conditional and declarative skeletons (all 3 should pass)
+    assert len(result) >= 2, f"Expected at least 2 skeletons (conditional + declarative), got {len(result)}"
+
+    print("✓ test_type_compatibility_filter_allows_conditional_for_declarative passed")
+
+
+def test_type_compatibility_filter_allows_exact_match():
+    """Test that type filter allows exact type matches."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_type_compatibility_filter_allows_exact_match (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Test question -> question
+    question_blueprint = SemanticBlueprint(
+        original_text="Where did the morning require a pilgrimage?",
+        svo_triples=[("morning", "required", "pilgrimage")],
+        named_entities=[],
+        core_keywords={"morning", "required", "pilgrimage"},
+        citations=[],
+        quotes=[]
+    )
+
+    question_examples = [
+        "Where did the flame come from?",
+        "What did the ancestors know?",
+    ]
+
+    def mock_extract_skeleton(example, input_text=None):
+        return "Where [VP] [NP] [VP] [NP]?"
+
+    translator.structuralizer.extract_skeleton = Mock(side_effect=mock_extract_skeleton)
+    translator.structuralizer.count_skeleton_slots = Mock(return_value=5)
+
+    result = translator._extract_multiple_skeletons(
+        examples=question_examples,
+        blueprint=question_blueprint,
+        verbose=False
+    )
+
+    # Should allow question skeletons for question input
+    assert len(result) >= 1, "Expected question skeletons to pass for question input"
+
+    print("✓ test_type_compatibility_filter_allows_exact_match passed")
+
+
+def test_adherence_penalizes_type_mismatch():
+    """Test that _calculate_skeleton_adherence returns low score for type mismatches."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_adherence_penalizes_type_mismatch (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Question skeleton with declarative candidate (should be penalized)
+    question_skeleton = "Where [VP] [NP] [VP] [NP]?"
+    declarative_candidate = "Every morning required a pilgrimage to the store."
+
+    adherence = translator._calculate_skeleton_adherence(declarative_candidate, question_skeleton)
+
+    # Should return low score (0.3) for type mismatch
+    assert adherence == 0.3, f"Expected 0.3 for type mismatch, got {adherence}"
+
+    # Declarative skeleton with question candidate (should be penalized)
+    declarative_skeleton = "[ADJ] [NP] [VP] [NP] [PP] [NP]."
+    question_candidate = "Where did the morning require a pilgrimage?"
+
+    adherence = translator._calculate_skeleton_adherence(question_candidate, declarative_skeleton)
+
+    # Should return low score (0.3) for type mismatch
+    assert adherence == 0.3, f"Expected 0.3 for type mismatch, got {adherence}"
+
+    print("✓ test_adherence_penalizes_type_mismatch passed")
+
+
+def test_adherence_allows_type_match():
+    """Test that _calculate_skeleton_adherence works normally for type matches."""
+    if not DEPENDENCIES_AVAILABLE:
+        print("⚠ SKIPPED: test_adherence_allows_type_match (missing dependencies)")
+        return
+
+    translator = StyleTranslator(config_path="config.json")
+
+    # Declarative skeleton with declarative candidate (should work normally)
+    declarative_skeleton = "[ADJ] [NP] [VP] [NP] [PP] [NP]."
+    declarative_candidate = "Every morning required a pilgrimage to the general store with grandmother."
+
+    adherence = translator._calculate_skeleton_adherence(declarative_candidate, declarative_skeleton)
+
+    # Should return a score > 0.3 (not the type mismatch penalty)
+    assert adherence > 0.3, f"Expected score > 0.3 for type match, got {adherence}"
+
+    # Question skeleton with question candidate (should work normally)
+    question_skeleton = "Where [VP] [NP] [VP] [NP]?"
+    question_candidate = "Where did the morning require a pilgrimage?"
+
+    adherence = translator._calculate_skeleton_adherence(question_candidate, question_skeleton)
+
+    # Should return a score > 0.3 (not the type mismatch penalty)
+    assert adherence > 0.3, f"Expected score > 0.3 for type match, got {adherence}"
+
+    print("✓ test_adherence_allows_type_match passed")
+
+
 if __name__ == "__main__":
     if not DEPENDENCIES_AVAILABLE:
         print(f"⚠ All tests skipped due to missing dependencies: {IMPORT_ERROR}")
@@ -1332,8 +1707,18 @@ if __name__ == "__main__":
     test_full_translation_with_judge()
     # New tests for expansion, rescue, and concept mapping
     test_dynamic_expansion_thresholds()
+    test_adaptive_length_filter_short_sentences()
     test_rescue_logic()
     test_explicit_concept_mapping()
     test_check_acceptance_without_fluency()
+    # Type compatibility filter tests
+    test_detect_sentence_type_question()
+    test_detect_sentence_type_conditional()
+    test_detect_sentence_type_declarative()
+    test_type_compatibility_filter_blocks_question_for_declarative()
+    test_type_compatibility_filter_allows_conditional_for_declarative()
+    test_type_compatibility_filter_allows_exact_match()
+    test_adherence_penalizes_type_mismatch()
+    test_adherence_allows_type_match()
     print("\n✓ All translator tests completed!")
 

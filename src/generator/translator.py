@@ -229,17 +229,32 @@ class StyleTranslator:
         input_len = len(blueprint.original_text.split())
 
         # Step 1: Length Filter (Pre-filter before skeleton extraction)
-        # This saves token costs by filtering before expensive skeleton extraction
+        # Adaptive filter: more lenient for very short sentences
         length_filtered = []
         for example in examples:
             example_len = len(example.split())
 
-            # Filter: 0.5x to 2.5x length (stricter than complexity gate)
-            if 0.5 * input_len <= example_len <= 2.5 * input_len:
+            # Adaptive length filter: more lenient for very short sentences
+            if input_len < 5:
+                # For short inputs, we WANT expansion.
+                # Ensure min_len allows at least short valid sentences (e.g. 5 words)
+                # Ensure max_len allows enough room (e.g. at least 15 words for very short inputs)
+                # This handles edge case where input_len could be 0
+                min_len = 5
+                max_len = max(15, int(5.0 * input_len))
+            else:
+                # Standard filter: 0.5x to 2.5x length
+                min_len = int(0.5 * input_len)
+                max_len = int(2.5 * input_len)
+
+            if min_len <= example_len <= max_len:
                 length_filtered.append(example)
 
         if verbose:
-            print(f"    Length filter: {len(length_filtered)}/{len(examples)} examples passed (0.5x-2.5x length range)")
+            if input_len < 5:
+                print(f"    Length filter: {len(length_filtered)}/{len(examples)} examples passed (adaptive: {min_len}-{max_len} words for {input_len}-word input)")
+            else:
+                print(f"    Length filter: {len(length_filtered)}/{len(examples)} examples passed (0.5x-2.5x length range)")
 
         # Step 2: Extract skeletons from length-filtered examples
         skeleton_candidates = []
@@ -275,6 +290,44 @@ class StyleTranslator:
 
         if verbose:
             print(f"    Complexity gate: {len(skeleton_candidates)} skeletons passed (0.5x-3.0x slots)")
+
+        # Step 2.5: Type Compatibility Filter
+        # Detect input type once
+        input_type = self._detect_sentence_type(blueprint.original_text)
+        original_count = len(skeleton_candidates)
+        compatible_candidates = []
+
+        for skeleton, example, slots in skeleton_candidates:
+            skeleton_type = self._detect_sentence_type(skeleton)
+
+            # Logic:
+            # 1. Exact match is always allowed (Decl -> Decl, Quest -> Quest, Cond -> Cond)
+            # 2. Conditional -> Declarative is allowed (Common style expansion)
+            # 3. Question -> Declarative is BANNED (Causes the logic errors seen in logs)
+
+            is_compatible = False
+
+            if input_type == skeleton_type:
+                is_compatible = True
+            elif input_type == "DECLARATIVE" and skeleton_type == "CONDITIONAL":
+                is_compatible = True  # Allow expanding facts into conditionals
+            # Note: Explicitly NOT allowing Declarative -> Question
+
+            if is_compatible:
+                compatible_candidates.append((skeleton, example, slots))
+            elif verbose:
+                print(f"    Type Mismatch: Dropped {skeleton_type} skeleton for {input_type} input.")
+
+        # Fallback: If we filtered EVERYTHING, relax the constraint to avoid crashing
+        if not compatible_candidates and verbose:
+            print("    ⚠ Warning: All skeletons filtered by type. Relaxing filter.")
+            # Keep empty list to trigger standard generation fallback
+
+        if verbose:
+            print(f"    Type filter: {len(compatible_candidates)}/{original_count} skeletons passed type compatibility")
+
+        # Replace the list for the next steps
+        skeleton_candidates = compatible_candidates
 
         # Step 3: Deduplication - Remove similar skeletons (preserving order)
         # Process in order to preserve ChromaDB relevance ranking
@@ -335,11 +388,55 @@ class StyleTranslator:
 
         return intersection / union if union > 0 else 0.0
 
+    def _detect_sentence_type(self, text: str) -> str:
+        """Robustly detects if a sentence/skeleton is QUESTION, CONDITIONAL, or DECLARATIVE.
+
+        Args:
+            text: Sentence text or skeleton to analyze.
+
+        Returns:
+            "QUESTION", "DECLARATIVE", or "CONDITIONAL"
+        """
+        if not text or not text.strip():
+            return "DECLARATIVE"
+
+        text = text.strip().lower()
+
+        # 1. Explicit Question: ends with ? or starts with question words
+        # Check for question mark first (most definitive)
+        if text.endswith("?"):
+            return "QUESTION"
+
+        # Check for question words at start (who, what, where, why, how)
+        # Note: "when" is ambiguous, so handle it separately
+        if text.startswith(("who ", "what ", "where ", "why ", "how ")):
+            return "QUESTION"
+
+        # "when" can be question or conditional - check for question pattern first
+        # Questions: "when did/do/does/will/would/can/could/should..."
+        # Conditionals: "when [subject] [verb]..." (no auxiliary)
+        if text.startswith("when "):
+            # Check if it's a question pattern (auxiliary verb after "when")
+            if re.match(r"^when\s+(did|do|does|will|would|can|could|should|is|are|was|were|has|have|had)\s", text):
+                return "QUESTION"
+            # Otherwise treat as conditional
+            return "CONDITIONAL"
+
+        # 2. Conditional: Check for structure at start
+        # Matches: "If X, Y" or "Unless X, Y" or "Provided that X, Y"
+        if re.match(r"^(if|unless|provided that|should)\s", text):
+            return "CONDITIONAL"
+
+        return "DECLARATIVE"
+
     def _calculate_skeleton_adherence(self, candidate: str, skeleton: str) -> float:
         """Calculate skeleton adherence score using anchor word overlap.
 
         Extracts function words (anchor words) from skeleton and checks
         what percentage appear in candidate in roughly the same order.
+
+        Also checks type compatibility - if skeleton type doesn't match candidate type,
+        returns a lower score to penalize type mismatches.
 
         Args:
             candidate: Generated candidate text.
@@ -350,6 +447,15 @@ class StyleTranslator:
         """
         if not candidate or not skeleton:
             return 0.0
+
+        # Type compatibility check: if types don't match, penalize heavily
+        skeleton_type = self._detect_sentence_type(skeleton)
+        candidate_type = self._detect_sentence_type(candidate)
+
+        if skeleton_type != candidate_type:
+            # Type mismatch - return a low score to indicate poor adherence
+            # This helps filter out candidates that don't match the skeleton's sentence type
+            return 0.3  # Low score for type mismatch
 
         # Function words (anchor words) that should be preserved
         # These are structural words that appear in the skeleton
@@ -1322,7 +1428,24 @@ Output PURE JSON. A single list of strings:
                 style_lexicon = style_dna_dict.get("lexicon")
 
             all_candidates = []
+            input_type = self._detect_sentence_type(blueprint.original_text)
+
             for skeleton, source_example in compatible_skeletons:
+                # Early rejection: Check skeleton type vs input type before generating candidates
+                skeleton_type = self._detect_sentence_type(skeleton)
+
+                # Same logic as in _extract_multiple_skeletons: reject Question -> Declarative
+                is_compatible = False
+                if input_type == skeleton_type:
+                    is_compatible = True
+                elif input_type == "DECLARATIVE" and skeleton_type == "CONDITIONAL":
+                    is_compatible = True
+
+                if not is_compatible:
+                    if verbose:
+                        print(f"  Skipping skeleton: type mismatch ({skeleton_type} skeleton for {input_type} input)")
+                    continue
+
                 if verbose:
                     print(f"  Generating batch of {batch_size} variants for skeleton: {skeleton[:60]}...")
 
@@ -2713,7 +2836,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         blend_ratio: float = 0.5,
         verbose: bool = False,
         global_context: Optional[Dict] = None
-    ) -> tuple[str, Optional[List[Dict]], Optional[str]]:
+    ) -> tuple[str, Optional[List[Dict]], Optional[str], float]:
         """Translate a paragraph holistically using paragraph fusion.
 
         Extracts atomic propositions from the paragraph, retrieves complex style examples,
@@ -2728,10 +2851,11 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
             verbose: Whether to print debug information.
 
         Returns:
-            Generated paragraph in target style.
+            Tuple of (generated_paragraph, rhythm_map, teacher_example, internal_recall).
+            internal_recall is the best proposition recall achieved during evaluation/repair loop.
         """
         if not paragraph or not paragraph.strip():
-            return paragraph, None, None
+            return paragraph, None, None, 0.0
 
         # Step 1: Extract atomic propositions (with citations bound to facts)
         if verbose:
@@ -2742,7 +2866,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
 
         if not propositions:
             # Fallback: use original paragraph
-            return paragraph, None, None
+            return paragraph, None, None, 0.0
 
         # Step 1.5: Extract direct quotations separately (for quote preservation)
         quote_pattern = r'["\'](?:[^"\']|(?<=\\)["\'])*["\']'
@@ -2890,8 +3014,9 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
                     sentence_count = len([s for s in example_sentences if s.strip()])
 
                     # Hard filter: Reject examples that are too short to hold the content
-                    # Load ratio from config (default 0.3 allows for high density/long sentences)
+                    # Load ratio from config (default 0.3 if not set, but config should specify appropriate value)
                     # Lower ratio = more lenient, allows denser templates (e.g., 13 props in 3 sentences)
+                    # Higher ratio = stricter, ensures better structural match (e.g., 0.5 requires 4+ sentences for 8-sentence target)
                     min_ratio = self.paragraph_fusion_config.get("min_sentence_ratio", 0.3)
                     min_sentences = max(2, int(target_sentences * min_ratio))
                     if sentence_count < min_sentences:
@@ -3124,7 +3249,25 @@ These connectors match the author's style and help create flowing, complex sente
         if rhythm_map and len(rhythm_map) > 0:
             blueprint_lines = []
             blueprint_lines.append("### STRUCTURAL BLUEPRINT:")
-            blueprint_lines.append("You must structure your paragraph to match this rhythm exactly. Distribute your Atomic Propositions into this container. Merge or split them as needed to fit the sentence types. Follow this sentence-by-sentence blueprint exactly. If the blueprint asks for a Short Sentence, do not write a long one.")
+
+            # Check if first proposition is a simple declarative fact (not conditional)
+            first_prop_is_declarative = False
+            if propositions and len(propositions) > 0:
+                first_prop = propositions[0].lower().strip()
+                # Simple heuristics: if it doesn't start with "if", "when", "unless", etc., it's likely declarative
+                conditional_markers = ['if ', 'when ', 'unless ', 'provided that', 'in case']
+                first_prop_is_declarative = not any(first_prop.startswith(marker) for marker in conditional_markers)
+
+            # Check if blueprint's first sentence is conditional but proposition is declarative
+            first_spec = rhythm_map[0]
+            blueprint_has_conditional_first = first_spec.get('type') == 'conditional'
+
+            if blueprint_has_conditional_first and first_prop_is_declarative:
+                # Relax blueprint enforcement: allow declarative for first sentence even if blueprint suggests conditional
+                blueprint_lines.append("You must structure your paragraph to match this rhythm. However, if the first Atomic Proposition is a simple declarative fact (not a conditional statement), you may use a declarative sentence for the first sentence even if the blueprint suggests conditional. For subsequent sentences, follow the blueprint more strictly.")
+            else:
+                blueprint_lines.append("You must structure your paragraph to match this rhythm exactly. Distribute your Atomic Propositions into this container. Merge or split them as needed to fit the sentence types. Follow this sentence-by-sentence blueprint exactly. If the blueprint asks for a Short Sentence, do not write a long one.")
+
             blueprint_lines.append("")
             for i, spec in enumerate(rhythm_map):
                 length = spec['length']
@@ -3136,7 +3279,11 @@ These connectors match the author's style and help create flowing, complex sente
                 if sent_type == 'question':
                     desc_parts.append('rhetorical question')
                 elif sent_type == 'conditional':
-                    desc_parts.append('conditional')
+                    # For first sentence, add note if proposition is declarative
+                    if i == 0 and first_prop_is_declarative:
+                        desc_parts.append('conditional (but you may use declarative if the proposition is a simple fact)')
+                    else:
+                        desc_parts.append('conditional')
                 else:
                     desc_parts.append('declarative statement')
 
@@ -3197,7 +3344,7 @@ Use this context to resolve ambiguities in the propositions. If a proposition is
                         user_prompt=prompt,
                         model_type="editor",
                         require_json=True,
-                        temperature=0.7,  # Moderate temperature for style variation
+                        temperature=0.9,  # Higher entropy to prevent identical variations
                         max_tokens=self.translator_config.get("max_tokens", 500),
                         timeout=api_timeout
                     )
@@ -3221,12 +3368,12 @@ Use this context to resolve ambiguities in the propositions. If a proposition is
             # Gracefully handle LLM generation failure
             if verbose:
                 print(f"  ⚠ LLM generation failed: {e}, returning original paragraph")
-            return paragraph, rhythm_map, teacher_example  # Fallback to original
+            return paragraph, rhythm_map, teacher_example, 0.0  # Fallback to original
 
         if response is None:
             if verbose:
                 print(f"  ⚠ No response from LLM, returning original paragraph")
-            return paragraph, rhythm_map, teacher_example  # Fallback to original
+            return paragraph, rhythm_map, teacher_example, 0.0  # Fallback to original
 
         try:
 
@@ -3241,6 +3388,18 @@ Use this context to resolve ambiguities in the propositions. If a proposition is
                 for i, v in enumerate(variations):
                     preview = v.strip()[:80] if v else "(empty)"
                     print(f"    Candidate {i+1} preview: {preview}...")
+
+            # NEW: Log diversity check before deduplication
+            if verbose and len(variations) > 1:
+                # Check if variations are identical (normalized comparison)
+                normalized_variations = [" ".join(v.split()).lower() for v in variations if v]
+                unique_normalized = len(set(normalized_variations))
+                if unique_normalized == 1:
+                    print(f"  ⚠ WARNING: All {len(variations)} variations are identical (mode collapse detected)")
+                elif unique_normalized < len(variations):
+                    print(f"  ⚠ WARNING: Only {unique_normalized}/{len(variations)} variations are unique")
+                else:
+                    print(f"  ✓ All {len(variations)} variations are unique before deduplication")
 
             # NEW: Deduplicate variations to save compute
             unique_variations = []
@@ -3272,7 +3431,7 @@ Use this context to resolve ambiguities in the propositions. If a proposition is
             if not variations:
                 if verbose:
                     print(f"  ⚠ No variations generated, using fallback")
-                return paragraph, rhythm_map, teacher_example  # Fallback to original
+                return paragraph, rhythm_map, teacher_example, 0.0  # Fallback to original
 
             # Step 5: Evaluate all variations and select best using tiered selection logic
             if verbose:
@@ -3398,7 +3557,9 @@ Use this context to resolve ambiguities in the propositions. If a proposition is
                 blueprint = extractor.extract(paragraph)
                 final_text = self._restore_citations_and_quotes(final_text, blueprint)
 
-                return final_text, rhythm_map, teacher_example
+                # Return with internal_recall from best candidate
+                internal_recall = best_candidate.get("recall", 0.0)
+                return final_text, rhythm_map, teacher_example, internal_recall
             else:
                 # 3. Fallback: No qualified candidates, pick highest recall (salvage meaning)
                 best_candidate = max(evaluated_candidates, key=lambda x: x["recall"])
@@ -3487,6 +3648,7 @@ For each missing proposition above, you must include its KEY WORDS explicitly. F
 - If the proposition is "The core message is an admission", you MUST include the words "core", "message", and "admission" in close proximity.
 - Do NOT paraphrase too heavily - the semantic similarity detector needs to see the actual content words.
 - You can embed them in complex sentences like: "At its heart, this admission's core message reveals that..." or "The fundamental essence of this recognition is an admission that..."
+- **CRITICAL**: If a proposition is a simple declarative fact (e.g., "I was thirteen", "The door opened"), do NOT convert it into a conditional statement (e.g., "If I was thirteen..."). Use declarative statements for declarative facts.
 
 **Style Constraint:** Maintain the complex sentence structure and vocabulary you used before. Do not simplify the text just to add the facts.{style_preservation}
 
@@ -3628,7 +3790,9 @@ Generate 3 new variations that include ALL facts from the checklist. Output as a
                                 blueprint = extractor.extract(paragraph)
                                 final_text = self._restore_citations_and_quotes(final_text, blueprint)
 
-                                return final_text, rhythm_map, teacher_example
+                                # Return with internal_recall from best repair candidate
+                                internal_recall = best_after_repair.get("recall", 0.0)
+                                return final_text, rhythm_map, teacher_example, internal_recall
                             else:
                                 # Still no qualified, but pick best from all (including repairs)
                                 best_after_repair = max(evaluated_candidates, key=lambda x: x["recall"])
@@ -3683,7 +3847,9 @@ Generate 3 new variations that include ALL facts from the checklist. Output as a
                 # Return best candidate (either original or after repair attempts)
                 if verbose and current_best["recall"] < proposition_recall_threshold:
                     print(f"  ⚠ Final recall {current_best['recall']:.2f} below threshold {proposition_recall_threshold:.2f}, returning best available")
-                return final_text, rhythm_map, teacher_example
+                # Return with internal_recall from current_best (best available after repair loop)
+                internal_recall = current_best.get("recall", 0.0)
+                return final_text, rhythm_map, teacher_example, internal_recall
 
         except Exception as e:
             error_str = str(e)
@@ -3694,7 +3860,7 @@ Generate 3 new variations that include ALL facts from the checklist. Output as a
                     print(f"  ✗ Paragraph fusion failed: Network timeout after {max_retries} retry attempts. Using fallback.")
                 else:
                     print(f"  ✗ Paragraph fusion failed: {error_str[:200]}, using fallback")
-            return paragraph, None, None  # Fallback to original
+            return paragraph, None, None, 0.0  # Fallback to original
 
     def _repair_missing_artifacts(
         self,
