@@ -150,41 +150,34 @@ The first author in the list is used. Style DNA is loaded from the Style Registr
   "paragraph_fusion": {
     "enabled": true,
     "min_sentences_for_fusion": 2,
-    "min_sentence_ratio": 0.6,
-    "style_lexicon_ratio": 0.1,
-    "transcribe_headings_as_is": true,
-    "use_structural_templates": false,
-    "proposition_recall_threshold": 0.85,
-    "min_viable_recall_threshold": 0.70,
-    "style_alignment_weight": 0.2,
-    "meaning_weight": 0.9,
-    "complexity_filter_min_length": 10,
-    "min_word_count": 10,
-    "min_sentence_count": 2,
-    "num_style_examples": 50,
-    "num_variations": 20,
-    "retrieval_pool_size": 50,
-    "structure_diversity": {
-      "enabled": true,
-      "count_match_weight": 0.7,
-      "diversity_weight": 0.4,
-      "positional_weight": 0.8,
-      "freshness_weight": 2.0,
-      "opener_penalty_threshold": 0.3,
-      "similarity_threshold": 0.7
-    }
+    "style_lexicon_ratio": 0.4,
+    "proposition_recall_threshold": 0.8,
+    "meaning_weight": 0.6,
+    "style_alignment_weight": 0.4,
+    "num_variations": 5
   }
 }
 ```
 
-Key options:
-- `use_structural_templates` (default: `false`): When enabled, "bleaches" style examples by replacing content words with placeholders (`[NP]`, `[VP]`, `[ADJ]`, `[ADV]`) while preserving functional words and syntax. This prevents domain-specific vocabulary from leaking into narrative generation.
-- `transcribe_headings_as_is` (default: `true`): Detects and transcribes single-sentence paragraphs that look like headings without restyling.
-- `min_sentence_ratio` (default: `0.6`): Minimum ratio of sentences in teacher example relative to target sentence count.
-- `style_lexicon_ratio` (default: `0.1`): Ratio of style lexicon words to include in mandatory vocabulary.
-- `structure_diversity`: Controls how diverse structural templates are selected (sentence count matching, positional variety, freshness).
+**Style Lexicon Ratio** (`style_lexicon_ratio`):
+- **Range**: `0.0` to `1.0`
+- **Default**: `0.4` (40% of extracted style vocabulary)
+- **Purpose**: Controls how much of the target author's vocabulary is injected into paragraph fusion prompts. This ratio scales naturally with the richness of the extracted Style DNA.
 
-**Semantic Critic** (validation thresholds and scoring weights):
+**How it works:**
+- The system extracts a style lexicon (typically ~20 words) from the target author's examples
+- The ratio determines how many of these words are included in the prompt
+- Example: With a 20-word lexicon and `style_lexicon_ratio: 0.4`, the top 8 words (40%) are used
+
+**Special values:**
+- `0.0`: Disables style injection entirely (no MANDATORY_VOCABULARY section added)
+- `< 0.3`: Light style injection with instruction "Sprinkle these style markers sparingly."
+- `0.3 - 0.7`: Moderate style injection with instruction "Integrate these words naturally."
+- `> 0.7`: Heavy style injection with instruction "Heavily saturate the text with this vocabulary."
+
+This replaces the previous hardcoded 15-word limit with a flexible ratio that adapts to the size of the extracted lexicon.
+
+**Semantic Critic** (validation thresholds):
 ```json
 {
   "semantic_critic": {
