@@ -1048,11 +1048,21 @@ def _check_semantic_validity(generated_text: str) -> Optional[Dict[str, any]]:
                     before_words = before_comma.split()
 
                     # Common main verbs that indicate a complete clause
-                    main_verb_indicators = ['is', 'are', 'was', 'were', 'has', 'have', 'had', 'does', 'do', 'did',
-                                           'works', 'works', 'exists', 'contains', 'provides', 'creates', 'defines',
-                                           'requires', 'needs', 'eliminates', 'embeds', 'embedded']
-
-                    has_main_verb = any(verb in before_comma.lower() for verb in main_verb_indicators)
+                    # Check for main verbs using spaCy if available
+                    has_main_verb = False
+                    try:
+                        from src.utils.spacy_linguistics import get_main_verbs
+                        from src.utils.nlp_manager import NLPManager
+                        nlp = NLPManager.get_nlp()
+                        doc = nlp(before_comma)
+                        main_verbs = get_main_verbs(doc)
+                        has_main_verb = len(main_verbs) > 0
+                    except Exception:
+                        # Fallback to hardcoded list if spaCy fails
+                        main_verb_indicators = ['is', 'are', 'was', 'were', 'has', 'have', 'had', 'does', 'do', 'did',
+                                               'works', 'works', 'exists', 'contains', 'provides', 'creates', 'defines',
+                                               'requires', 'needs', 'eliminates', 'embeds', 'embedded']
+                        has_main_verb = any(verb in before_comma.lower() for verb in main_verb_indicators)
 
                     # If before_comma is short and has no main verb, it's likely incomplete
                     if len(before_words) < 5 and not has_main_verb:
@@ -1123,8 +1133,19 @@ def _check_semantic_validity(generated_text: str) -> Optional[Dict[str, any]]:
 
                     # If before_comma is just 1-2 words (likely just a noun), it's incomplete
                     if len(before_words) <= 2:
-                        main_verb_indicators = ['is', 'are', 'was', 'were', 'has', 'have', 'works', 'exists']
-                        has_main_verb = any(verb in before_comma.lower() for verb in main_verb_indicators)
+                        # Check for main verbs using spaCy if available
+                        has_main_verb = False
+                        try:
+                            from src.utils.spacy_linguistics import get_main_verbs
+                            from src.utils.nlp_manager import NLPManager
+                            nlp = NLPManager.get_nlp()
+                            doc = nlp(before_comma)
+                            main_verbs = get_main_verbs(doc)
+                            has_main_verb = len(main_verbs) > 0
+                        except Exception:
+                            # Fallback to hardcoded list if spaCy fails
+                            main_verb_indicators = ['is', 'are', 'was', 'were', 'has', 'have', 'works', 'exists']
+                            has_main_verb = any(verb in before_comma.lower() for verb in main_verb_indicators)
 
                         if not has_main_verb:
                             return {
@@ -1764,8 +1785,21 @@ def _extract_issues_from_feedback(feedback: str) -> List[str]:
         if not sentence:
             continue
         # Look for action-oriented sentences (contain verbs like "make", "use", "match", "fix")
-        action_verbs = ['make', 'use', 'match', 'fix', 'change', 'adjust', 'improve', 'reduce', 'increase']
-        if any(verb in sentence.lower() for verb in action_verbs):
+        # Use spaCy to detect action verbs
+        has_action_verb = False
+        try:
+            from src.utils.spacy_linguistics import get_action_verbs
+            from src.utils.nlp_manager import NLPManager
+            nlp = NLPManager.get_nlp()
+            doc = nlp(sentence)
+            action_verbs_list = get_action_verbs(doc)
+            has_action_verb = len(action_verbs_list) > 0
+        except Exception:
+            # Fallback to hardcoded list if spaCy fails
+            action_verbs = ['make', 'use', 'match', 'fix', 'change', 'adjust', 'improve', 'reduce', 'increase']
+            has_action_verb = any(verb in sentence.lower() for verb in action_verbs)
+
+        if has_action_verb:
             issues.append(sentence)
 
     # If still no issues, return the whole feedback as a single issue

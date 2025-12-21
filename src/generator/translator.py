@@ -576,24 +576,41 @@ class StyleTranslator:
         if not text or not text.strip():
             return "third_person"
 
-        import re
-        text_lower = text.lower()
+        # Use spaCy for POV detection
+        from src.utils.spacy_linguistics import get_pov_pronouns
+        from src.utils.nlp_manager import NLPManager
 
-        # Count singular first person pronouns
-        singular_patterns = [r'\bi\b', r'\bme\b', r'\bmy\b', r'\bmine\b', r'\bmyself\b']
-        singular_count = sum(len(re.findall(pattern, text_lower)) for pattern in singular_patterns)
+        try:
+            nlp = NLPManager.get_nlp()
+            doc = nlp(text)
+            pov_dict = get_pov_pronouns(doc)
 
-        # Count plural first person pronouns
-        plural_patterns = [r'\bwe\b', r'\bus\b', r'\bour\b', r'\bours\b', r'\bourselves\b']
-        plural_count = sum(len(re.findall(pattern, text_lower)) for pattern in plural_patterns)
+            first_singular = pov_dict["first_singular"]
+            first_plural = pov_dict["first_plural"]
+            third_person = pov_dict["third_person"]
 
-        # Count third person pronouns
-        third_patterns = [
-            r'\bhe\b', r'\bhim\b', r'\bhis\b',
-            r'\bshe\b', r'\bher\b', r'\bhers\b',
-            r'\bthey\b', r'\bthem\b', r'\btheir\b', r'\btheirs\b'
-        ]
-        third_count = sum(len(re.findall(pattern, text_lower)) for pattern in third_patterns)
+            # Count occurrences in text
+            text_lower = text.lower()
+            singular_count = sum(1 for word in first_singular if word in text_lower)
+            plural_count = sum(1 for word in first_plural if word in text_lower)
+            third_count = sum(1 for word in third_person if word in text_lower)
+        except Exception:
+            # Fallback to regex if spaCy fails
+            import re
+            text_lower = text.lower()
+
+            singular_patterns = [r'\bi\b', r'\bme\b', r'\bmy\b', r'\bmine\b', r'\bmyself\b']
+            singular_count = sum(len(re.findall(pattern, text_lower)) for pattern in singular_patterns)
+
+            plural_patterns = [r'\bwe\b', r'\bus\b', r'\bour\b', r'\bours\b', r'\bourselves\b']
+            plural_count = sum(len(re.findall(pattern, text_lower)) for pattern in plural_patterns)
+
+            third_patterns = [
+                r'\bhe\b', r'\bhim\b', r'\bhis\b',
+                r'\bshe\b', r'\bher\b', r'\bhers\b',
+                r'\bthey\b', r'\bthem\b', r'\btheir\b', r'\btheirs\b'
+            ]
+            third_count = sum(len(re.findall(pattern, text_lower)) for pattern in third_patterns)
 
         # Determine dominant perspective
         if singular_count > 0 and singular_count >= plural_count:
@@ -1753,9 +1770,18 @@ Output PURE JSON. A single list of strings:
                 """Check if sentence is a question."""
                 if not text or not text.strip():
                     return False
-                question_starters = ["where", "what", "how", "why", "when", "do", "does", "is", "are"]
-                first_word = text.strip().split()[0].lower() if text.strip().split() else ""
-                return first_word in question_starters or text.strip().endswith("?")
+                # Use spaCy for question detection
+                from src.utils.spacy_linguistics import is_question_sentence
+                from src.utils.nlp_manager import NLPManager
+                try:
+                    nlp = NLPManager.get_nlp()
+                    doc = nlp(text)
+                    return is_question_sentence(doc)
+                except Exception:
+                    # Fallback to simple check
+                    question_starters = ["where", "what", "how", "why", "when", "do", "does", "is", "are"]
+                    first_word = text.strip().split()[0].lower() if text.strip().split() else ""
+                    return first_word in question_starters or text.strip().endswith("?")
 
             example_is_question = _is_sentence_question(examples[0])
             input_is_question = _is_sentence_question(blueprint.original_text)
@@ -4319,6 +4345,9 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             target_len = slot.get('target_len', 20)
             slot_type = slot.get('type', 'moderate')
 
+            # Check if this is the last sentence
+            is_last_sentence = (slot_idx == len(structure_map) - 1)
+
             # NEW: Handle EMPTY slots
             if not content or content.strip().upper() == "EMPTY":
                 if verbose:
@@ -4349,6 +4378,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                     system_prompt=system_prompt,
                     temperature=generation_temp,
                     max_tokens=generation_max_tokens,
+                    is_last_sentence=is_last_sentence,
                     verbose=verbose and attempt == 0
                 )
 
@@ -4453,7 +4483,20 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             print(f"  Final compliance score: {best_score:.2f}")
 
         # LEXICAL DIVERSITY GUARD: Check for repetitive phrasing
+        # Check for repetition and action echo
         repetition_issues = self.statistical_critic.check_repetition(final_paragraph)
+
+        # Check for action echo (repeated action verbs across sentences)
+        import spacy
+        try:
+            doc = self.statistical_critic.nlp(final_paragraph)
+            sentences = [sent.text.strip() for sent in doc.sents]
+            action_echo_issues = self.statistical_critic.check_action_echo(sentences)
+            repetition_issues.extend(action_echo_issues)
+        except Exception:
+            # If action echo check fails, continue with just repetition issues
+            pass
+
         original_repetition_count = len(repetition_issues)  # Store count before repair
         if repetition_issues:
             if verbose:
@@ -4569,7 +4612,15 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                     )
 
                     # Check if repetition improved
+                    # Check for repetition and action echo in refined text
                     new_repetition_issues = self.statistical_critic.check_repetition(refined_text)
+                    try:
+                        doc = self.statistical_critic.nlp(refined_text)
+                        sentences = [sent.text.strip() for sent in doc.sents]
+                        new_action_echo_issues = self.statistical_critic.check_action_echo(sentences)
+                        new_repetition_issues.extend(new_action_echo_issues)
+                    except Exception:
+                        pass
                     new_repetition_count = len(new_repetition_issues)
                     repetition_improved = original_repetition_count > 0 and new_repetition_count < original_repetition_count
 
@@ -4799,6 +4850,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         system_prompt: str,
         temperature: float,
         max_tokens: int,
+        is_last_sentence: bool = False,
         verbose: bool = False
     ) -> str:
         """Generate one sentence for a specific slot.
@@ -4858,13 +4910,27 @@ Output only the sentence, no explanations.
                 clean_prev = " ".join(prev_words[:4]).replace("`", "").replace("*", "")
                 anti_echo_section = f"**DO NOT start with:** '{clean_prev}...'"
 
-        # 2. Safe Formatting (use dictionary to ensure all keys present)
+        # 2. Build ending constraint for last sentence
+        ending_constraint = ""
+        ending_constraint_instruction = ""
+        if is_last_sentence:
+            ending_constraint = (
+                "**GROUNDING CONSTRAINT:** This is the final sentence of the paragraph. "
+                "Do NOT summarize, moralize, or use abstract concepts like 'lesson', 'meaning', or 'significance'. "
+                "End with a sensory detail (sight, sound, touch, smell) or a specific concrete object. "
+                "Avoid phrases like 'in conclusion', 'ultimately', 'the lesson is', or abstract nouns."
+            )
+            ending_constraint_instruction = "6. **GROUNDING:** " + ending_constraint.replace("**GROUNDING CONSTRAINT:**", "").strip()
+
+        # 3. Safe Formatting (use dictionary to ensure all keys present)
         prompt_params = {
             "slot_content": content,
             "target_length": target_length,
             "prev_context": prev_context,
             "anti_echo_section": anti_echo_section,  # Must be present even if empty
-            "author_name": author_name
+            "author_name": author_name,
+            "ending_constraint": ending_constraint,  # New parameter
+            "ending_constraint_instruction": ending_constraint_instruction  # New parameter
         }
 
         user_prompt = template.format(**prompt_params)
@@ -4903,6 +4969,7 @@ Output only the sentence, no explanations.
         system_prompt: str = "",
         temperature: float = 0.8,
         max_tokens: int = 1500,
+        is_last_sentence: bool = False,
         verbose: bool = False
     ) -> List[str]:
         """Generate N variants of a sentence for a specific slot.
@@ -4981,8 +5048,27 @@ Strictly follow the constraints below.
                 clean_prev = " ".join(prev_words[:4]).replace("`", "").replace("*", "")
                 anti_echo_section = f"**DO NOT start with:** '{clean_prev}...'"
 
+        # Build ending constraint for last sentence
+        ending_constraint = ""
+        if is_last_sentence:
+            ending_constraint = (
+                "**GROUNDING CONSTRAINT:** This is the final sentence of the paragraph. "
+                "Do NOT summarize, moralize, or use abstract concepts like 'lesson', 'meaning', or 'significance'. "
+                "End with a sensory detail (sight, sound, touch, smell) or a specific concrete object. "
+                "Avoid phrases like 'in conclusion', 'ultimately', 'the lesson is', or abstract nouns."
+            )
+
+        # Build ending constraint instruction
+        ending_constraint_instruction = ""
+        if is_last_sentence and ending_constraint:
+            ending_constraint_instruction = f"5. **GROUNDING:** {ending_constraint.replace('**GROUNDING CONSTRAINT:**', '').strip()}"
+            final_instruction = "6. Use the author's distinctive voice and vocabulary."
+        else:
+            final_instruction = "5. Use the author's distinctive voice and vocabulary."
+
         user_content += f"""
 {anti_echo_section}
+{ending_constraint}
 
 ## Author Voice:
 Adopt the voice of {author_name}.
@@ -4992,7 +5078,8 @@ Adopt the voice of {author_name}.
 2. The sentence must be approximately {target_length} words (within 15% tolerance).
 3. The sentence should flow naturally from the previous context.
 4. **ANTI-ECHO:** Do NOT start with the same words as the Previous Context.
-5. Use the author's distinctive voice and vocabulary.
+{ending_constraint_instruction}
+{final_instruction}
 
 Output only the sentence, no explanations.
 """

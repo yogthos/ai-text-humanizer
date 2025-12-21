@@ -199,7 +199,12 @@ class StatisticalCritic:
                        f"Replace colon after '{split_word}' with period. Start new sentence with '{next_word_cap}'")
 
         # Secondary: Coordinating conjunctions preceded by comma
-        conjunctions = ['and', 'but', 'or', 'nor', 'for', 'yet', 'so']
+        from src.utils.spacy_linguistics import get_conjunctions
+        if sentence_doc is not None:
+            conjunctions = get_conjunctions(sentence_doc)
+        else:
+            # Fallback to hardcoded list if doc not available
+            conjunctions = ['and', 'but', 'or', 'nor', 'for', 'yet', 'so']
         for conj in conjunctions:
             pattern = rf',\s+{conj}\s+(\w+)'
             match = re.search(pattern, text_lower)
@@ -218,7 +223,12 @@ class StatisticalCritic:
                                f"Delete '{conj}', replace comma after '{split_word}' with period. Start new sentence with '{next_word_cap}'")
 
         # Tertiary: Relative pronouns
-        relative_pronouns = ['which', 'who', 'that', 'where', 'when', 'whom', 'whose']
+        from src.utils.spacy_linguistics import get_relative_pronouns
+        if sentence_doc is not None:
+            relative_pronouns = get_relative_pronouns(sentence_doc)
+        else:
+            # Fallback to hardcoded list if doc not available
+            relative_pronouns = ['which', 'who', 'that', 'where', 'when', 'whom', 'whose']
         for pronoun in relative_pronouns:
             pattern = rf'\b{pronoun}\s+'
             match = re.search(pattern, text_lower)
@@ -410,6 +420,53 @@ class StatisticalCritic:
         else:
             return 0.0, f"Too short ({word_count} words). Expand to {target_length} words."
 
+    def check_action_echo(self, sentences: List[str]) -> List[str]:
+        """Detect action verb repetition across consecutive sentences.
+
+        Uses spaCy lemmatization to catch that "weaving" and "wove" are the same action.
+        Ignores auxiliary verbs (was, had, did) to focus on meaningful action repetition.
+
+        Args:
+            sentences: List of sentence strings to check
+
+        Returns:
+            List of issue strings describing action echoes found
+        """
+        from src.utils.spacy_linguistics import get_main_verbs_excluding_auxiliaries
+
+        if not sentences or len(sentences) < 2:
+            return []
+
+        issues = []
+
+        # Process sentences in batch for efficiency
+        docs = list(self.nlp.pipe(sentences, disable=["ner"]))  # Disable NER for speed
+
+        for i in range(len(docs) - 1):
+            # Extract main verbs (excluding auxiliaries and stopwords)
+            verbs1 = get_main_verbs_excluding_auxiliaries(docs[i])
+            verbs2 = get_main_verbs_excluding_auxiliaries(docs[i + 1])
+
+            # Find overlapping verbs (same lemma = same action)
+            overlap = verbs1.intersection(verbs2)
+
+            if overlap:
+                # Get the actual verb forms from the text for better error messages
+                verb_forms1 = [t.text for t in docs[i]
+                              if t.pos_ == "VERB" and not t.is_stop
+                              and t.lemma_.lower() in overlap]
+                verb_forms2 = [t.text for t in docs[i + 1]
+                              if t.pos_ == "VERB" and not t.is_stop
+                              and t.lemma_.lower() in overlap]
+
+                verb_example = verb_forms1[0] if verb_forms1 else list(overlap)[0]
+                issues.append(
+                    f"Action Echo: The verb '{verb_example}' (lemma: '{list(overlap)[0]}') "
+                    f"repeats across sentences {i+1} and {i+2}. MERGE or REPHRASE."
+                )
+
+        return issues
+
     def check_repetition(self, text: str) -> List[str]:
         """Detect repetitive phrasing in text.
 
@@ -458,18 +515,13 @@ class StatisticalCritic:
                     issues.append(f"Repeated phrase: '{phrase}' (appears {count} times)")
 
         # 2. Check for Proximal Word Repetition (Same word twice within 10 words)
-        # Filter out common stopwords to avoid false positives
-        stopwords = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-            'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did',
-            'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
-            'these', 'those', 'it', 'its', 'they', 'them', 'their', 'there', 'then', 'than'
-        }
-
+        # Filter out stopwords using spaCy's built-in detection (never hardcode stopwords)
         seen_words = set()
         for i in range(len(words)):
             word = words[i]
-            if word in stopwords:
+            # Use spaCy's stopword detection (already loaded in self.nlp)
+            # This covers all stopwords including "as", "than", etc. that hardcoded sets miss
+            if self.nlp.vocab[word].is_stop:
                 continue
             if word in seen_words:
                 continue  # Already reported this word

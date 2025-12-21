@@ -381,6 +381,8 @@ Strictly follow the constraints below.
             # Hard Length Constraint - only for non-split operations
             if target_len:
                 user_content += f"\n**HARD CONSTRAINT: Output must be close to {target_len} words. This is mandatory.**\n"
+            # CRITICAL: Prevent accidental splitting
+            user_content += "\n**CONSTRAINT: Output exactly ONE sentence. Do not split.**\n"
 
         # 2. Negative Constraints (The Ban List)
         if forbidden_phrases:

@@ -616,6 +616,68 @@ class SemanticCritic:
             # If encoding fails, return 1.0 to allow other checks to run
             return 1.0
 
+    def check_ending_grounding(self, paragraph_text: str) -> Optional[str]:
+        """Check if final sentence is too abstract/moralizing.
+
+        Uses spaCy POS tagging and Matcher to detect if the ending is dominated by
+        "Nouns of Thought" rather than "Nouns of Substance" (concrete objects, proper nouns).
+
+        Args:
+            paragraph_text: Full paragraph text to check
+
+        Returns:
+            Error message string if grounding issue found, None otherwise
+        """
+        from src.utils.spacy_linguistics import detect_moralizing_patterns
+        from src.utils.nlp_manager import NLPManager
+
+        if not paragraph_text or not paragraph_text.strip():
+            return None
+
+        try:
+            nlp = NLPManager.get_nlp()
+            doc = nlp(paragraph_text)
+
+            # Get last sentence
+            sentences = list(doc.sents)
+            if not sentences:
+                return None
+
+            last_sent = sentences[-1]
+
+            # Detect moralizing patterns in last sentence
+            moralizing_info = detect_moralizing_patterns(last_sent)
+
+            # Calculate concrete markers in last sentence
+            concrete_count = sum(1 for t in last_sent
+                                if t.pos_ in ["PROPN", "NUM"] or
+                                (t.pos_ == "NOUN" and t.ent_type_))
+
+            # Check if sentence is too abstract
+            has_moralizing = moralizing_info["has_moralizing"]
+            abstract_ratio = moralizing_info["abstract_ratio"]
+
+            # Threshold: If moralizing patterns found AND concrete count is low
+            if has_moralizing and concrete_count < 3:
+                return (
+                    "CRITICAL: Final sentence is too abstract/moralizing. "
+                    "Rewrite to end with a concrete object, physical sensation, or specific detail. "
+                    f"Found {concrete_count} concrete markers, abstract ratio: {abstract_ratio:.2f}"
+                )
+
+            # Also check if abstract ratio is very high even without explicit moralizing phrases
+            if abstract_ratio > 0.5 and concrete_count < 2:
+                return (
+                    "CRITICAL: Final sentence is too abstract. "
+                    "End with concrete sensory details or specific objects, not abstract concepts."
+                )
+
+            return None
+
+        except Exception as e:
+            # Fallback: return None on error (don't block generation)
+            return None
+
     def evaluate(
         self,
         generated_text: str,
@@ -3152,8 +3214,16 @@ Return ONLY valid JSON, no additional text."""
             final_score = (proposition_recall * meaning_weight) + (style_alignment * style_weight)
             passes = proposition_recall >= proposition_recall_threshold
 
+        # Check ending grounding (moralizing detection)
+        ending_grounding_issue = self.check_ending_grounding(generated_text)
+        if ending_grounding_issue:
+            if verbose:
+                print(f"      ⚠ Ending Grounding Issue: {ending_grounding_issue}")
+
         # Build feedback
         feedback_parts = []
+        if ending_grounding_issue:
+            feedback_parts.append(ending_grounding_issue)
         if proposition_recall < proposition_recall_threshold:
             missing = recall_details.get("missing", [])
             if missing:

@@ -87,10 +87,13 @@ class StyleProfiler:
         Returns:
             Dictionary with POV classification and breakdown
         """
-        # Define pronoun sets
-        first_singular = {"i", "me", "my", "myself", "mine"}
-        first_plural = {"we", "us", "our", "ourselves", "ours"}
-        third_person = {"he", "she", "it", "they", "him", "her", "them", "his", "hers", "its", "their", "theirs"}
+        from src.utils.spacy_linguistics import get_pov_pronouns
+
+        # Get POV pronouns using spaCy
+        pov_dict = get_pov_pronouns(doc)
+        first_singular = pov_dict["first_singular"]
+        first_plural = pov_dict["first_plural"]
+        third_person = pov_dict["third_person"]
 
         counts = {
             "first_singular": 0,
@@ -268,8 +271,23 @@ class StyleProfiler:
         top_openers = [word for word, count in opener_counts.most_common(10)]
 
         # Classify pattern
-        logical_markers = {"therefore", "however", "moreover", "furthermore", "consequently", "thus", "hence", "accordingly", "nevertheless", "nonetheless"}
-        narrative_markers = {"and", "but", "then", "so", "or", "nor", "yet"}
+        from src.utils.spacy_linguistics import get_discourse_markers, get_conjunctions
+
+        # Get doc from first sentence if available
+        doc = sentences[0].doc if sentences else None
+
+        if doc is not None:
+            # Get discourse markers using spaCy
+            discourse_markers_list = get_discourse_markers(doc)
+            conjunctions_list = get_conjunctions(doc)
+
+            # Convert to sets for membership testing
+            logical_markers = set(discourse_markers_list)  # Discourse markers are typically logical
+            narrative_markers = set(conjunctions_list)  # Conjunctions are typically narrative
+        else:
+            # Fallback to hardcoded lists if doc not available
+            logical_markers = {"therefore", "however", "moreover", "furthermore", "consequently", "thus", "hence", "accordingly", "nevertheless", "nonetheless"}
+            narrative_markers = {"and", "but", "then", "so", "or", "nor", "yet"}
 
         logical_count = sum(1 for opener in top_openers if opener in logical_markers)
         narrative_count = sum(1 for opener in top_openers if opener in narrative_markers)

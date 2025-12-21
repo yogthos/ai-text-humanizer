@@ -77,22 +77,31 @@ def parse_variants_from_response(response: str, verbose: bool = False) -> List[s
     variants = []
     lines = response.splitlines()
 
-    # Unified regex pattern to match:
-    # 1. VAR: (case insensitive)
-    # 2. Numbered list: 1. or 1)
-    # 3. Bullets: - or *
-    variant_pattern = re.compile(r'^(?:VAR:|(?:\d+[\.\)])|[\-\*])\s+(.*)', re.IGNORECASE)
-
     for line in lines:
         line = line.strip()
         if not line:
             continue
 
-        # Try regex pattern first (primary parsing)
-        match = variant_pattern.match(line)
-        if match:
-            # Found a valid variant line
-            clean_text = match.group(1).strip()
+        # 1. Check for VAR: prefix (case insensitive) - handle with or without space
+        line_upper = line.upper()
+        if line_upper.startswith("VAR:"):
+            # Strip "VAR:" prefix (4 characters) and any following whitespace
+            clean_text = line[4:].lstrip()
+            if clean_text:
+                variants.append(clean_text)
+            continue
+
+        # 2. Check for numbered lists: 1. or 1)
+        numbered_match = re.match(r'^(\d+[\.\)])\s+(.*)', line)
+        if numbered_match:
+            clean_text = numbered_match.group(2).strip()
+            if clean_text:
+                variants.append(clean_text)
+            continue
+
+        # 3. Check for bullet points: - or *
+        if line.startswith("- ") or line.startswith("* "):
+            clean_text = line[2:].strip()
             if clean_text:
                 variants.append(clean_text)
             continue
@@ -120,5 +129,14 @@ def parse_variants_from_response(response: str, verbose: bool = False) -> List[s
         if clean_response:
             variants.append(clean_response)
 
-    return variants
+    # Final safety check: Strip any remaining "VAR:" prefixes that might have slipped through
+    cleaned_variants = []
+    for variant in variants:
+        # Remove "VAR:" prefix if present (case insensitive, with or without space)
+        variant_upper = variant.upper()
+        if variant_upper.startswith("VAR:"):
+            variant = variant[4:].lstrip()
+        cleaned_variants.append(variant)
+
+    return cleaned_variants
 
