@@ -15,7 +15,7 @@ class NLPManager:
     for memory management.
     """
     _instance: Optional[spacy.Language] = None
-    _model_name: str = "en_core_web_sm"
+    _model_name: str = "en_core_web_md"
 
     @classmethod
     def get_nlp(cls) -> spacy.Language:

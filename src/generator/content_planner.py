@@ -92,10 +92,11 @@ Output only the content for each slot, one per line. Do not include slot numbers
         try:
             system_prompt = (
                 "You are a content planner. Distribute facts into sentence slots based on target word counts.\n"
-                "CRITICAL: You are a structural analyst, not a creative writer. "
+                "CRITICAL INSTRUCTION: You are a structural analyst, not a creative writer. "
                 "Your content plan must map STRICTLY to the events present in the Source Text. "
-                "Do NOT invent sequel events, future timelines, or abstract theoretical conclusions "
-                "unless they are explicitly in the source."
+                "Do NOT invent sequel events, future timelines, abstract theoretical conclusions, "
+                "or generic 'machinery' descriptions to meet a length target. "
+                "If the source text ends, your plan must end."
             )
             response = self.llm_provider.call(
                 system_prompt=system_prompt,
@@ -195,7 +196,8 @@ Output only the content for each slot, one per line. Do not include slot numbers
     def _prune_hallucinated_slots(self, plan: List[str], source_text: str) -> List[str]:
         """
         Removes final slots that have drifted semantically from the source text.
-        Uses spaCy similarity to detect 'filler' topics.
+        Uses spaCy similarity to detect 'filler' topics (e.g. generic machinery).
+        Implements iterative pruning: checks slots from the end until finding a valid one.
 
         Args:
             plan: List of content strings, one per slot
@@ -220,33 +222,49 @@ Output only the content for each slot, one per line. Do not include slot numbers
             # If processing fails, return original plan
             return plan
 
-        # Check the final slot (where hallucinations usually happen)
-        last_slot_content = plan[-1] if plan else ""
+        # Iterative pruning: check slots from the end until finding a valid one
+        # Hallucinations usually happen in a sequence at the end
+        removed_count = 0
+        original_plan = plan.copy()
 
-        # Skip if slot is empty or marked as EMPTY
-        if not last_slot_content or last_slot_content.strip().upper() == "EMPTY":
-            return plan
+        while plan:
+            last_slot_content = plan[-1]
 
-        # Process last slot content
-        try:
-            topic_doc = nlp(last_slot_content)
-        except Exception:
-            # If processing fails, return original plan
-            return plan
+            # Skip if slot is empty or marked as EMPTY
+            if not last_slot_content or last_slot_content.strip().upper() == "EMPTY":
+                break
 
-        # Calculate similarity
-        # Note: spaCy similarity is 0.0-1.0.
-        # Generic filler usually scores < 0.3 against specific narratives.
-        try:
-            similarity = source_doc.similarity(topic_doc)
-        except Exception:
-            # If similarity calculation fails, return original plan
-            return plan
+            # Process last slot content
+            try:
+                topic_doc = nlp(last_slot_content)
+            except Exception:
+                # If processing fails, assume valid and stop
+                break
 
-        # Threshold: 0.25 is a conservative cutoff for "completely unrelated"
-        if similarity < 0.25:
-            print(f"Warning: Pruning hallucinated slot: '{last_slot_content[:50]}...' (Similarity: {similarity:.2f})")
-            return plan[:-1]  # Drop the last slot
+            # Calculate similarity
+            # Note: spaCy similarity is 0.0-1.0.
+            # Generic filler usually scores < 0.3 against specific narratives.
+            # 'Soviet Ruins' vs 'Soviet Hunger' ~= 0.8
+            # 'Soviet Ruins' vs 'Data Streams' ~= 0.15
+            try:
+                similarity = source_doc.similarity(topic_doc)
+            except Exception:
+                # If similarity calculation fails, assume valid and stop
+                break
+
+            # Threshold: 0.25 is a conservative cutoff for "completely unrelated"
+            # Allows loose connections, kills unrelated content
+            if similarity < 0.25:
+                removed_count += 1
+                plan.pop()  # Remove the bad slot and continue checking
+            else:
+                # If the last slot is valid, we assume the previous ones are too
+                # (Hallucinations usually happen in a sequence at the end)
+                break
+
+        # Log removal if any slots were pruned
+        if removed_count > 0:
+            print(f"Warning: Semantic Drift Guard removed {removed_count} hallucinated slot(s) from the end.")
 
         return plan
 
