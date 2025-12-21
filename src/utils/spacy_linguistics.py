@@ -222,12 +222,12 @@ def get_main_verbs_excluding_auxiliaries(doc: Doc) -> Set[str]:
     """
     main_verbs = set()
     for token in doc:
-        # Include verbs (pos_="VERB" or pos_="AUX" for some models)
-        # but exclude stopwords and auxiliary dependencies
-        if (token.pos_ in ["VERB", "AUX"]) and not token.is_stop:
+        # Include all verbs (pos_="VERB") that are not auxiliaries
+        # Use dependency parsing to identify auxiliaries vs main verbs
+        if token.pos_ == "VERB":
             # Exclude auxiliary verbs by checking dependency
             # Auxiliaries have dependencies like "aux", "auxpass"
-            # Main verbs have dependencies like "ROOT", "xcomp", "ccomp", "advcl", "conj", etc.
+            # Main verbs have dependencies like "ROOT", "xcomp", "ccomp", "advcl", "conj", "acomp", etc.
             # Participles like "weaving" in "I was weaving" are main verbs (dep="xcomp"), not auxiliaries
             is_auxiliary = token.dep_ in ["aux", "auxpass"]
 
@@ -235,6 +235,12 @@ def get_main_verbs_excluding_auxiliaries(doc: Doc) -> Set[str]:
             # Note: The auxiliary in "I was weaving" is "was" (dep="aux"), not "weaving" (dep="xcomp")
             if not is_auxiliary:
                 # Add the lemma (base form) so "weaving" and "wove" both become "weave"
+                main_verbs.add(token.lemma_.lower())
+        # Also handle AUX tokens that are actually main verbs (e.g., copula "be" as ROOT)
+        elif token.pos_ == "AUX":
+            # Only include AUX if it's the ROOT (main verb) or not an auxiliary dependency
+            # This catches cases where "be" is the main verb (e.g., "I am happy")
+            if token.dep_ == "ROOT" or token.dep_ not in ["aux", "auxpass"]:
                 main_verbs.add(token.lemma_.lower())
     return main_verbs
 
