@@ -19,6 +19,8 @@ class StyleProfiler:
     def __init__(self):
         """Initialize the style profiler."""
         self.nlp = NLPManager.get_nlp()
+        # Cache for word filtering to avoid redundant NLP calls
+        self._word_filter_cache = {}
 
     def analyze_style(self, text: str) -> Dict[str, Any]:
         """Analyze style characteristics from text corpus.
@@ -60,6 +62,53 @@ class StyleProfiler:
             **openers_data,
             **punctuation_data
         }
+
+    def _is_general_word(self, word: str) -> bool:
+        """Check if a word is a general word (not a proper noun or specific term).
+
+        Args:
+            word: Word to check (lowercase)
+
+        Returns:
+            True if word is general (should be kept), False if it's a proper noun/specific term (should be filtered)
+        """
+        if not word or len(word) < 2:
+            return False
+
+        # Check cache first
+        if word in self._word_filter_cache:
+            return self._word_filter_cache[word]
+
+        # Default to True (conservative: include if unsure)
+        result = True
+
+        try:
+            # Process word in minimal sentence context to get accurate POS tags
+            # Use lowercase version for context
+            test_sentence = f"The {word}."
+            doc = self.nlp(test_sentence)
+
+            # Find the word token (skip "The" and punctuation)
+            for token in doc:
+                if token.text.lower() == word.lower() and not token.is_punct:
+                    # Filter out proper nouns (PROPN tag indicates names/specific entities)
+                    if token.pos_ == "PROPN":
+                        result = False
+                        break
+                    # Keep common parts of speech (general vocabulary)
+                    if token.pos_ in ["NOUN", "VERB", "ADJ", "ADV", "PRON", "DET", "CONJ", "SCONJ", "ADP", "PART"]:
+                        result = True
+                        break
+                    # For other POS tags, default to keeping (conservative)
+                    result = True
+                    break
+        except Exception:
+            # If processing fails, be conservative and include the word
+            result = True
+
+        # Cache the result
+        self._word_filter_cache[word] = result
+        return result
 
     def _empty_profile(self) -> Dict[str, Any]:
         """Return an empty profile structure."""
@@ -218,11 +267,21 @@ class StyleProfiler:
 
             # Get top 30 keywords
             top_indices = np.argsort(mean_scores)[-30:][::-1]
-            keywords = [feature_names[i] for i in top_indices if mean_scores[i] > 0]
-            keyword_frequencies = {feature_names[i]: float(mean_scores[i]) for i in top_indices if mean_scores[i] > 0}
+            raw_keywords = [feature_names[i] for i in top_indices if mean_scores[i] > 0]
+            raw_keyword_frequencies = {feature_names[i]: float(mean_scores[i]) for i in top_indices if mean_scores[i] > 0}
+
+            # Filter out proper nouns and specific terms
+            keywords = []
+            keyword_frequencies = {}
+            for keyword in raw_keywords:
+                # Check if it's a general word (not a proper noun or specific term)
+                if self._is_general_word(keyword.lower()):
+                    keywords.append(keyword)
+                    if keyword in raw_keyword_frequencies:
+                        keyword_frequencies[keyword] = raw_keyword_frequencies[keyword]
 
             return {
-                "keywords": keywords[:30],  # Top 30
+                "keywords": keywords[:30],  # Top 30 (after filtering)
                 "keyword_frequencies": keyword_frequencies
             }
         except Exception as e:
@@ -268,7 +327,23 @@ class StyleProfiler:
 
         # Count and get top 10
         opener_counts = Counter(openers)
-        top_openers = [word for word, count in opener_counts.most_common(10)]
+        raw_top_openers = [word for word, count in opener_counts.most_common(10)]
+
+        # Filter out proper nouns and specific terms
+        top_openers = []
+        for opener in raw_top_openers:
+            if self._is_general_word(opener):
+                top_openers.append(opener)
+
+        # If we filtered out too many, try to get more from the original list
+        if len(top_openers) < 5:
+            # Get more candidates and filter them
+            all_openers = [word for word, count in opener_counts.most_common(20)]
+            for opener in all_openers:
+                if opener not in top_openers and self._is_general_word(opener):
+                    top_openers.append(opener)
+                    if len(top_openers) >= 10:
+                        break
 
         # Classify pattern
         from src.utils.spacy_linguistics import get_discourse_markers, get_conjunctions
