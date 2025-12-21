@@ -209,38 +209,43 @@ def is_imperative_sentence(doc: Doc) -> bool:
 
 
 def get_main_verbs_excluding_auxiliaries(doc: Doc) -> Set[str]:
-    """Extract main verbs excluding auxiliaries and stopwords.
+    """Extract main verbs excluding auxiliaries, copulas, and stopwords.
 
-    Uses spaCy's linguistic features to identify main verbs (not auxiliaries).
+    Uses spaCy's linguistic features to identify main verbs (not auxiliaries or copulas).
     This catches that "weaving" and "wove" are the same action (lemma: "weave").
+    Excludes copula verbs (be, seem, appear) as they are not "actions" in the action echo sense.
 
     Args:
         doc: Pre-processed spaCy Doc object
 
     Returns:
-        Set of verb lemmas (lowercased) that are main verbs, not auxiliaries
+        Set of verb lemmas (lowercased) that are main verbs, not auxiliaries or copulas
     """
     main_verbs = set()
-    for token in doc:
-        # Include all verbs (pos_="VERB") that are not auxiliaries
-        # Use dependency parsing to identify auxiliaries vs main verbs
-        if token.pos_ == "VERB":
-            # Exclude auxiliary verbs by checking dependency
-            # Auxiliaries have dependencies like "aux", "auxpass"
-            # Main verbs have dependencies like "ROOT", "xcomp", "ccomp", "advcl", "conj", "acomp", etc.
-            # Participles like "weaving" in "I was weaving" are main verbs (dep="xcomp"), not auxiliaries
-            is_auxiliary = token.dep_ in ["aux", "auxpass"]
+    # Copula verbs are linking verbs, not action verbs
+    # They should be excluded from action echo detection
+    copula_lemmas = {"be", "seem", "appear", "become", "remain", "stay", "look", "feel", "sound", "taste", "smell"}
 
-            # Include if it's not an auxiliary
+    for token in doc:
+        # Include all verbs (pos_="VERB") that are not auxiliaries or copulas
+        if token.pos_ == "VERB":
+            is_auxiliary = token.dep_ in ["aux", "auxpass"]
+            is_copula = token.lemma_.lower() in copula_lemmas
+
+            # Include if it's not an auxiliary and not a copula
             # Note: The auxiliary in "I was weaving" is "was" (dep="aux"), not "weaving" (dep="xcomp")
-            if not is_auxiliary:
+            # Participles like "weaving" are main verbs (dep="xcomp"), not auxiliaries
+            if not is_auxiliary and not is_copula:
                 # Add the lemma (base form) so "weaving" and "wove" both become "weave"
                 main_verbs.add(token.lemma_.lower())
-        # Also handle AUX tokens that are actually main verbs (e.g., copula "be" as ROOT)
+        # Handle AUX tokens - exclude copulas even when they're ROOT
         elif token.pos_ == "AUX":
-            # Only include AUX if it's the ROOT (main verb) or not an auxiliary dependency
-            # This catches cases where "be" is the main verb (e.g., "I am happy")
-            if token.dep_ == "ROOT" or token.dep_ not in ["aux", "auxpass"]:
+            is_auxiliary = token.dep_ in ["aux", "auxpass"]
+            is_copula = token.lemma_.lower() in copula_lemmas
+
+            # Only include AUX if it's not an auxiliary AND not a copula
+            # This excludes "was" in "I was happy" (copula) but includes other non-copula AUX verbs
+            if not is_auxiliary and not is_copula:
                 main_verbs.add(token.lemma_.lower())
     return main_verbs
 
