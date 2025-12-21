@@ -44,3 +44,6 @@ input/
 output/
 .cursor/
 atlas_cache/
+
+# Cache files
+structure_cache.json

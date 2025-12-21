@@ -45,10 +45,6 @@ class TestRhetoricalClassifier(unittest.TestCase):
 
     def tearDown(self):
         """Clean up test fixtures."""
-        # Clean up cache file if it exists
-        cache_file = Path(self.config_path).parent / "rhetorical_cache.json"
-        if cache_file.exists():
-            cache_file.unlink()
         # Clean up temp directory
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
