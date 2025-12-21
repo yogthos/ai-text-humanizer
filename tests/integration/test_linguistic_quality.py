@@ -14,7 +14,8 @@ import pytest
 from src.utils.text_processing import check_zipper_merge
 from src.validator.statistical_critic import StatisticalCritic
 from src.validator.semantic_critic import SemanticCritic
-from src.generator.translator import StyleTranslator
+# Don't import StyleTranslator at module level - import it in tests that need it
+# to allow patching LLMProvider before import
 from tests.test_helpers import ensure_config_exists
 from src.utils.spacy_linguistics import get_main_verbs_excluding_auxiliaries
 from src.utils.nlp_manager import NLPManager
@@ -169,32 +170,14 @@ class TestGroundingValidation:
     """
 
     def setup_method(self):
-        """Set up test fixtures with mocked LLM provider."""
-        from unittest.mock import patch
-        from tests.mocks.mock_llm_provider import get_mock_llm_provider
+        """Set up test fixtures.
 
-        # Mock LLM provider since check_ending_grounding doesn't use it
-        # SemanticCritic tries to initialize LLMProvider, so we need to mock it
-        self.mock_llm = get_mock_llm_provider()
-
-        # Patch LLMProvider before SemanticCritic initialization
-        # Keep the patch active for the entire test
-        self.llm_patcher = patch('src.validator.semantic_critic.LLMProvider', return_value=self.mock_llm)
-        self.llm_patcher.start()
-
-        try:
-            self.critic = SemanticCritic(config_path="config.json")
-            # Ensure the critic uses the mock
-            self.critic.llm_provider = self.mock_llm
-        except Exception:
-            # If initialization fails, stop the patcher and re-raise
-            self.llm_patcher.stop()
-            raise
-
-    def teardown_method(self):
-        """Clean up patches after test."""
-        if hasattr(self, 'llm_patcher'):
-            self.llm_patcher.stop()
+        Note: check_ending_grounding doesn't use LLM. ensure_config_exists()
+        already sets use_llm_verification=False, so SemanticCritic won't
+        try to initialize LLMProvider.
+        """
+        ensure_config_exists()
+        self.critic = SemanticCritic(config_path="config.json")
 
     def test_abstract_moralizing_fails(self):
         """Test that abstract/moralizing endings fail."""
@@ -229,24 +212,27 @@ class TestPerspectiveLock:
     def setup_method(self):
         """Set up test fixtures with mocked LLM provider."""
         ensure_config_exists()
-        from unittest.mock import patch
-        from tests.mocks.mock_llm_provider import get_mock_llm_provider
+        from unittest.mock import patch, MagicMock
 
-        # Create mock LLM provider
-        self.mock_llm = get_mock_llm_provider()
+        # verify_perspective doesn't use LLM, but StyleTranslator always initializes it
+        # Patch LLMProvider before importing StyleTranslator
+        # Import the source module first
+        import src.generator.llm_provider as llm_module
 
-        # Patch LLMProvider before StyleTranslator initialization
-        # Keep the patch active for the entire test
-        self.llm_patcher = patch('src.generator.translator.LLMProvider', return_value=self.mock_llm)
-        self.llm_patcher.start()
+        # Patch the class
+        self.llm_patcher = patch.object(llm_module, 'LLMProvider', new_callable=MagicMock)
+        self.mock_llm = self.llm_patcher.start()
 
         try:
+            # Now import StyleTranslator (it will use the patched LLMProvider)
+            from src.generator.translator import StyleTranslator
             self.translator = StyleTranslator(config_path="config.json")
             # Ensure the translator uses the mock
             self.translator.llm_provider = self.mock_llm
-        except Exception:
+        except Exception as e:
             # If initialization fails, stop the patcher and re-raise
-            self.llm_patcher.stop()
+            if hasattr(self, 'llm_patcher'):
+                self.llm_patcher.stop()
             raise
 
     def teardown_method(self):

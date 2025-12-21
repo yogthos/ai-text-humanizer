@@ -16,6 +16,7 @@ def ensure_config_exists():
                 "model": "deepseek-chat"
             },
             "critic": {"fallback_pass_threshold": 0.75},
+            "semantic_critic": {"use_llm_verification": False},
             "blend": {"authors": ["TestAuthor"]}
         }
         with open(config_path, 'w') as f:
@@ -37,6 +38,14 @@ def ensure_config_exists():
             updated = True
         if "api_url" not in deepseek or not deepseek.get("api_url"):
             deepseek["api_url"] = "https://api.deepseek.com/v1/chat/completions"
+            updated = True
+
+        # Ensure semantic_critic has use_llm_verification disabled for tests
+        if "semantic_critic" not in config:
+            config["semantic_critic"] = {}
+            updated = True
+        if config["semantic_critic"].get("use_llm_verification", True):
+            config["semantic_critic"]["use_llm_verification"] = False
             updated = True
 
         if updated:
