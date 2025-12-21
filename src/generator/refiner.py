@@ -366,7 +366,7 @@ Strictly follow the constraints below.
 """
 
         # 1. Special Handling for "Split" (must come before length constraint)
-        is_split = "split" in instruction.lower() or action.lower() == "split"
+        is_split = action.lower() == "split"
         if is_split:
             # Clarify that target applies to EACH resulting sentence, not total
             if target_len:
@@ -577,7 +577,7 @@ Output only the fixed sentence(s), no explanations.
 
             # 3. Validate candidate (existing validation logic)
             fixed = best_candidate
-            is_split = "split" in instruction.lower() or action.lower() == "split"
+            is_split = action.lower() == "split"
 
             try:
                 # STRICT VALIDATION: Check Split Compliance
