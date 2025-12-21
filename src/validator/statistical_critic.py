@@ -433,9 +433,25 @@ class StatisticalCritic:
         if len(words) < 4:  # Need at least 4 words for meaningful checks
             return []
 
-        # 1. Check for Repeated N-grams (2-3 words)
+        # Parse with spaCy for stopword detection
+        doc = self.nlp(text)
+        tokens = [token for token in doc if not token.is_punct and not token.is_space]
+
+        if len(tokens) < 4:
+            return []
+
+        # 1. Check for Repeated N-grams (2-3 words) - WITH STOPWORD FILTER
         for n in [2, 3]:
-            ngrams = [' '.join(words[i:i+n]) for i in range(len(words)-n+1)]
+            ngrams = []
+            for i in range(len(tokens) - n + 1):
+                window = tokens[i:i+n]
+                # Skip if ANY token in the n-gram is a stopword
+                if any(t.is_stop for t in window):
+                    continue
+                # Build phrase from non-stopword tokens
+                phrase = ' '.join([t.text.lower() for t in window])
+                ngrams.append(phrase)
+
             counts = Counter(ngrams)
             for phrase, count in counts.items():
                 if count > 1:

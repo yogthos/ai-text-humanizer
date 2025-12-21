@@ -175,181 +175,345 @@ output = run_pipeline(
 
 ## Configuration
 
+The configuration file (`config.json`) controls all aspects of the style transfer pipeline. Below is comprehensive documentation for all configuration variables.
+
 ### Provider Settings
 
+**`provider`** (string, required): The LLM provider to use. Supported values: `deepseek`, `ollama`, `glm`, `gemini`
+
+**Provider-specific configurations:**
+
+**`deepseek`** (object):
 ```json
 {
-  "provider": "deepseek",
-  "deepseek": {
-    "api_key": "your-api-key-here",
-    "api_url": "https://api.deepseek.com/v1/chat/completions",
-    "editor_model": "deepseek-chat",
-    "critic_model": "deepseek-chat"
-  }
+  "api_key": "your-api-key-here",
+  "api_url": "https://api.deepseek.com/v1/chat/completions",
+  "editor_model": "deepseek-chat",
+  "critic_model": "deepseek-chat"
 }
 ```
+- `api_key`: Your DeepSeek API key
+- `api_url`: API endpoint URL (default: DeepSeek v1 endpoint)
+- `editor_model`: Model name for text generation/editing
+- `critic_model`: Model name for evaluation/criticism
 
-Supported providers: `deepseek`, `ollama`, `glm`, `gemini`
+**`ollama`** (object):
+```json
+{
+  "url": "http://localhost:11434/api/chat",
+  "editor_model": "mistral-nemo:12b",
+  "critic_model": "qwen3:8b",
+  "keep_alive": "10m"
+}
+```
+- `url`: Local Ollama API endpoint
+- `editor_model`: Model name for text generation
+- `critic_model`: Model name for evaluation
+- `keep_alive`: How long to keep model loaded in memory
+
+**`glm`** (object):
+```json
+{
+  "api_key": "your-api-key-here",
+  "api_url": "https://api.z.ai/api/paas/v4/chat/completions",
+  "editor_model": "glm-4.6",
+  "critic_model": "glm-4.6"
+}
+```
+- `api_key`: Your GLM API key
+- `api_url`: API endpoint URL
+- `editor_model`: Model name for text generation
+- `critic_model`: Model name for evaluation
+
+**`gemini`** (object):
+```json
+{
+  "api_key": "your-api-key-here",
+  "api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=",
+  "thinkingLevel": "MEDIUM",
+  "includeThoughts": false
+}
+```
+- `api_key`: Your Gemini API key
+- `api_url`: API endpoint URL with model specification
+- `thinkingLevel`: Thinking level for reasoning models (e.g., "MEDIUM")
+- `includeThoughts`: Whether to include reasoning thoughts in output
+
+**`llm_provider`** (object): Global LLM provider settings applied to all providers:
+```json
+{
+  "max_retries": 5,
+  "retry_delay": 2,
+  "timeout": 120,
+  "batch_timeout": 180,
+  "context_window": 128000,
+  "max_output_tokens": 4000
+}
+```
+- `max_retries`: Maximum number of retry attempts for failed API calls (default: 5)
+- `retry_delay`: Delay in seconds between retries (default: 2)
+- `timeout`: Request timeout in seconds for single requests (default: 120)
+- `batch_timeout`: Request timeout in seconds for batch operations (default: 180)
+- `context_window`: Maximum context window size in tokens (default: 128000)
+- `max_output_tokens`: Maximum output tokens per request (default: 4000)
 
 ### Author Configuration
 
+**`blend`** (object):
 ```json
 {
-  "blend": {
-    "authors": ["Mao"]
-  }
+  "authors": ["Mao"],
+  "ratio": 0.6
 }
 ```
+- `authors`: List of author names to use for style transfer. The first author in the list is used. Style DNA is loaded from the Style Registry (`atlas_cache/author_profiles.json`)
+- `ratio`: Style blending ratio (0.0-1.0, default: 0.6). Controls how much the target style influences the output
 
-The first author in the list is used. Style DNA is loaded from the Style Registry (`atlas_cache/author_profiles.json`).
+### Atlas Configuration
 
-### Key Configuration Sections
-
-**Paragraph Atlas** (statistical archetype generation):
+**`atlas`** (object): Style Atlas settings for paragraph-level style retrieval:
 ```json
 {
-  "paragraph_atlas": {
-    "path": "atlas_cache/paragraph_atlas",
-    "default_archetype": 0
-  }
+  "persist_path": "atlas_cache/",
+  "num_clusters": 5,
+  "min_structure_words": 4,
+  "max_length_ratio": 5.0,
+  "min_length_ratio": 0.2
 }
 ```
+- `persist_path`: Directory path for ChromaDB persistence (default: "atlas_cache/")
+- `num_clusters`: Number of K-means clusters for style grouping (default: 5)
+- `min_structure_words`: Minimum number of structural words required for matching (default: 4)
+- `max_length_ratio`: Maximum length ratio for paragraph matching (default: 5.0)
+- `min_length_ratio`: Minimum length ratio for paragraph matching (default: 0.2)
 
-Controls the statistical archetype system used for paragraph generation. The paragraph atlas contains:
+**`paragraph_atlas`** (object): Paragraph Atlas settings for statistical archetype generation:
+```json
+{
+  "path": "atlas_cache/paragraph_atlas"
+}
+```
+- `path`: Directory path where paragraph atlas data is stored (default: "atlas_cache/paragraph_atlas")
+
+The paragraph atlas contains:
 - **Archetypes**: Statistical patterns (sentence length, sentence count, burstiness, style type)
 - **Transition Matrix**: Markov chain probabilities for archetype transitions
 - **ChromaDB Collection**: Full example paragraphs for each archetype
 
-**Generation** (statistical generation parameters):
+### Generation Configuration
+
+**`generation`** (object): Statistical paragraph generation parameters:
 ```json
 {
-  "generation": {
-    "temperature": 0.8,
-    "max_tokens": 1500,
-    "num_candidates": 4,
-    "max_retries": 2,
-    "compliance_threshold": 0.85,
-    "default_perspective": null
-  }
+  "temperature": 0.85,
+  "max_tokens": 1500,
+  "num_candidates": 6,
+  "max_retries": 10,
+  "compliance_threshold": 0.85,
+  "default_perspective": "first_person_singular"
 }
 ```
-
-Controls the statistical paragraph generation process:
-- `temperature`: Generation temperature (default: 0.8)
-- `max_tokens`: Maximum tokens per paragraph (default: 1500)
-- `num_candidates`: Number of candidates to generate per round (default: 4)
-- `max_retries`: Maximum refinement rounds if compliance is low (default: 2)
-- `compliance_threshold`: Minimum statistical compliance score to accept (default: 0.85)
+- `temperature`: Generation temperature for LLM calls (default: 0.85). Higher = more creative, lower = more conservative
+- `max_tokens`: Maximum tokens per paragraph generation (default: 1500)
+- `num_candidates`: Number of candidate paragraphs to generate per round (default: 6)
+- `max_retries`: Maximum refinement rounds if compliance is low (default: 10)
+- `compliance_threshold`: Minimum statistical compliance score to accept a paragraph (default: 0.85)
 - `default_perspective`: Default perspective to use if not specified. Options:
-  - `null` (default): Follow author profile POV, fallback to input detection
+  - `null`: Follow author profile POV, fallback to input detection
   - `"first_person_singular"`: Force first person singular (I/Me/My)
   - `"first_person_plural"`: Force first person plural (We/Us/Our)
   - `"third_person"`: Force third person (The subject/The narrator)
 
-**Semantic Critic** (validation thresholds):
+**`translator`** (object): Translation/generation parameters:
 ```json
 {
-  "semantic_critic": {
-    "recall_threshold": 0.85,
-    "precision_threshold": 0.60,
-    "similarity_threshold": 0.7,
-    "fluency_threshold": 0.8,
-    "weights": {
-      "accuracy": 0.5,
-      "fluency": 0.1,
-      "style": 0.1,
-      "thesis_alignment": 0.15,
-      "intent_compliance": 0.1,
-      "keyword_coverage": 0.05
-    }
+  "temperature": 0.8,
+  "max_tokens": 3000,
+  "literal_temperature": 0.3,
+  "literal_max_tokens": 200
+}
+```
+- `temperature`: Temperature for general translation tasks (default: 0.8)
+- `max_tokens`: Maximum tokens for translation output (default: 3000)
+- `literal_temperature`: Temperature for literal translation tasks (default: 0.3, lower for more precise output)
+- `literal_max_tokens`: Maximum tokens for literal translation output (default: 200)
+
+**`semantic_translation`** (object): Semantic neutralization parameters:
+```json
+{
+  "temperature": 0.3,
+  "max_tokens": 1000
+}
+```
+- `temperature`: Temperature for semantic summary extraction (default: 0.3, low for precise meaning preservation)
+- `max_tokens`: Maximum tokens for neutral summary output (default: 1000)
+
+**`refinement`** (object): Paragraph refinement parameters for iterative improvement:
+```json
+{
+  "max_generations": 10,
+  "pass_threshold": 0.9,
+  "patience_threshold": 3,
+  "patience_min_score": 0.80,
+  "initial_temperature": 0.4,
+  "temperature_increment": 0.1,
+  "max_temperature": 0.95,
+  "refinement_temperature": 0.6
+}
+```
+- `max_generations`: Maximum number of refinement generations (default: 10)
+- `pass_threshold`: Score threshold to accept a refined paragraph (default: 0.9)
+- `patience_threshold`: Number of generations without improvement before stopping (default: 3)
+- `patience_min_score`: Minimum score to consider as "improvement" for patience counter (default: 0.80)
+- `initial_temperature`: Starting temperature for refinement (default: 0.4)
+- `temperature_increment`: Temperature increase per generation if no improvement (default: 0.1)
+- `max_temperature`: Maximum temperature cap during refinement (default: 0.95)
+- `refinement_temperature`: Default temperature if initial_temperature not set (default: 0.6)
+
+**`evolutionary`** (object): Evolutionary generation parameters for sentence-level style transfer:
+```json
+{
+  "batch_size": 40,
+  "max_generations": 10,
+  "convergence_threshold": 0.95,
+  "top_k_parents": 10,
+  "breeding_children": 10,
+  "fresh_generation_ratio": 0.33,
+  "min_keyword_presence": 0.4,
+  "min_viable_recall": 0.85
+}
+```
+- `batch_size`: Number of candidates in each generation batch (default: 40)
+- `max_generations`: Maximum number of evolutionary generations (default: 10)
+- `convergence_threshold`: Score threshold for convergence (default: 0.95)
+- `top_k_parents`: Number of top candidates to use as parents for next generation (default: 10)
+- `breeding_children`: Number of children to generate from parent breeding (default: 10)
+- `fresh_generation_ratio`: Ratio of fresh random candidates vs. bred candidates (default: 0.33)
+- `min_keyword_presence`: Minimum keyword presence ratio required (default: 0.4)
+- `min_viable_recall`: Minimum semantic recall score to consider viable (default: 0.85)
+
+### Validation Configuration
+
+**`critic`** (object): Critic evaluation settings:
+```json
+{
+  "stat_tolerance": 0.25,
+  "min_score": 0.6,
+  "max_retries": 5,
+  "fallback_pass_threshold": 0.75,
+  "good_enough_threshold": 0.90
+}
+```
+- `stat_tolerance`: Statistical tolerance for archetype matching (default: 0.25)
+- `min_score`: Minimum score to accept a paragraph (default: 0.6)
+- `max_retries`: Maximum retry attempts per paragraph (default: 5)
+- `fallback_pass_threshold`: Score threshold for fallback acceptance (default: 0.75)
+- `good_enough_threshold`: Score threshold considered "good enough" to stop refinement (default: 0.90)
+
+**`semantic_critic`** (object): Semantic validation thresholds:
+```json
+{
+  "recall_threshold": 0.85,
+  "precision_threshold": 0.60,
+  "similarity_threshold": 0.5,
+  "fluency_threshold": 0.75,
+  "accuracy_weight": 0.8,
+  "fluency_weight": 0.2,
+  "weights": {
+    "accuracy": 0.8,
+    "fluency": 0.1,
+    "style": 0.1,
+    "thesis_alignment": 0.05,
+    "intent_compliance": 0.05,
+    "keyword_coverage": 0.05
   }
 }
 ```
+- `recall_threshold`: Minimum proposition recall score (default: 0.85)
+- `precision_threshold`: Minimum proposition precision score (default: 0.60)
+- `similarity_threshold`: Minimum semantic similarity score (default: 0.5)
+- `fluency_threshold`: Minimum grammatical fluency score (default: 0.75)
+- `accuracy_weight`: Weight for accuracy in composite score (default: 0.8, legacy)
+- `fluency_weight`: Weight for fluency in composite score (default: 0.2, legacy)
+- `weights`: Composite score weights (sum should be ~1.0):
+  - `accuracy`: Semantic accuracy (proposition recall/precision) (default: 0.8)
+  - `fluency`: Grammatical fluency (default: 0.1)
+  - `style`: Style alignment with target author (default: 0.1)
+  - `thesis_alignment`: Alignment with document thesis when global context is available (default: 0.05)
+  - `intent_compliance`: Compliance with document intent when global context is available (default: 0.05)
+  - `keyword_coverage`: Coverage of document keywords when global context is available (default: 0.05)
 
-The `weights` section controls how different metrics contribute to the composite score:
-- `accuracy`: Semantic accuracy (proposition recall/precision)
-- `fluency`: Grammatical fluency
-- `style`: Style alignment with target author
-- `thesis_alignment`: Alignment with document thesis (when global context is available)
-- `intent_compliance`: Compliance with document intent (when global context is available)
-- `keyword_coverage`: Coverage of document keywords (when global context is available)
-
-**Atlas** (Style Atlas settings):
+**`scorer`** (object): Scorer evaluation thresholds:
 ```json
 {
-  "atlas": {
-    "persist_path": "atlas_cache/",
-    "num_clusters": 5,
-    "min_structure_words": 4,
-    "max_length_ratio": 1.8,
-    "min_length_ratio": 0.6
-  }
+  "meaning_threshold": 0.80,
+  "style_threshold": 0.70,
+  "hallucination_threshold": 0.1,
+  "llm_style_threshold": 0.75
 }
 ```
+- `meaning_threshold`: Minimum meaning preservation score (BERTScore) (default: 0.80)
+- `style_threshold`: Maximum KL divergence for style matching (default: 0.70)
+- `hallucination_threshold`: Maximum hallucination score allowed (default: 0.1)
+- `llm_style_threshold`: Minimum LLM-evaluated style score (default: 0.75)
 
-**Translator** (generation parameters):
+**`length_gate`** (object): Length validation parameters for paragraph matching:
 ```json
 {
-  "translator": {
-    "temperature": 0.5,
-    "max_tokens": 300
-  }
+  "default_min_ratio": 0.6,
+  "default_max_ratio": 2.0,
+  "lenient_min_ratio": 0.1,
+  "lenient_max_ratio": 6.0,
+  "very_different_threshold_low": 0.5,
+  "very_different_threshold_high": 2.0,
+  "moderate_different_threshold_low": 0.67,
+  "moderate_different_threshold_high": 1.5,
+  "skip_gate_when_very_different": true
 }
 ```
+- `default_min_ratio`: Default minimum length ratio for matching (default: 0.6)
+- `default_max_ratio`: Default maximum length ratio for matching (default: 2.0)
+- `lenient_min_ratio`: Lenient minimum length ratio (default: 0.1)
+- `lenient_max_ratio`: Lenient maximum length ratio (default: 6.0)
+- `very_different_threshold_low`: Lower threshold for "very different" length detection (default: 0.5)
+- `very_different_threshold_high`: Upper threshold for "very different" length detection (default: 2.0)
+- `moderate_different_threshold_low`: Lower threshold for "moderate different" length detection (default: 0.67)
+- `moderate_different_threshold_high`: Upper threshold for "moderate different" length detection (default: 1.5)
+- `skip_gate_when_very_different`: Whether to skip length gate when lengths are very different (default: true)
 
-**Critic** (evaluation settings):
+### Context Configuration
+
+**`global_context`** (object): Document-level context for style transfer:
 ```json
 {
-  "critic": {
-    "min_score": 0.6,
-    "max_retries": 5,
-    "good_enough_threshold": 0.8
-  }
+  "enabled": true,
+  "max_summary_tokens": 600
 }
 ```
-
-**Global Context** (document-level context for style transfer):
-```json
-{
-  "global_context": {
-    "enabled": true,
-    "max_summary_tokens": 500
-  }
-}
-```
+- `enabled`: Enable document-level context extraction (default: true)
+- `max_summary_tokens`: Maximum tokens for global context summary (default: 600)
 
 When enabled, the system uses document-level context (thesis, intent, keywords) to improve style transfer quality. This is particularly useful for maintaining consistency across long documents.
 
-**Style RAG** (Dynamic Style Palette retrieval):
+**`style_rag`** (object): Style RAG (Retrieval-Augmented Generation) settings for dynamic style palette retrieval:
 ```json
 {
-  "style_rag": {
-    "num_fragments": 8,
-    "window_size": 3,
-    "overlap": 1,
-    "embedding_model": "all-mpnet-base-v2"
-  }
+  "num_fragments": 5,
+  "window_size": 3,
+  "overlap": 1,
+  "embedding_model": "all-mpnet-base-v2"
 }
 ```
-
-Controls the Style RAG system that retrieves semantically relevant style fragments from the author's corpus:
-- `num_fragments`: Number of style fragments to retrieve per paragraph (default: 8)
+- `num_fragments`: Number of style fragments to retrieve per paragraph (default: 5)
 - `window_size`: Number of sentences per fragment (default: 3)
 - `overlap`: Number of sentences to overlap between fragments (default: 1)
 - `embedding_model`: Sentence transformer model for semantic embeddings (default: "all-mpnet-base-v2")
 
 The Style RAG system retrieves actual phrases and sentence structures from the author's corpus that are semantically similar to the content being generated, providing concrete examples for the LLM to mimic.
 
-**Perspective Anchoring** (point of view preservation):
-```json
-{
-  "generation": {
-    "default_perspective": null
-  }
-}
-```
+### Perspective Anchoring
 
-Controls how the system preserves narrative point of view (POV) through the translation pipeline:
+**Perspective Configuration** (via `generation.default_perspective`): Controls how the system preserves narrative point of view (POV) through the translation pipeline:
 
 - **Problem**: Without perspective anchoring, the neutralizer can convert personal narratives ("I scavenged...") into detached academic prose ("The subject engaged in scavenging..."), making it difficult to restore the original perspective.
 
@@ -376,28 +540,6 @@ Controls how the system preserves narrative point of view (POV) through the tran
     }
   }
   ```
-
-**Evolutionary** (evolutionary generation parameters):
-```json
-{
-  "evolutionary": {
-    "batch_size": 40,
-    "variants_per_skeleton": {
-      "strict_adherence": 10,
-      "high_style": 10,
-      "experimental": 10,
-      "simplified": 10
-    },
-    "max_generations": 3,
-    "convergence_threshold": 0.95,
-    "top_k_parents": 10,
-    "breeding_children": 10,
-    "min_keyword_presence": 0.5
-  }
-}
-```
-
-Controls the evolutionary generation process for sentence-level style transfer.
 
 ## Project Structure
 

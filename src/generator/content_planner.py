@@ -105,7 +105,10 @@ Output only the content for each slot, one per line. Do not include slot numbers
                     parts = line.split(':', 1)
                     if len(parts) > 1:
                         line = parts[1].strip()
-                if line:
+                # Preserve EMPTY markers (case-insensitive check)
+                if line.upper() == "EMPTY":
+                    content_slots.append("EMPTY")
+                elif line:
                     content_slots.append(line)
 
             # Ensure we have the right number of slots

@@ -4309,11 +4309,22 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         # ASSEMBLY LINE ARCHITECTURE: Build sentence by sentence
         final_sentences = []
         context_so_far = ""
+        active_structure_map = []  # NEW: Track only slots that were actually generated
 
         for slot_idx, slot in enumerate(structure_map):
             content = content_slots[slot_idx] if slot_idx < len(content_slots) else ""
             target_len = slot.get('target_len', 20)
             slot_type = slot.get('type', 'moderate')
+
+            # NEW: Handle EMPTY slots
+            if not content or content.strip().upper() == "EMPTY":
+                if verbose:
+                    print(f"  Skipping EMPTY slot {slot_idx + 1}")
+                # Skip this slot entirely - don't add to active_structure_map
+                continue
+
+            # If valid, add to active map BEFORE generation
+            active_structure_map.append(slot)
 
             if verbose:
                 print(f"  Building sentence {slot_idx + 1}/{len(structure_map)}: target {target_len} words ({slot_type})...")
@@ -4389,13 +4400,14 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         # Combine sentences into paragraph
         final_paragraph = " ".join(final_sentences)
 
-        # BLUEPRINT-AWARE GRADING: Calculate targets from structure map, not archetype averages
+        # BLUEPRINT-AWARE GRADING: Calculate targets from ACTIVE structure map, not original
+        # This ensures validation uses the correct sentence count (6 instead of 9 if 3 were EMPTY)
         # CRITICAL: Skip burstiness check for short paragraphs (sentence_count < 3) to avoid low-sample noise
         # The burstiness is already baked into the structure map (e.g., [Short, Long])
-        sentence_count = len(structure_map)
+        sentence_count = len(active_structure_map)  # Use active count, not original
         blueprint_target_stats = {
             "avg_sents": sentence_count,
-            "avg_len": sum(s['target_len'] for s in structure_map) / sentence_count if structure_map else 0,
+            "avg_len": sum(s['target_len'] for s in active_structure_map) / sentence_count if active_structure_map else 0,
             # Skip burstiness check for short paragraphs (statistically noisy)
             # For longer paragraphs, use archetype's burstiness
             "burstiness": None if sentence_count < 3 else archetype_desc.get("burstiness", "Low"),
@@ -4415,6 +4427,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
         # LEXICAL DIVERSITY GUARD: Check for repetitive phrasing
         repetition_issues = self.statistical_critic.check_repetition(final_paragraph)
+        original_repetition_count = len(repetition_issues)  # Store count before repair
         if repetition_issues:
             if verbose:
                 print(f"  ⚠ Lexical repetition detected: {len(repetition_issues)} issues")
@@ -4439,33 +4452,130 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             if not hasattr(self, 'refiner') or self.refiner is None:
                 self.refiner = ParagraphRefiner(self.config_path)
 
+            # Extract forbidden phrases from repetition issues
+            forbidden_phrases = []
+            for issue in repetition_issues:
+                # Parse "Repeated phrase: 'profound void' (appears 2 times)"
+                if "'" in issue:
+                    try:
+                        phrase = issue.split("'")[1]  # Extract text between single quotes
+                        forbidden_phrases.append(phrase)
+                    except IndexError:
+                        pass
+
             # Attempt repair via repair plan
             try:
-                refined_text = self.refiner.refine_via_repair_plan(
+                refined_text, structure_delta = self.refiner.refine_via_repair_plan(
                     best_text,
                     qualitative_feedback,
                     structure_map,
                     author_name,
-                    verbose
+                    verbose,
+                    forbidden_phrases=forbidden_phrases  # NEW ARGUMENT
                 )
 
-                if not refined_text or refined_text == best_text:
+                # Safety check: Handle empty or None repair results
+                if not refined_text or len(refined_text.strip()) == 0:
+                    if verbose:
+                        print(f"  ⚠ Repair returned empty text, keeping original")
+                    refined_text = best_text
+
+                if refined_text == best_text:
                     if verbose:
                         print(f"  Repair did not produce changes, keeping original")
                 else:
-                    # Re-validate refined text
+                    # Calculate Delta based on REALITY, not the plan
+                    # Count actual sentences in original and refined text
+                    try:
+                        nlp = NLPManager.get_nlp()
+                        original_doc = nlp(best_text)
+                        refined_doc = nlp(refined_text)
+                        original_count = len(list(original_doc.sents))
+                        new_count = len(list(refined_doc.sents))
+                        actual_structure_delta = new_count - original_count
+                    except Exception:
+                        # Fallback: simple sentence count using periods
+                        original_count = len([s for s in best_text.split('.') if s.strip()])
+                        new_count = len([s for s in refined_text.split('.') if s.strip()])
+                        actual_structure_delta = new_count - original_count
+
+                    if verbose and actual_structure_delta != structure_delta:
+                        print(f"  Structure delta: planned={structure_delta:+d}, actual={actual_structure_delta:+d} (using actual)")
+
+                    # Use actual delta, not planned delta
+                    structure_delta = actual_structure_delta
+
+                    # DYNAMIC RUBRIC ADJUSTMENT: Update blueprint stats to match repair changes
+                    adjusted_stats = blueprint_target_stats.copy()
+
+                    if structure_delta != 0:
+                        # 1. Update Sentence Count
+                        old_count = adjusted_stats.get('avg_sents', blueprint_target_stats.get('avg_sents', 1))
+                        new_count = max(1, old_count + structure_delta)
+                        adjusted_stats['avg_sents'] = new_count
+
+                        # 2. Update Average Length (Conservation of Mass)
+                        # Total words should remain roughly constant, just redistributed
+                        old_avg_len = adjusted_stats.get('avg_len', 0)
+                        if old_avg_len > 0 and old_count > 0:
+                            total_mass = old_avg_len * old_count
+                            adjusted_stats['avg_len'] = total_mass / new_count if new_count > 0 else old_avg_len
+
+                        if verbose:
+                            print(f"  Adjusting rubric for repair: {old_count} -> {new_count} sents, "
+                                  f"{old_avg_len:.1f} -> {adjusted_stats['avg_len']:.1f} avg len")
+                    else:
+                        # No structural change, use original stats
+                        adjusted_stats = blueprint_target_stats
+
+                    # Re-validate refined text with adjusted rubric
                     refined_text, refined_score, _ = self.statistical_critic.select_best_candidate(
-                        [refined_text], blueprint_target_stats
+                        [refined_text], adjusted_stats
                     )
 
+                    # Check if repetition improved
+                    new_repetition_issues = self.statistical_critic.check_repetition(refined_text)
+                    new_repetition_count = len(new_repetition_issues)
+                    repetition_improved = original_repetition_count > 0 and new_repetition_count < original_repetition_count
+
+                    # Structural Bias: Prefer action over inaction when structural changes occur
+                    structure_changed = (structure_delta != 0)
+                    score_tied_or_better = (refined_score >= best_score)
+                    score_acceptable = (refined_score >= 0.40)  # Safety floor
+
+                    # Improvement-Based Acceptance Logic:
+                    # Accept if:
+                    # A) Score improved (standard case)
+                    # B) OR: Repetition was fixed (quality > strict structure compliance)
+                    # C) OR: Structural change achieved and score is acceptable and tied/better (tie-breaker)
+                    accept = False
+                    reason = ""
+
                     if refined_score > best_score:
+                        # Case A: Clear win
+                        accept = True
+                        reason = "score_improved"
+                    elif repetition_improved:
+                        # Case B: Quality win
+                        accept = True
+                        reason = "repetition_reduced"
+                    elif structure_changed and score_acceptable and score_tied_or_better:
+                        # Case C: Structural win (Tie-breaker)
+                        # If we ordered a split and got a split, we keep it even if length score is messy
+                        accept = True
+                        reason = "structure_restored"
+
+                    if accept:
                         if verbose:
-                            print(f"  ✓ Repair improved score: {refined_score:.2f} (was {best_score:.2f})")
+                            print(f"  ✓ Repair accepted ({reason}). Score: {refined_score:.2f} vs {best_score:.2f}" +
+                                  (f", structure change: {structure_delta:+d}" if structure_changed else ""))
                         best_text = refined_text
                         best_score = refined_score
                     else:
                         if verbose:
-                            print(f"  Repair did not improve score ({refined_score:.2f} <= {best_score:.2f}), keeping original")
+                            print(f"  Repair rejected: Score {refined_score:.2f} <= {best_score:.2f}, " +
+                                  f"repetition {new_repetition_count} >= {original_repetition_count}" +
+                                  (f", structure change: {structure_delta:+d}" if structure_changed else ""))
             except Exception as e:
                 import traceback
                 error_msg = str(e)

@@ -1,6 +1,6 @@
-# Task: Execute Repair Instruction
+# Task: Execute Repair Instruction (SURGICAL EDITING)
 
-## Current Sentence:
+## Target Sentence:
 "{current_sentence}"
 
 ## Action:
@@ -9,22 +9,32 @@
 ## Instruction:
 {instruction}
 
+{target_length_section}
+
+{forbidden_phrases_section}
+
+{split_format_section}
+
 ## Previous Context:
 {prev_context}
 
 ## Next Sentence (if merging):
 {next_sentence}
 
+## Semantic Constraint:
+Ensure the new sentence does NOT repeat ideas already expressed in the Previous Context.
+If the instruction would cause semantic repetition, rephrase to add new nuance or merge with previous sentence.
+
+## CRITICAL CONSTRAINTS:
+1. **Length**: {target_length_constraint}
+2. **Forbidden Phrases**: {forbidden_phrases_list}
+3. **Action Compliance**: You MUST follow the {action} instruction exactly. Do NOT just rephrase.
+
 ## Instructions:
-Apply the repair instruction to the current sentence. Maintain the author's voice ({author_name}).
+Apply the repair instruction EXACTLY as specified. This is surgical editing, not creative writing.
+- If instructed to SPLIT, you MUST output two separate sentences separated by '|||'.
+- If instructed to SHORTEN, you MUST reduce word count significantly.
+- If forbidden phrases are listed, you MUST avoid them completely.
 
-Actions:
-- "merge_with_next": Combine current sentence with the next sentence using the specified connector
-- "split": Split the sentence at the specified point
-- "rewrite_connector": Rewrite the transition/connector phrase
-- "add_transition": Add a transition word or phrase at the start
-- "simplify": Simplify the sentence structure
-- "expand": Add more detail or elaboration
-
+Maintain the author's voice ({author_name}).
 Output only the fixed sentence(s), no explanations.
-
