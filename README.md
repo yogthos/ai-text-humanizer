@@ -73,22 +73,19 @@ python3 -c "from sentence_transformers import SentenceTransformer; SentenceTrans
    }
    ```
 
-2. Load author styles into ChromaDB:
+2. Initialize author (one command sets up everything):
    ```bash
-   python3 scripts/load_style.py --style-file styles/sample_mao.txt --author "Mao"
+   python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt
    ```
 
-3. Build paragraph atlas (for statistical generation):
-   ```bash
-   python3 scripts/build_paragraph_atlas.py styles/sample_mao.txt --author "Mao"
-   ```
+   This single command automatically:
+   - Loads styles into ChromaDB (Style Atlas)
+   - Builds paragraph atlas (statistical archetypes)
+   - Builds Style RAG index (semantic style fragment retrieval)
 
-4. Build Style RAG index (for dynamic style palette retrieval):
-   ```bash
-   python3 tools/build_rag_index.py --author "Mao"
-   ```
+   **Note:** If you need to run steps individually, see the [Usage](#usage) section below.
 
-5. Transform text:
+3. Transform text:
    ```bash
    python3 restyle.py input/small.md -o output/small.md
    ```
@@ -96,6 +93,22 @@ python3 -c "from sentence_transformers import SentenceTransformer; SentenceTrans
 ## Usage
 
 ### Loading Author Styles
+
+**Quick Start - Initialize Author (Recommended):**
+
+Use the turnkey script to set up everything in one command:
+```bash
+# Initialize author (loads styles, builds atlas, builds RAG)
+python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt
+
+# With verbose output
+python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt --verbose
+
+# Skip steps that are already done
+python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt --skip-style-load
+```
+
+**Manual Setup (Individual Steps):**
 
 **1. Load Style Atlas** (for paragraph-level style retrieval):
 ```bash
@@ -120,11 +133,8 @@ This creates:
 
 **3. Build Style RAG Index** (for dynamic style palette retrieval):
 ```bash
-# Uses default corpus file: styles/sample_{author}.txt
-python3 tools/build_rag_index.py --author "Mao"
-
-# Or specify custom corpus file
-python3 tools/build_rag_index.py --author "Mao" --corpus-file path/to/corpus.txt
+# Specify corpus file
+python3 scripts/build_rag_index.py --author "Mao" --corpus-file styles/sample_mao.txt
 ```
 
 This creates:
@@ -573,13 +583,13 @@ text-style-transfer/
 │       └── semantic_analyzer.py # Proposition extraction
 ├── prompts/                     # LLM prompt templates (markdown)
 ├── scripts/
+│   ├── init_author.py          # Turnkey script to initialize author (loads styles, builds atlas & RAG)
 │   ├── load_style.py           # Load author styles into Style Atlas
 │   ├── build_paragraph_atlas.py # Build paragraph archetype atlas
+│   ├── build_rag_index.py      # Build Style RAG fragment index
 │   ├── generate_style_dna.py   # Generate Style DNA profiles
 │   ├── list_styles.py          # List loaded authors
 │   └── clear_chromadb.py       # Clear ChromaDB collections
-├── tools/
-│   └── build_rag_index.py      # Build Style RAG fragment index
 ├── styles/                      # Author corpus files
 ├── input/                       # Input text files
 ├── output/                      # Generated output files
@@ -805,13 +815,13 @@ For more details, see `tests/integration/README.md`.
 
 **Paragraph Atlas not found**: Build paragraph atlas using `scripts/build_paragraph_atlas.py`
 
-**Style RAG collection not found**: Build RAG index using `tools/build_rag_index.py --author <name>`
+**Style RAG collection not found**: Build RAG index using `scripts/build_rag_index.py --author <name> --corpus-file <file>` or use `scripts/init_author.py`
 
 **Author not found**: Check `blend.authors` in config.json matches loaded author names
 
 **Low quality output**:
 - Adjust `generation.compliance_threshold` or `semantic_critic.recall_threshold`
-- Ensure Style RAG index is built for better style palette retrieval (`tools/build_rag_index.py`)
+- Ensure Style RAG index is built for better style palette retrieval (`scripts/build_rag_index.py` or use `scripts/init_author.py`)
 - Check that paragraph atlas is built for statistical generation (`scripts/build_paragraph_atlas.py`)
 - Verify that Style DNA is generated for the author (`scripts/generate_style_dna.py`)
 - Increase `generation.num_candidates` for more diverse generation
