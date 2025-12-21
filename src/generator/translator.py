@@ -5,6 +5,7 @@ few-shot examples from a rhetorically-indexed style atlas.
 """
 
 import json
+import random
 import re
 import time
 import requests
@@ -4359,7 +4360,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         if verbose:
             print(f"  Planning content distribution into {len(structure_map)} slots...")
         content_planner = ContentPlanner(self.config_path)
-        content_slots = content_planner.plan_content(neutral_text, structure_map, author_name)
+        content_slots = content_planner.plan_content(neutral_text, structure_map, author_name, source_text=paragraph)
         if verbose:
             print(f"  Content distributed into {len(content_slots)} slots")
 
@@ -4965,17 +4966,25 @@ Output only the sentence, no explanations.
                 clean_prev = " ".join(prev_words[:4]).replace("`", "").replace("*", "")
                 anti_echo_section = f"**DO NOT start with:** '{clean_prev}...'"
 
-        # 2. Build ending constraint for last sentence
+        # 2. Build ending constraint for last sentence (randomized to break AI rhythm)
         ending_constraint = ""
         ending_constraint_instruction = ""
         if is_last_sentence:
+            focus_options = [
+                "Constraint: Make a concrete physical object the SUBJECT of this final sentence.",
+                "Constraint: Describe a specific SOUND, SMELL, or TACTILE SENSATION to close the paragraph.",
+                "Constraint: End the sentence with a physical ACTION performed by the protagonist.",
+                "Constraint: Focus on a texture (e.g., cold, grit, rough) in the final clause, integrated naturally."
+            ]
+            specific_instruction = random.choice(focus_options)
+
             ending_constraint = (
-                "**GROUNDING CONSTRAINT:** This is the final sentence of the paragraph. "
-                "Do NOT summarize, moralize, or use abstract concepts like 'lesson', 'meaning', or 'significance'. "
-                "End with a sensory detail (sight, sound, touch, smell) or a specific concrete object. "
-                "Avoid phrases like 'in conclusion', 'ultimately', 'the lesson is', or abstract nouns."
+                f"\n**GROUNDING CONSTRAINT (Critical):**\n"
+                f"1. {specific_instruction}\n"
+                "2. **ANTI-PATTERN:** Do NOT just tack the object onto the end (e.g., '...ending with the [object].').\n"
+                "3. **PROHIBITED:** Abstract summaries, moral lessons, or phrases like 'Thus, I learned...'."
             )
-            ending_constraint_instruction = "6. **GROUNDING:** " + ending_constraint.replace("**GROUNDING CONSTRAINT:**", "").strip()
+            ending_constraint_instruction = "6. **GROUNDING:** " + ending_constraint.replace("**GROUNDING CONSTRAINT (Critical):**", "").strip()
 
         # 3. Safe Formatting (use dictionary to ensure all keys present)
         prompt_params = {
