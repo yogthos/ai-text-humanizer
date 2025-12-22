@@ -189,3 +189,37 @@ class VocabularyBudget:
 
         return found
 
+    def validate_vocabulary(self, text: str) -> List[str]:
+        """Validate text for restricted vocabulary violations.
+
+        When max_per_chapter is 0, performs a simple presence check (stateless).
+        Otherwise, uses budget logic to check if words are allowed.
+
+        Args:
+            text: Text to validate
+
+        Returns:
+            List of violating words (empty if no violations)
+        """
+        violations = []
+
+        # If max_per_chapter is 0, use simple presence check (stateless)
+        if self.max_per_chapter == 0:
+            text_lower = text.lower()
+            for word in self.restricted_words:
+                # Use word boundary matching to avoid partial matches
+                if re.search(r'\b' + re.escape(word) + r'\b', text_lower):
+                    violations.append(word)
+        else:
+            # Use budget logic: check each found word
+            found_words = self.find_restricted_words(text)
+            for word, position in found_words:
+                # Calculate absolute position in document
+                absolute_position = self._total_words + position
+                # Check if allowed
+                allowed, reason = self.check_word_allowed(word, absolute_position)
+                if not allowed:
+                    violations.append(word)
+
+        return violations
+
