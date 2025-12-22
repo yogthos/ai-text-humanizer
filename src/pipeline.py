@@ -24,6 +24,7 @@ from src.analyzer.style_extractor import StyleExtractor
 from src.utils.structure_tracker import StructureTracker
 from src.analyzer.global_context import GlobalContextAnalyzer
 from src.utils.nlp_manager import NLPManager
+from src.utils.vocabulary_budget import VocabularyBudget
 
 
 def _split_into_paragraphs(text: str) -> List[str]:
@@ -325,10 +326,27 @@ def process_text(
                 keywords = global_context.get('keywords', [])[:5]
                 if keywords:
                     print(f"  Context Keywords: {', '.join(keywords)}")
+
+        # Initialize vocabulary budget if enabled
+        vocab_config = config.get("vocabulary_budget", {})
+        if vocab_config.get("enabled", False):
+            restricted_words = vocab_config.get("restricted_words", [])
+            max_per_chapter = vocab_config.get("max_per_chapter", 2)
+            clustering_distance = vocab_config.get("clustering_distance", 50)
+            vocabulary_budget = VocabularyBudget(
+                restricted_words=restricted_words,
+                max_per_chapter=max_per_chapter,
+                clustering_distance=clustering_distance
+            )
+            if verbose:
+                print(f"  Vocabulary Budget: Tracking {len(restricted_words)} restricted words (max {max_per_chapter} per chapter)")
+        else:
+            vocabulary_budget = None
     except Exception as e:
         if verbose:
             print(f"  ⚠ Global context extraction failed: {e}, continuing without context")
         global_context = None
+        vocabulary_budget = None
 
     generated_paragraphs = []
     current_paragraph_sentences = []  # Track sentences for current paragraph
@@ -423,7 +441,8 @@ def process_text(
             author_name,
             prev_archetype_id=prev_archetype_id,
             perspective=perspective,
-            verbose=verbose
+            verbose=verbose,
+            vocabulary_budget=vocabulary_budget
         )
 
         # Update previous archetype ID for Markov chain continuity
@@ -432,6 +451,102 @@ def process_text(
         # Check compliance score
         if verbose:
             print(f"  Compliance score: {compliance_score:.2f}")
+
+        # Validate vocabulary budget if enabled
+        if vocabulary_budget:
+            try:
+                vocab_config = config.get("vocabulary_budget", {})
+            except:
+                vocab_config = {}
+            auto_regenerate = vocab_config.get("auto_regenerate_on_violation", True)
+            enforce_clustering = vocab_config.get("enforce_clustering", True)
+            force_programmatic_fix = vocab_config.get("force_programmatic_fix", False)
+            max_retries_before_force = vocab_config.get("max_retries_before_force", None)  # None = wait for all retries
+
+            # Find restricted words in generated paragraph
+            found_words = vocabulary_budget.find_restricted_words(generated_paragraph)
+
+            violations = []
+            for word, position in found_words:
+                # Calculate absolute position in document
+                absolute_position = vocabulary_budget._total_words + position
+
+                # Check if allowed
+                allowed, reason = vocabulary_budget.check_word_allowed(word, absolute_position)
+                if not allowed:
+                    violations.append((word, reason))
+                    if verbose:
+                        print(f"  ⚠ Vocabulary violation: '{word}' - {reason}")
+
+            # Track retry attempts for vocabulary violations
+            vocab_retry_count = 0
+            max_vocab_retries = max_retries_before_force if max_retries_before_force is not None else 1
+
+            # If violations found and auto-regenerate enabled, trigger regeneration
+            if violations and auto_regenerate and vocab_retry_count < max_vocab_retries:
+                if verbose:
+                    print(f"  🔄 Regenerating paragraph due to vocabulary violations (attempt {vocab_retry_count + 1}/{max_vocab_retries})...")
+                # Regenerate with stricter constraints (vocabulary_budget will have updated forbidden list)
+                generated_paragraph, arch_id, compliance_score = translator.translate_paragraph_statistical(
+                    paragraph,
+                    author_name,
+                    prev_archetype_id=prev_archetype_id,
+                    perspective=perspective,
+                    verbose=verbose,
+                    vocabulary_budget=vocabulary_budget
+                )
+                prev_archetype_id = arch_id
+                vocab_retry_count += 1
+
+                # Re-check violations after regeneration
+                found_words = vocabulary_budget.find_restricted_words(generated_paragraph)
+                violations = []
+                for word, position in found_words:
+                    absolute_position = vocabulary_budget._total_words + position
+                    allowed, reason = vocabulary_budget.check_word_allowed(word, absolute_position)
+                    if not allowed:
+                        violations.append((word, reason))
+                        if verbose:
+                            print(f"  ⚠ Vocabulary violation persists: '{word}' - {reason}")
+
+            # Apply programmatic cleanup (sledgehammer) if violations persist and enabled
+            # Apply if: force_programmatic_fix is enabled AND (violations exist AND (retries exhausted OR auto-regenerate disabled))
+            should_apply_cleanup = (
+                force_programmatic_fix and
+                violations and
+                (vocab_retry_count >= max_vocab_retries or not auto_regenerate)
+            )
+
+            if should_apply_cleanup:
+                if verbose:
+                    print(f"  🔨 Applying programmatic cleanup (sledgehammer) to remove violations...")
+                # Extract just the words from violations (which are tuples of (word, reason))
+                violation_words = [v[0] if isinstance(v, tuple) else v for v in violations]
+                generated_paragraph = translator._programmatic_cleanup(generated_paragraph, violation_words)
+                # Re-check after cleanup to verify violations are gone
+                found_words = vocabulary_budget.find_restricted_words(generated_paragraph)
+                violations = []
+                for word, position in found_words:
+                    absolute_position = vocabulary_budget._total_words + position
+                    allowed, reason = vocabulary_budget.check_word_allowed(word, absolute_position)
+                    if not allowed:
+                        violations.append((word, reason))
+                if violations:
+                    if verbose:
+                        print(f"  ⚠ Warning: Some violations may remain after cleanup: {violations}")
+                else:
+                    if verbose:
+                        print(f"  ✓ Programmatic cleanup successful - all violations removed")
+
+            # Record valid word usage
+            if not violations or not auto_regenerate:
+                for word, position in found_words:
+                    absolute_position = vocabulary_budget._total_words + position
+                    vocabulary_budget.record_word(word, absolute_position, generated_paragraph)
+
+                # Update total word count
+                word_count = len(generated_paragraph.split())
+                vocabulary_budget.update_total_words(word_count)
 
         # Accept the generated paragraph
         if verbose:

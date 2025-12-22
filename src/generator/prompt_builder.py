@@ -234,8 +234,11 @@ class PromptAssembler:
         self.style_dna = style_dna
         self.style_dna_dict = style_dna_dict
 
-    def build_system_message(self) -> str:
+    def build_system_message(self, vocabulary_budget: Optional['VocabularyBudget'] = None) -> str:
         """Define the rigid persona. The LLM is not a writer; it is a style engine.
+
+        Args:
+            vocabulary_budget: Optional VocabularyBudget instance for dynamic constraints
 
         Returns:
             System prompt string.
@@ -256,7 +259,67 @@ class PromptAssembler:
                 # Fallback: append before the end
                 base_prompt = f"{base_prompt}\n\n{style_dna_section}"
 
+        # Inject vocabulary budget constraints if available
+        vocab_constraints = self._build_vocabulary_budget_section(vocabulary_budget)
+        if vocab_constraints:
+            # Insert vocabulary constraints before the end or after style DNA
+            if "YOUR DIRECTIVES" in base_prompt:
+                base_prompt = base_prompt.replace("YOUR DIRECTIVES:", f"{vocab_constraints}\n\nYOUR DIRECTIVES:")
+            elif "OPERATIONAL RULES" in base_prompt:
+                base_prompt = base_prompt.replace("OPERATIONAL RULES", f"{vocab_constraints}\n\nOPERATIONAL RULES")
+            else:
+                # Fallback: append before the end
+                base_prompt = f"{base_prompt}\n\n{vocab_constraints}"
+
         return base_prompt
+
+    def _build_vocabulary_budget_section(self, vocabulary_budget: Optional['VocabularyBudget']) -> str:
+        """Build vocabulary budget constraints section for system prompt.
+
+        Args:
+            vocabulary_budget: VocabularyBudget instance or None
+
+        Returns:
+            Constraint section string, or empty string if no budget
+        """
+        if not vocabulary_budget:
+            return ""
+
+        forbidden_words = vocabulary_budget.get_forbidden_words()
+        warning_words = vocabulary_budget.get_warning_words()
+        max_per_chapter = vocabulary_budget.max_per_chapter
+
+        sections = []
+
+        # FORBIDDEN words section
+        if forbidden_words:
+            words_str = ", ".join([f'"{word}"' for word in forbidden_words])
+            sections.append(
+                f"### THE NEGATIVE CONSTRAINTS (CRITICAL)\n"
+                f"You have a specific 'Restricted Vocabulary List.' You are currently OVER BUDGET on the following words. "
+                f"Do NOT use them under any circumstances in this generation. Find distinct synonyms or, better yet, "
+                f"restructure the sentence to avoid the adjective entirely.\n\n"
+                f"RESTRICTED LIST (FORBIDDEN):\n"
+                f"- {words_str.replace(', ', '\n- ')}"
+            )
+
+        # WARNING words section
+        if warning_words:
+            words_str = ", ".join([f'"{word}"' for word in warning_words])
+            sections.append(
+                f"### VOCABULARY BUDGET WARNING\n"
+                f"Use these words sparingly (max {max_per_chapter} per chapter): {words_str}"
+            )
+
+        # DENSITY RULES (always include if budget is active)
+        if forbidden_words or warning_words:
+            sections.append(
+                f"### DENSITY RULES\n"
+                f"- If you use a strong adjective (e.g., 'fragile,' 'labyrinthine'), you must not use another strong adjective in the subsequent sentence.\n"
+                f"- Never stack adjectives (e.g., 'vast, detailed blueprint'). Pick the single most accurate descriptor."
+            )
+
+        return "\n\n".join(sections) if sections else ""
 
     def _build_style_dna_section(self) -> str:
         """Build the Style DNA section for the system prompt.

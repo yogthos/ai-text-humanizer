@@ -5,8 +5,10 @@ This module provides a consistent API for interacting with different LLM provide
 """
 
 import json
+import time
 import requests
 from typing import Dict, Optional
+from requests.exceptions import Timeout, ConnectionError as RequestsConnectionError
 
 
 class LLMProvider:
@@ -28,6 +30,8 @@ class LLMProvider:
         self.default_timeout = llm_provider_config.get("timeout", 120)  # Default 120 seconds
         self.context_window = llm_provider_config.get("context_window", 128000)  # Default 128k for modern models
         self.max_output_tokens = llm_provider_config.get("max_output_tokens", 4000)  # Default 4k for output
+        self.max_retries = llm_provider_config.get("max_retries", 5)  # Default 5 retries
+        self.retry_delay = llm_provider_config.get("retry_delay", 2)  # Default 2 seconds between retries
         self._initialize_provider()
 
     def _initialize_provider(self):
@@ -232,19 +236,37 @@ class LLMProvider:
         # Use provided timeout or default from config (or 30 seconds as fallback)
         api_timeout = timeout if timeout is not None else (getattr(self, 'default_timeout', None) or 30)
 
-        try:
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=api_timeout)
-            response.raise_for_status()
+        # Retry logic for timeout and connection errors
+        last_exception = None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(self.api_url, headers=headers, json=payload, timeout=api_timeout)
+                response.raise_for_status()
 
-            result = response.json()
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                error_detail = e.response.text
-                raise RuntimeError(f"DeepSeek API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
-            raise
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"DeepSeek API request failed: {e}")
+                result = response.json()
+                return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except (Timeout, RequestsConnectionError) as e:
+                last_exception = e
+                if attempt < self.max_retries - 1:
+                    # Exponential backoff: delay increases with each retry
+                    delay = self.retry_delay * (2 ** attempt)
+                    print(f"    ⚠ DeepSeek API timeout/connection error (attempt {attempt + 1}/{self.max_retries}). Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    # Last attempt failed
+                    raise RuntimeError(f"DeepSeek API request failed after {self.max_retries} retries: {e}")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 400:
+                    error_detail = e.response.text
+                    raise RuntimeError(f"DeepSeek API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
+                raise
+            except requests.exceptions.RequestException as e:
+                # For other request exceptions, don't retry (e.g., 401, 403, 500)
+                raise RuntimeError(f"DeepSeek API request failed: {e}")
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise RuntimeError(f"DeepSeek API request failed after {self.max_retries} retries: {last_exception}")
 
     def _call_ollama_api(
         self,
@@ -296,30 +318,48 @@ class LLMProvider:
         # Use provided timeout or default from config (or 60 seconds as fallback)
         api_timeout = timeout if timeout is not None else (getattr(self, 'default_timeout', None) or 60)
 
-        try:
-            response = requests.post(api_url, json=data, timeout=api_timeout)
-            response.raise_for_status()
+        # Retry logic for timeout and connection errors
+        last_exception = None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(api_url, json=data, timeout=api_timeout)
+                response.raise_for_status()
 
-            result = response.json()
-            return result.get("message", {}).get("content", "").strip()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                # Try to get available models for better error message
-                try:
-                    models_url = api_url.replace("/api/chat", "/api/tags")
-                    models_response = requests.get(models_url, timeout=5)
-                    if models_response.status_code == 200:
-                        models_data = models_response.json()
-                        available_models = [m.get("name", "") for m in models_data.get("models", [])]
-                        raise RuntimeError(
-                            f"Ollama model '{model}' not found. Available models: {', '.join(available_models[:5])}"
-                        )
-                except:
-                    pass
-                raise RuntimeError(f"Ollama API 404: Model '{model}' not found or endpoint incorrect. Check model name and Ollama service.")
-            raise
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Ollama API request failed: {e}")
+                result = response.json()
+                return result.get("message", {}).get("content", "").strip()
+            except (Timeout, RequestsConnectionError) as e:
+                last_exception = e
+                if attempt < self.max_retries - 1:
+                    # Exponential backoff: delay increases with each retry
+                    delay = self.retry_delay * (2 ** attempt)
+                    print(f"    ⚠ Ollama API timeout/connection error (attempt {attempt + 1}/{self.max_retries}). Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    # Last attempt failed
+                    raise RuntimeError(f"Ollama API request failed after {self.max_retries} retries: {e}")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    # Try to get available models for better error message
+                    try:
+                        models_url = api_url.replace("/api/chat", "/api/tags")
+                        models_response = requests.get(models_url, timeout=5)
+                        if models_response.status_code == 200:
+                            models_data = models_response.json()
+                            available_models = [m.get("name", "") for m in models_data.get("models", [])]
+                            raise RuntimeError(
+                                f"Ollama model '{model}' not found. Available models: {', '.join(available_models[:5])}"
+                            )
+                    except:
+                        pass
+                    raise RuntimeError(f"Ollama API 404: Model '{model}' not found or endpoint incorrect. Check model name and Ollama service.")
+                raise
+            except requests.exceptions.RequestException as e:
+                # For other request exceptions, don't retry (e.g., 401, 403, 500)
+                raise RuntimeError(f"Ollama API request failed: {e}")
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise RuntimeError(f"Ollama API request failed after {self.max_retries} retries: {last_exception}")
 
     def _call_glm_api(
         self,
@@ -360,19 +400,37 @@ class LLMProvider:
         # Use provided timeout or default from config (or 60 seconds as fallback)
         api_timeout = timeout if timeout is not None else (getattr(self, 'default_timeout', None) or 60)
 
-        try:
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=api_timeout)
-            response.raise_for_status()
+        # Retry logic for timeout and connection errors
+        last_exception = None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(self.api_url, headers=headers, json=payload, timeout=api_timeout)
+                response.raise_for_status()
 
-            result = response.json()
-            return result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                error_detail = e.response.text
-                raise RuntimeError(f"GLM API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
-            raise
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"GLM API request failed: {e}")
+                result = response.json()
+                return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            except (Timeout, RequestsConnectionError) as e:
+                last_exception = e
+                if attempt < self.max_retries - 1:
+                    # Exponential backoff: delay increases with each retry
+                    delay = self.retry_delay * (2 ** attempt)
+                    print(f"    ⚠ GLM API timeout/connection error (attempt {attempt + 1}/{self.max_retries}). Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    # Last attempt failed
+                    raise RuntimeError(f"GLM API request failed after {self.max_retries} retries: {e}")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 400:
+                    error_detail = e.response.text
+                    raise RuntimeError(f"GLM API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
+                raise
+            except requests.exceptions.RequestException as e:
+                # For other request exceptions, don't retry (e.g., 401, 403, 500)
+                raise RuntimeError(f"GLM API request failed: {e}")
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise RuntimeError(f"GLM API request failed after {self.max_retries} retries: {last_exception}")
 
     def _call_gemini_api(
         self,
@@ -438,50 +496,69 @@ class LLMProvider:
             "Content-Type": "application/json"
         }
 
-        try:
-            # Use provided timeout or default from config (or 60 seconds as fallback)
-            api_timeout = timeout if timeout is not None else (getattr(self, 'default_timeout', None) or 60)
-            response = requests.post(api_url, headers=headers, json=payload, timeout=api_timeout)
-            response.raise_for_status()
+        # Use provided timeout or default from config (or 60 seconds as fallback)
+        api_timeout = timeout if timeout is not None else (getattr(self, 'default_timeout', None) or 60)
 
-            result = response.json()
+        # Retry logic for timeout and connection errors
+        last_exception = None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(api_url, headers=headers, json=payload, timeout=api_timeout)
+                response.raise_for_status()
 
-            # Extract text from Gemini response structure
-            # Response format: candidates[0].content.parts[0].text
-            if "candidates" in result and len(result["candidates"]) > 0:
-                candidate = result["candidates"][0]
+                result = response.json()
 
-                # Check for finish reason (might indicate error)
-                finish_reason = candidate.get("finishReason", "")
-                if finish_reason and finish_reason != "STOP":
-                    # Handle non-STOP finish reasons (e.g., MAX_TOKENS, SAFETY)
-                    if finish_reason == "MAX_TOKENS":
-                        print(f"    ⚠ Warning: Gemini response truncated (MAX_TOKENS). Consider increasing max_tokens.")
-                    elif finish_reason == "SAFETY":
-                        raise RuntimeError(f"Gemini API blocked content due to safety filters. Finish reason: {finish_reason}")
-                    elif finish_reason == "RECITATION":
-                        raise RuntimeError(f"Gemini API blocked content due to recitation detection. Finish reason: {finish_reason}")
-                    else:
-                        print(f"    ⚠ Warning: Gemini finish reason: {finish_reason}")
+                # Extract text from Gemini response structure
+                # Response format: candidates[0].content.parts[0].text
+                if "candidates" in result and len(result["candidates"]) > 0:
+                    candidate = result["candidates"][0]
 
-                if "content" in candidate and "parts" in candidate["content"]:
-                    if len(candidate["content"]["parts"]) > 0:
-                        text = candidate["content"]["parts"][0].get("text", "")
-                        if text:
-                            return text.strip()
+                    # Check for finish reason (might indicate error)
+                    finish_reason = candidate.get("finishReason", "")
+                    if finish_reason and finish_reason != "STOP":
+                        # Handle non-STOP finish reasons (e.g., MAX_TOKENS, SAFETY)
+                        if finish_reason == "MAX_TOKENS":
+                            print(f"    ⚠ Warning: Gemini response truncated (MAX_TOKENS). Consider increasing max_tokens.")
+                        elif finish_reason == "SAFETY":
+                            raise RuntimeError(f"Gemini API blocked content due to safety filters. Finish reason: {finish_reason}")
+                        elif finish_reason == "RECITATION":
+                            raise RuntimeError(f"Gemini API blocked content due to recitation detection. Finish reason: {finish_reason}")
                         else:
-                            raise RuntimeError(f"Gemini API returned empty text. Finish reason: {finish_reason}")
+                            print(f"    ⚠ Warning: Gemini finish reason: {finish_reason}")
 
-            # Fallback: try to find text anywhere in response
-            raise RuntimeError(f"Gemini API response format unexpected. Response: {result}")
+                    if "content" in candidate and "parts" in candidate["content"]:
+                        if len(candidate["content"]["parts"]) > 0:
+                            text = candidate["content"]["parts"][0].get("text", "")
+                            if text:
+                                return text.strip()
+                            else:
+                                raise RuntimeError(f"Gemini API returned empty text. Finish reason: {finish_reason}")
 
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 400:
-                error_detail = e.response.text
-                raise RuntimeError(f"Gemini API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
-            elif e.response.status_code == 401:
-                raise RuntimeError(f"Gemini API 401 Unauthorized: Invalid API key. Check 'gemini.api_key' in config.json.")
-            raise
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Gemini API request failed: {e}")
+                # Fallback: try to find text anywhere in response
+                raise RuntimeError(f"Gemini API response format unexpected. Response: {result}")
+
+            except (Timeout, RequestsConnectionError) as e:
+                last_exception = e
+                if attempt < self.max_retries - 1:
+                    # Exponential backoff: delay increases with each retry
+                    delay = self.retry_delay * (2 ** attempt)
+                    print(f"    ⚠ Gemini API timeout/connection error (attempt {attempt + 1}/{self.max_retries}). Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    # Last attempt failed
+                    raise RuntimeError(f"Gemini API request failed after {self.max_retries} retries: {e}")
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 400:
+                    error_detail = e.response.text
+                    raise RuntimeError(f"Gemini API 400 Bad Request: {error_detail}. Check model name '{model}' and request format.")
+                elif e.response.status_code == 401:
+                    raise RuntimeError(f"Gemini API 401 Unauthorized: Invalid API key. Check 'gemini.api_key' in config.json.")
+                raise
+            except requests.exceptions.RequestException as e:
+                # For other request exceptions, don't retry (e.g., 401, 403, 500)
+                raise RuntimeError(f"Gemini API request failed: {e}")
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise RuntimeError(f"Gemini API request failed after {self.max_retries} retries: {last_exception}")
 

@@ -4211,7 +4211,8 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         author_name: str,
         prev_archetype_id: Optional[int] = None,
         perspective: Optional[str] = None,
-        verbose: bool = False
+        verbose: bool = False,
+        vocabulary_budget: Optional['VocabularyBudget'] = None
     ) -> tuple[str, int, float]:
         """Translate paragraph using statistical archetype generation with iterative refinement.
 
@@ -4382,6 +4383,15 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             )
         except (FileNotFoundError, KeyError):
             system_prompt = f"You are a style translator for {author_name}. Generate sentences that match target lengths while preserving semantic content and author voice."
+
+        # Inject vocabulary budget constraints if available
+        if vocabulary_budget:
+            from src.generator.prompt_builder import PromptAssembler
+            assembler = PromptAssembler(target_author_name=author_name)
+            vocab_constraints = assembler._build_vocabulary_budget_section(vocabulary_budget)
+            if vocab_constraints:
+                # Append vocabulary constraints to system prompt
+                system_prompt = f"{system_prompt}\n\n{vocab_constraints}"
 
         # Perspective pronoun mapping
         perspective_pronouns = {
@@ -5223,6 +5233,46 @@ Output only the sentence, no explanations.
         # 3. Select by Length from VALID candidates only
         best = min(valid_candidates, key=lambda v: abs(len(v.split()) - target_length))
         return best
+
+    def _programmatic_cleanup(self, text: str, violations: List[str]) -> str:
+        """
+        The 'Sledgehammer': Forcibly removes banned words when the LLM refuses to fix them.
+        Handles spacing and capitalization to keep the sentence grammatically reasonable.
+
+        Args:
+            text: Text to clean
+            violations: List of restricted words that were found (violations)
+
+        Returns:
+            Cleaned text with violations removed
+        """
+        cleaned_text = text
+        violation_words = [v[0] if isinstance(v, tuple) else v for v in violations]  # Extract word from (word, reason) tuples
+
+        for word in violation_words:
+            # Regex explanation:
+            # \b - Word boundary (prevents matching 'profound' inside 'profoundly' if strictly matching)
+            # (?i) - Case insensitive (handled by re.IGNORECASE flag)
+            # \s* - Match optional trailing whitespace (so "vast network" becomes "network", not " network")
+
+            # Strategy 1: Remove adverbs completely (e.g., "profoundly")
+            if word.endswith("ly"):
+                pattern = re.compile(fr'\b{re.escape(word)}\b\s*', re.IGNORECASE)
+                cleaned_text = pattern.sub("", cleaned_text)
+
+            # Strategy 2: Remove adjectives (e.g., "vast")
+            else:
+                pattern = re.compile(fr'\b{re.escape(word)}\b\s*', re.IGNORECASE)
+                cleaned_text = pattern.sub("", cleaned_text)
+
+        # Cleanup double spaces created by deletions
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+
+        # Cleanup space before punctuation (e.g. "network ." -> "network.")
+        cleaned_text = re.sub(r'\s+([.,;?!])', r'\1', cleaned_text)
+
+        print(f"  🔨 Sledgehammer applied. Forcibly removed: {violation_words}")
+        return cleaned_text
 
     def _refine_sentence(
         self,
