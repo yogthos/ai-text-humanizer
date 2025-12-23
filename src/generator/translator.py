@@ -4310,6 +4310,12 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         if verbose:
             print(f"  Neutral summary: {neutral_text[:100]}{'...' if len(neutral_text) > 100 else ''}")
 
+        # Calculate logical beats (sentence count) of input for structure matching
+        from src.utils.text_processing import count_logical_beats
+        input_beats = count_logical_beats(paragraph)
+        if verbose:
+            print(f"  Input logical beats: {input_beats} sentences")
+
         # Step 1.5: Retrieve style palette using StyleRAG
         style_palette_fragments = []
         if author_name not in self.style_rag:
@@ -4378,10 +4384,37 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         if verbose:
             print(f"  Extracting structure map from archetype {target_arch_id}...")
         structure_map = self.paragraph_atlas.get_structure_map(target_arch_id)
+
+        # Check divergence and use synthetic fallback if needed
+        if structure_map:
+            match_beats = len(structure_map)
+            divergence = abs(input_beats - match_beats)
+
+            if verbose:
+                print(f"  Selected archetype {target_arch_id}: {match_beats} sentences (divergence: {divergence})")
+
+            # If divergence is too large (>3 sentences), use synthetic fallback
+            if divergence > 3:
+                if verbose:
+                    print(f"  ⚠ Archetype mismatch ({input_beats} vs {match_beats}). Using synthetic fallback to preserve meaning.")
+                synthetic_archetype = self.paragraph_atlas._create_synthetic_archetype(paragraph)
+                structure_map = synthetic_archetype['structure_map']
+                # Update archetype_desc for logging
+                archetype_desc = synthetic_archetype['stats']
+                if verbose:
+                    print(f"  Synthetic structure: {len(structure_map)} sentences")
+        else:
+            # No structure map available - use synthetic
+            if verbose:
+                print(f"  ⚠ No structure map available. Using synthetic fallback.")
+            synthetic_archetype = self.paragraph_atlas._create_synthetic_archetype(paragraph)
+            structure_map = synthetic_archetype['structure_map']
+            archetype_desc = synthetic_archetype['stats']
+
         if not structure_map:
             if verbose:
-                print(f"  ⚠ No structure map available, falling back to holistic generation")
-            # Fallback to old approach if structure map unavailable
+                print(f"  ⚠ No structure map available after fallback, falling back to holistic generation")
+            # Fallback to old approach if structure map still unavailable
             return self._translate_paragraph_holistic(
                 paragraph, author_name, prev_archetype_id, perspective, verbose,
                 neutral_text, target_pov, target_arch_id, archetype_desc,
@@ -4509,13 +4542,15 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
                 # 2. Select best candidate (Zipper-Aware: filters during selection)
                 sentence = self._select_best_sentence_variant(
-                    variants, target_len, context_so_far, verbose=verbose and attempt == 0
+                    variants, target_len, context_so_far,
+                    verbose=verbose and attempt == 0,
+                    global_context=global_context
                 )
 
                 if not sentence:
-                    if verbose:
-                        print(f"    ⚠ No valid variant found, retrying...")
-                    continue
+                    if verbose and attempt == 0:
+                        print(f"    ⚠ No valid variant found (all failed validation), retrying...")
+                    continue  # Go to next retry attempt
 
                 if verbose and target_len:
                     word_count = len(sentence.split())
@@ -5299,7 +5334,8 @@ Output only the sentence, no explanations.
         variants: List[str],
         target_length: int,
         prev_context: str,
-        verbose: bool = False
+        verbose: bool = False,
+        global_context: Optional[Dict] = None
     ) -> Optional[str]:
         """Select best sentence variant based on format compliance, zipper check, and length proximity.
 
@@ -5308,6 +5344,7 @@ Output only the sentence, no explanations.
             target_length: Target word count
             prev_context: Previous context for zipper check
             verbose: Verbose output
+            global_context: Optional global context dict/object with keywords for whitelist
 
         Returns:
             Best variant string, or None if no valid variants
@@ -5316,6 +5353,20 @@ Output only the sentence, no explanations.
             return None
 
         valid_candidates = []
+
+        # Extract keywords from global context for whitelist
+        # CRITICAL: Handle both Dict and Object access to prevent crashes
+        whitelist = []
+        if global_context:
+            # Handle Object vs Dict access patterns
+            if isinstance(global_context, dict):
+                keywords = global_context.get('keywords', [])
+            else:
+                # Object access (e.g., if global_context is a class instance)
+                keywords = getattr(global_context, 'keywords', [])
+
+            if keywords and isinstance(keywords, list):
+                whitelist = [str(kw).lower() for kw in keywords if kw]
 
         for v in variants:
             # 1. Format check (basic validation)
@@ -5329,11 +5380,15 @@ Output only the sentence, no explanations.
                     print(f"      Variant filtered (Zipper Check): {v[:50]}...")
                 continue
 
-            # 3. 3-GRAM REPETITION CHECK (Context-Aware)
+            # 3. 3-GRAM REPETITION CHECK (Context-Aware with Whitelist)
             # CRITICAL: Check against entire paragraph generated so far, not just current sentence
             # This catches cross-sentence repetition (e.g., phrase in sentence 1 and sentence 4)
             combined_text = prev_context + " " + v if prev_context else v
-            phrase_repeats = self.statistical_critic.check_phrase_repetition(combined_text, n_gram_size=3)
+            phrase_repeats = self.statistical_critic.check_phrase_repetition(
+                combined_text,
+                n_gram_size=3,
+                whitelist=whitelist
+            )
             if phrase_repeats:
                 if verbose:
                     print(f"      Variant filtered (3-Gram Repetition): {v[:50]}... (repeats: {phrase_repeats[:2]})")
@@ -5342,10 +5397,10 @@ Output only the sentence, no explanations.
             valid_candidates.append(v)
 
         if not valid_candidates:
-            # Fallback: ignore zipper check if all failed (let the main loop handle the retry)
+            # CRITICAL CHANGE: Return None to trigger retry, don't use failed variants
             if verbose:
-                print(f"      ⚠ All variants failed zipper check, using best anyway")
-            valid_candidates = variants
+                print(f"      ⚠ All variants failed validation (Repetition/Constraint). Triggering retry.")
+            return None  # Signal failure to main loop
 
         if not valid_candidates:
             return None

@@ -45,6 +45,17 @@ class ContentPlanner:
         if not structure_map:
             return []
 
+        # Sanity check: Log if structure map matches input density
+        if source_text:
+            try:
+                from src.utils.text_processing import count_logical_beats
+                input_beats = count_logical_beats(source_text)
+                if len(structure_map) == input_beats:
+                    # Perfect alignment - content should map 1:1
+                    pass  # This is ideal, no action needed
+            except Exception:
+                pass  # Ignore errors in sanity check
+
         # Build slot descriptions
         slot_descriptions = []
         for i, slot in enumerate(structure_map, 1):

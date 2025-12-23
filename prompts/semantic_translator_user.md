@@ -23,6 +23,13 @@ Do NOT use 'The text says' or 'The author describes'. Be direct. Preserve the su
 - Do NOT attribute views to "The subject", "The author", or the author's name when using author_voice_third_person
 - State the arguments as facts, not as attributed statements
 
+**CRITICAL SUMMARIZATION RULES:**
+1. **Preserve Proper Nouns:** Do not generalize specific names. Keep exact names like "Baudelaire", "Photoshop", "Luddite Trap", "DeepSeek", "Disney", etc.
+2. **Preserve Analogies:** If the text compares X to Y (e.g., "AI art to photography" or "AI to theft machine"), keep the comparison structure intact.
+3. **Preserve Key Arguments:** Do not flatten specific arguments into generic statements. Maintain the logical structure of the argument.
+4. **Preserve Concrete Examples:** Keep specific historical examples, technical terms, and named concepts.
+5. **No Attribution:** State the arguments directly (e.g., "AI is..." not "The author says AI is...") unless the perspective requires attribution.
+
 Text:
 {text}
 
