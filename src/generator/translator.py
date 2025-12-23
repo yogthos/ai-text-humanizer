@@ -687,7 +687,7 @@ class StyleTranslator:
             pov_breakdown: Optional breakdown dictionary with first_singular/first_plural counts
 
         Returns:
-            Normalized: 'first_person_singular', 'first_person_plural', or 'third_person'
+            Normalized: 'first_person_singular', 'first_person_plural', 'third_person', or 'author_voice_third_person'
         """
         if not pov:
             return "third_person"
@@ -695,7 +695,7 @@ class StyleTranslator:
         pov_lower = pov.lower()
 
         # Check if already in normalized format
-        if pov_lower in ["first_person_singular", "first_person_plural", "third_person"]:
+        if pov_lower in ["first_person_singular", "first_person_plural", "third_person", "author_voice_third_person"]:
             return pov_lower
 
         # Handle "First Person" - need to check breakdown
@@ -723,8 +723,39 @@ class StyleTranslator:
         if "third person" in pov_lower or "third_person" in pov_lower:
             return "third_person"
 
+        # Handle "Author Voice Third Person" (new perspective mode)
+        if "author_voice_third_person" in pov_lower or "author voice third person" in pov_lower:
+            return "author_voice_third_person"
+
         # Default to third person
         return "third_person"
+
+    def _get_dynamic_blocklist(self, author_name: str) -> List[str]:
+        """
+        Returns a list of words strictly banned for the current run context.
+        Blocks author's name when using author_voice_third_person perspective.
+
+        Args:
+            author_name: Name of the author
+
+        Returns:
+            List of words to block (lowercase)
+        """
+        blocklist = []
+
+        # Get current perspective from config
+        generation_config = self.config.get("generation", {})
+        perspective = generation_config.get("default_perspective", "third_person")
+
+        # CRITICAL: If writing IN author voice, ban the author's own name
+        if perspective == "author_voice_third_person" and author_name:
+            # Ban full name and parts (e.g., "Charles", "Baudelaire", "Langan")
+            name_parts = author_name.split()
+            blocklist.extend([part.lower() for part in name_parts])
+            # Also add full name as phrase
+            blocklist.append(author_name.lower())
+
+        return blocklist
 
     def _load_style_profile(self, author_name: str) -> Optional[Dict]:
         """Load style profile for author.
@@ -4279,6 +4310,12 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         if verbose:
             print(f"  Neutral summary: {neutral_text[:100]}{'...' if len(neutral_text) > 100 else ''}")
 
+        # Calculate logical beats (sentence count) of input for structure matching
+        from src.utils.text_processing import count_logical_beats
+        input_beats = count_logical_beats(paragraph)
+        if verbose:
+            print(f"  Input logical beats: {input_beats} sentences")
+
         # Step 1.5: Retrieve style palette using StyleRAG
         style_palette_fragments = []
         if author_name not in self.style_rag:
@@ -4347,10 +4384,39 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         if verbose:
             print(f"  Extracting structure map from archetype {target_arch_id}...")
         structure_map = self.paragraph_atlas.get_structure_map(target_arch_id)
+
+        # Check divergence and use synthetic fallback if needed
+        if structure_map:
+            match_beats = len(structure_map)
+            divergence = abs(input_beats - match_beats)
+
+            if verbose:
+                print(f"  Selected archetype {target_arch_id}: {match_beats} sentences (divergence: {divergence})")
+
+            # If divergence is too large (>1 sentence), use synthetic fallback
+            if divergence > 1:
+                if verbose:
+                    print(f"  ⚠ Archetype mismatch ({input_beats} vs {match_beats}). Using synthetic fallback to preserve meaning.")
+                synthetic_archetype = self.paragraph_atlas._create_synthetic_archetype(paragraph)
+                structure_map = synthetic_archetype['structure_map']
+                # Update archetype_desc for logging - mark as synthetic
+                archetype_desc = synthetic_archetype['stats']
+                archetype_desc['id'] = "synthetic_fallback"  # Mark for direct mapping
+                if verbose:
+                    print(f"  Synthetic structure: {len(structure_map)} sentences")
+        else:
+            # No structure map available - use synthetic
+            if verbose:
+                print(f"  ⚠ No structure map available. Using synthetic fallback.")
+            synthetic_archetype = self.paragraph_atlas._create_synthetic_archetype(paragraph)
+            structure_map = synthetic_archetype['structure_map']
+            archetype_desc = synthetic_archetype['stats']
+            archetype_desc['id'] = "synthetic_fallback"  # Mark for direct mapping
+
         if not structure_map:
             if verbose:
-                print(f"  ⚠ No structure map available, falling back to holistic generation")
-            # Fallback to old approach if structure map unavailable
+                print(f"  ⚠ No structure map available after fallback, falling back to holistic generation")
+            # Fallback to old approach if structure map still unavailable
             return self._translate_paragraph_holistic(
                 paragraph, author_name, prev_archetype_id, perspective, verbose,
                 neutral_text, target_pov, target_arch_id, archetype_desc,
@@ -4365,10 +4431,46 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         # ASSEMBLY LINE ARCHITECTURE: Plan content distribution
         if verbose:
             print(f"  Planning content distribution into {len(structure_map)} slots...")
-        content_planner = ContentPlanner(self.config_path)
-        content_slots = content_planner.plan_content(neutral_text, structure_map, author_name, source_text=paragraph)
-        if verbose:
-            print(f"  Content distributed into {len(content_slots)} slots")
+
+        # Check if we are using synthetic/exact match
+        is_synthetic = archetype_desc.get("id") == "synthetic_fallback"
+
+        if is_synthetic:
+            if verbose:
+                print(f"  ⚡ Using Direct Sentence Mapping (Lossless Mode)")
+
+            # 1. Tokenize input into sentences
+            try:
+                from nltk.tokenize import sent_tokenize
+                input_sentences = sent_tokenize(paragraph)
+            except (ImportError, Exception):
+                # Fallback: split by periods
+                input_sentences = [s.strip() for s in paragraph.split('.') if len(s.strip()) > 5]
+
+            # 2. Map 1:1 to structure (direct mapping)
+            content_slots = []
+            for i, slot in enumerate(structure_map):
+                # Safety: Ensure we don't go out of bounds
+                if i < len(input_sentences):
+                    source_sent = input_sentences[i].strip()
+                    # Use original sentence as content (will be rewritten in author's style)
+                    content_slots.append(source_sent)
+                else:
+                    # If structure has more slots than input sentences, mark as EMPTY
+                    content_slots.append("EMPTY")
+
+            # Ensure we have the right number of slots
+            while len(content_slots) < len(structure_map):
+                content_slots.append("EMPTY")
+
+            if verbose:
+                print(f"  Direct mapped {len([s for s in content_slots if s != 'EMPTY'])} sentences to {len(structure_map)} slots")
+        else:
+            # Standard LLM Planning for Library Archetypes
+            content_planner = ContentPlanner(self.config_path)
+            content_slots = content_planner.plan_content(neutral_text, structure_map, author_name, source_text=paragraph)
+            if verbose:
+                print(f"  Content distributed into {len(content_slots)} slots")
 
         # Get generation config
         max_sentence_retries = self.generation_config.get("max_retries", 3)
@@ -4402,9 +4504,24 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         perspective_pronouns = {
             "first_person_singular": "I, Me, My, Myself, Mine",
             "first_person_plural": "We, Us, Our, Ourselves, Ours",
-            "third_person": "The subject, The narrator, or specific names"
+            "third_person": "The subject, The narrator, or specific names",
+            "author_voice_third_person": "The subject, The narrator, or specific names (write AS the author, not ABOUT the author)"
         }
         perspective_pronoun_list = perspective_pronouns.get(target_pov, "The subject, The narrator")
+
+        # Build author voice section for translator_statistical_user.md template
+        author_voice_section = ""
+        if target_pov == "author_voice_third_person":
+            author_voice_section = f"""## PERSPECTIVE LOCK (CRITICAL - AUTHOR VOICE MODE):
+1. You are writing **AS** {author_name}, not **ABOUT** {author_name}.
+2. **OBJECTIVE VOICE:** Do not refer to yourself. Do not use "I" (First Person).
+3. **NO SELF-ANALYSIS:** Never write sentences like "{author_name} argues..." or "The author believes...".
+4. **CORRECTION EXAMPLES:**
+   - BAD: "{author_name} views the machine as a threat."
+   - GOOD: "The machine is a threat."
+   - BAD: "He rejects the anti-AI stance..."
+   - GOOD: "The anti-AI stance is regressive and intellectually flawed."
+"""
 
         # ASSEMBLY LINE ARCHITECTURE: Build sentence by sentence
         final_sentences = []
@@ -4463,13 +4580,15 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
                 # 2. Select best candidate (Zipper-Aware: filters during selection)
                 sentence = self._select_best_sentence_variant(
-                    variants, target_len, context_so_far, verbose=verbose and attempt == 0
+                    variants, target_len, context_so_far,
+                    verbose=verbose and attempt == 0,
+                    global_context=global_context
                 )
 
                 if not sentence:
-                    if verbose:
-                        print(f"    ⚠ No valid variant found, retrying...")
-                    continue
+                    if verbose and attempt == 0:
+                        print(f"    ⚠ No valid variant found (all failed validation), retrying...")
+                    continue  # Go to next retry attempt
 
                 if verbose and target_len:
                     word_count = len(sentence.split())
@@ -4569,6 +4688,17 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             pass
 
         original_repetition_count = len(repetition_issues)  # Store count before repair
+
+        # Also check for 3-gram phrase repetition (stricter check)
+        phrase_repeats = self.statistical_critic.check_phrase_repetition(final_paragraph, n_gram_size=3)
+        if phrase_repeats:
+            phrase_issues = [f"Repeated phrase: '{phrase}' (appears multiple times)" for phrase in phrase_repeats]
+            repetition_issues.extend(phrase_issues)
+            if verbose:
+                print(f"  ⚠ 3-Gram phrase repetition detected: {len(phrase_repeats)} phrases")
+                for phrase in phrase_repeats[:3]:
+                    print(f"    - Repeated phrase: '{phrase}'")
+
         if repetition_issues:
             if verbose:
                 print(f"  ⚠ Lexical repetition detected: {len(repetition_issues)} issues")
@@ -5162,10 +5292,35 @@ Strictly follow the constraints below.
         else:
             final_instruction = "5. Use the author's distinctive voice and vocabulary."
 
+        # Add author voice instructions if using author_voice_third_person
+        author_voice_instruction = ""
+        if target_perspective == "author_voice_third_person":
+            author_voice_instruction = f"""
+## PERSPECTIVE LOCK (CRITICAL - AUTHOR VOICE MODE):
+1. You are writing **AS** {author_name}, not **ABOUT** {author_name}.
+2. **OBJECTIVE VOICE:** Do not refer to yourself. Do not use "I" (First Person).
+3. **NO SELF-ANALYSIS:** Never write sentences like "{author_name} argues..." or "The author believes...".
+4. **CORRECTION EXAMPLES:**
+   - BAD: "{author_name} views the machine as a threat."
+   - GOOD: "The machine is a threat."
+   - BAD: "He rejects the anti-AI stance..."
+   - GOOD: "The anti-AI stance is regressive and intellectually flawed."
+"""
+
+        # Add lexical diversity instructions
+        lexical_diversity_section = """
+## LEXICAL DIVERSITY:
+- **Do not repeat** distinctive phrases (e.g., "mechanized creativity") within the same paragraph.
+- Use synonyms. If you used "dismissal" once, use "rejection" or "scorn" next time.
+- Avoid looping on the same noun structures.
+- Vary your vocabulary to explore the full range of the author's style palette.
+"""
+
         user_content += f"""
 {anti_echo_section}
 {ending_constraint}
-
+{author_voice_instruction}
+{lexical_diversity_section}
 ## Author Voice:
 Adopt the voice of {author_name}.
 
@@ -5180,6 +5335,10 @@ Adopt the voice of {author_name}.
 Output only the sentence, no explanations.
 """
 
+        # Get repetition penalties from config
+        presence_penalty = self.generation_config.get("presence_penalty")
+        frequency_penalty = self.generation_config.get("frequency_penalty")
+
         try:
             response = self.llm_provider.call(
                 system_prompt=f"You are a sentence generator. Generate {n} variants. Output each on a new line with 'VAR:' prefix.",
@@ -5187,7 +5346,9 @@ Output only the sentence, no explanations.
                 model_type="editor",
                 require_json=False,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                presence_penalty=presence_penalty,
+                frequency_penalty=frequency_penalty
             )
 
             # Parse variants using shared utility
@@ -5211,7 +5372,8 @@ Output only the sentence, no explanations.
         variants: List[str],
         target_length: int,
         prev_context: str,
-        verbose: bool = False
+        verbose: bool = False,
+        global_context: Optional[Dict] = None
     ) -> Optional[str]:
         """Select best sentence variant based on format compliance, zipper check, and length proximity.
 
@@ -5220,6 +5382,7 @@ Output only the sentence, no explanations.
             target_length: Target word count
             prev_context: Previous context for zipper check
             verbose: Verbose output
+            global_context: Optional global context dict/object with keywords for whitelist
 
         Returns:
             Best variant string, or None if no valid variants
@@ -5228,6 +5391,20 @@ Output only the sentence, no explanations.
             return None
 
         valid_candidates = []
+
+        # Extract keywords from global context for whitelist
+        # CRITICAL: Handle both Dict and Object access to prevent crashes
+        whitelist = []
+        if global_context:
+            # Handle Object vs Dict access patterns
+            if isinstance(global_context, dict):
+                keywords = global_context.get('keywords', [])
+            else:
+                # Object access (e.g., if global_context is a class instance)
+                keywords = getattr(global_context, 'keywords', [])
+
+            if keywords and isinstance(keywords, list):
+                whitelist = [str(kw).lower() for kw in keywords if kw]
 
         for v in variants:
             # 1. Format check (basic validation)
@@ -5241,13 +5418,27 @@ Output only the sentence, no explanations.
                     print(f"      Variant filtered (Zipper Check): {v[:50]}...")
                 continue
 
+            # 3. 3-GRAM REPETITION CHECK (Context-Aware with Whitelist)
+            # CRITICAL: Check against entire paragraph generated so far, not just current sentence
+            # This catches cross-sentence repetition (e.g., phrase in sentence 1 and sentence 4)
+            combined_text = prev_context + " " + v if prev_context else v
+            phrase_repeats = self.statistical_critic.check_phrase_repetition(
+                combined_text,
+                n_gram_size=3,
+                whitelist=whitelist
+            )
+            if phrase_repeats:
+                if verbose:
+                    print(f"      Variant filtered (3-Gram Repetition): {v[:50]}... (repeats: {phrase_repeats[:2]})")
+                continue
+
             valid_candidates.append(v)
 
         if not valid_candidates:
-            # Fallback: ignore zipper check if all failed (let the main loop handle the retry)
+            # CRITICAL CHANGE: Return None to trigger retry, don't use failed variants
             if verbose:
-                print(f"      ⚠ All variants failed zipper check, using best anyway")
-            valid_candidates = variants
+                print(f"      ⚠ All variants failed validation (Repetition/Constraint). Triggering retry.")
+            return None  # Signal failure to main loop
 
         if not valid_candidates:
             return None
@@ -5399,6 +5590,12 @@ Output only the sentence, no explanations.
         Returns:
             Refined sentence (string, never dict)
         """
+        # Extract feedback string for logic checks (handle both string and dict)
+        if isinstance(feedback, dict):
+            feedback_str = feedback.get("reason", "") + " " + feedback.get("directive", "")
+        else:
+            feedback_str = str(feedback)
+
         prompts_dir = Path(__file__).parent.parent.parent / "prompts"
         try:
             template_path = prompts_dir / "sentence_refinement_user.md"
@@ -5426,10 +5623,23 @@ Output only the corrected sentence.
 
         user_prompt = template.format(
             current_sentence=sentence,
-            feedback=feedback,
+            feedback=feedback_str,
             target_length=target_length,
             prev_context=prev_context
         )
+
+        # Add expansion guidance if needed
+        if "too short" in feedback_str.lower():
+            user_prompt += "\n\nEXPANSION TIP: Do not just pad with fluff. Add a subordinate clause, a descriptive adjective, or clarify the causal link to increase word count naturally."
+
+        # Get repetition penalties from config
+        presence_penalty = self.generation_config.get("presence_penalty", 0.0)
+        frequency_penalty = self.generation_config.get("frequency_penalty", 0.0)
+
+        # Adaptive relaxation: If expanding, relax penalties to allow functional words (the, of, and)
+        if "too short" in feedback_str.lower() or "expand" in feedback_str.lower():
+            presence_penalty *= 0.5
+            frequency_penalty *= 0.5
 
         try:
             result = self.llm_provider.call(
@@ -5438,7 +5648,9 @@ Output only the corrected sentence.
                 model_type="editor",
                 require_json=False,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                presence_penalty=presence_penalty,
+                frequency_penalty=frequency_penalty
             )
             # CRITICAL: Return string, never dict
             refined = result.strip() if result else sentence

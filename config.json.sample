@@ -1,17 +1,17 @@
 {
-    "provider": "deepseek",
-    "ollama": {
-      "url": "http://localhost:11434/api/chat",
-      "editor_model": "mistral-nemo:12b",
-      "critic_model": "qwen3:8b",
-      "keep_alive": "10m"
-    },
-    "deepseek": {
-      "api_key": "<your key>",
-      "api_url": "https://api.deepseek.com/v1/chat/completions",
-      "editor_model": "deepseek-chat",
-      "critic_model": "deepseek-chat"
-    },
+  "provider": "deepseek",
+  "ollama": {
+    "url": "http://localhost:11434/api/chat",
+    "editor_model": "mistral-nemo:12b",
+    "critic_model": "qwen3:8b",
+    "keep_alive": "10m"
+  },
+  "deepseek": {
+    "api_key": "<your key>",
+    "api_url": "https://api.deepseek.com/v1/chat/completions",
+    "editor_model": "deepseek-chat",
+    "critic_model": "deepseek-chat"
+  },
   "llm_provider": {
     "max_retries": 5,
     "retry_delay": 2,
@@ -25,7 +25,7 @@
     "persist_path": "atlas_cache/",
     "num_clusters": 5,
     "min_structure_words": 4,
-    "max_length_ratio": 2.0,
+    "max_length_ratio": 1.5,
     "min_length_ratio": 0.5,
     "early_exit_threshold": 0.1,
     "length_tolerance": 0.2
@@ -128,7 +128,10 @@
     "compliance_threshold": 0.85,
     "compliance_fuzziness": 0.05,
     "sentence_variants_per_attempt": 5,
-    "default_perspective": "third_person"
+    "default_perspective": "third_person",
+    "_perspective_options": "Valid options: 'first_person_singular', 'first_person_plural', 'third_person', 'author_voice_third_person' (writes AS author, not ABOUT author)",
+    "presence_penalty": 0.6,
+    "frequency_penalty": 0.3
   },
   "global_context": {
     "enabled": true,
@@ -214,5 +217,3 @@
     "max_retries_before_force": 1
   }
 }
-
-

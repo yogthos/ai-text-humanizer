@@ -289,3 +289,25 @@ def get_semantic_replacement(forbidden_word: str, author_palette: Dict[str, List
 
     return best_word
 
+
+def count_logical_beats(text: str) -> int:
+    """
+    Counts the number of distinct sentences in the text.
+    Acts as a proxy for the 'Logical Density' of the paragraph.
+
+    Args:
+        text: Input paragraph text
+
+    Returns:
+        Number of sentences (logical beats)
+    """
+    try:
+        from nltk.tokenize import sent_tokenize
+        sentences = sent_tokenize(text)
+        return len(sentences)
+    except (ImportError, Exception):
+        # Fallback if NLTK fails or not available
+        # Split by periods, filter out very short fragments
+        sentences = [s.strip() for s in text.split('.') if len(s.strip()) > 5]
+        return len(sentences)
+

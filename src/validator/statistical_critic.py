@@ -557,3 +557,74 @@ class StatisticalCritic:
 
         return issues
 
+    def check_phrase_repetition(self, text: str, n_gram_size: int = 3, whitelist: Optional[List[str]] = None) -> List[str]:
+        """
+        Detects any phrase of n_gram_size that appears more than once.
+        Returns list of repeated phrases.
+
+        CRITICAL: Uses regex tokenization to ignore punctuation, so "creativity" matches "creativity."
+
+        EXEMPTION: Phrases containing whitelisted keywords are allowed to repeat.
+        This prevents flagging core domain concepts (e.g., "socialization of labor").
+
+        Args:
+            text: Text to check for phrase repetition
+            n_gram_size: Size of n-grams to check (default: 3 for 3-grams)
+            whitelist: Optional list of keywords that are allowed to repeat (e.g., ["socialization", "automation"])
+
+        Returns:
+            List of repeated phrases (strings)
+        """
+        if not text or not text.strip():
+            return []
+
+        # Use regex to extract only words, ignoring punctuation
+        words = re.findall(r'\b\w+\b', text.lower())
+
+        if len(words) < n_gram_size:
+            return []
+
+        # Generate n-grams
+        grams = [' '.join(words[i:i+n_gram_size]) for i in range(len(words)-n_gram_size+1)]
+        counts = Counter(grams)
+
+        # Filter for repeats (appears more than once)
+        repeats = [phrase for phrase, count in counts.items() if count > 1]
+
+        # EXEMPTION: Remove phrases that contain whitelisted keywords
+        # CRITICAL: Use word boundaries to prevent substring matches (e.g., "art" in "smart")
+        if whitelist:
+            whitelist_lower = [kw.lower() for kw in whitelist]
+            filtered_repeats = []
+            for phrase in repeats:
+                phrase_lower = phrase.lower()
+
+                # SAFE MATCH: Use Regex boundaries \b to match whole words only
+                # This prevents "art" from matching "smart" or "partial"
+                is_whitelisted = False
+                for kw in whitelist_lower:
+                    # Escape kw to handle special regex chars, verify word boundary
+                    if re.search(r'\b' + re.escape(kw) + r'\b', phrase_lower):
+                        is_whitelisted = True
+                        break
+
+                if not is_whitelisted:
+                    filtered_repeats.append(phrase)
+            repeats = filtered_repeats
+
+        # Filter out common stop-phrases (grammar glue)
+        return [r for r in repeats if not self._is_common_connector(r)]
+
+    def _is_common_connector(self, phrase: str) -> bool:
+        """Check if phrase is common grammar glue that should be ignored.
+
+        Args:
+            phrase: Phrase to check
+
+        Returns:
+            True if phrase is a common connector that should be ignored
+        """
+        common = {"of the", "in the", "to the", "and the", "that the", "is a", "is the",
+                  "the the", "a the", "an the", "for the", "with the", "from the"}
+        return any(c in phrase for c in common)
+

@@ -254,3 +254,64 @@ class ParagraphAtlas:
                 ]
             return []
 
+    def _create_synthetic_archetype(self, input_text: str) -> Dict:
+        """
+        Creates a temporary archetype based on the input text's structure.
+        Used as a fallback when library archetypes are too dissimilar.
+
+        Args:
+            input_text: Original input paragraph text
+
+        Returns:
+            Dictionary with structure_map and stats matching input structure
+        """
+        try:
+            from nltk.tokenize import sent_tokenize
+            sentences = sent_tokenize(input_text)
+        except (ImportError, Exception):
+            # Fallback: split by periods
+            sentences = [s.strip() for s in input_text.split('.') if len(s.strip()) > 5]
+
+        structure_map = []
+        total_words = 0
+
+        for sent in sentences:
+            if not sent.strip():
+                continue
+            # Calculate word count
+            word_count = len(sent.split())
+
+            # Cap target length to reasonable limits for the model
+            # (DeepSeek/OpenAI struggle to maintain coherence > 60 words in one go)
+            if word_count > 60:
+                word_count = 60
+                slot_type = "complex"  # Force complex type for capped sentences
+            else:
+                # Determine slot type based on length
+                if word_count < 10:
+                    slot_type = "simple"
+                elif word_count < 25:
+                    slot_type = "moderate"
+                else:
+                    slot_type = "complex"
+
+            total_words += word_count
+
+            structure_map.append({
+                'target_len': word_count,
+                'type': slot_type
+            })
+
+        avg_words = total_words / len(structure_map) if structure_map else 0
+
+        return {
+            "id": "synthetic_fallback",
+            "structure_map": structure_map,
+            "stats": {
+                "sentence_count": len(structure_map),
+                "avg_words_per_sent": avg_words,
+                "avg_len": avg_words,
+                "avg_sents": len(structure_map)
+            }
+        }
+
