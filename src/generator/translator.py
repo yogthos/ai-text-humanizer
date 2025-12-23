@@ -4972,6 +4972,19 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                                   (f", structure change: {structure_delta:+d}" if structure_changed else ""))
                         best_text = refined_text
                         best_score = refined_score
+
+                        # CRITICAL: Update blueprint stats to match the new structure
+                        if structure_changed:
+                            blueprint_target_stats = adjusted_stats
+                            if verbose:
+                                print(f"  Blueprint updated: {blueprint_target_stats['avg_sents']} sents, {blueprint_target_stats['avg_len']:.1f} words/sent")
+
+                            # Re-validate with updated blueprint stats to get final accurate score
+                            best_text, best_score, qualitative_feedback = self.statistical_critic.select_best_candidate(
+                                [best_text], blueprint_target_stats
+                            )
+                            if verbose:
+                                print(f"  Final compliance score (after repair): {best_score:.2f}")
                     else:
                         if verbose:
                             print(f"  Repair rejected: Score {refined_score:.2f} <= {best_score:.2f}, " +

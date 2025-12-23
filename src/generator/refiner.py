@@ -498,8 +498,36 @@ Strictly follow the constraints below.
         else:
             # Hard Length Constraint - only for non-split operations
             if target_len:
-                user_content += f"\n**HARD CONSTRAINT: Output must be close to {target_len} words. This is mandatory.**\n"
-            # CRITICAL: Prevent accidental splitting
+                current_word_count = len(sentence.split())
+
+                # STRATEGY: Use a tolerance slightly TIGHTER than the validator (15% vs 20%)
+                # This ensures that if the LLM hits this target, it guarantees a pass.
+                tolerance = max(2, int(target_len * 0.15))
+                min_words = target_len - tolerance
+                max_words = target_len + tolerance
+
+                user_content += f"\n**CRITICAL LENGTH CONSTRAINT:**\n"
+                user_content += f"- Target: **EXACTLY {target_len} words** (Acceptable range: {min_words}-{max_words} words)\n"
+                user_content += f"- Current sentence: {current_word_count} words\n"
+
+                # CALCULATION: Show the exact delta
+                if current_word_count > target_len:
+                    delta = current_word_count - target_len
+                    user_content += f"- **ACTION REQUIRED: SHORTEN** by removing approx. {delta} words.\n"
+                    user_content += f"- STRATEGY: Remove redundant adjectives, simplify phrases, or condense clauses.\n"
+                else:
+                    delta = target_len - current_word_count
+                    user_content += f"- **ACTION REQUIRED: EXPAND** by adding approx. {delta} words.\n"
+                    user_content += f"- STRATEGY: Add descriptive details, subordinate clauses, or clarifying phrases.\n"
+
+                user_content += f"- **VALIDATION:** Your output will be rejected if it is outside {min_words}-{max_words} words.\n"
+
+                # VISUAL EXAMPLES
+                user_content += f"- **EXAMPLES:**\n"
+                user_content += f"  * Target {target_len}: '... [Text with {target_len} words] ...' ({target_len} words) ✓ PASS\n"
+                user_content += f"  * Target {target_len}: '... [Text with {target_len + tolerance + 5} words] ...' ({target_len + tolerance + 5} words) ✗ FAIL (Too Long)\n"
+
+            # CRITICAL: Prevent accidental splitting during length fixes
             user_content += "\n**CONSTRAINT: Output exactly ONE sentence. Do not split.**\n"
 
         # 2. Negative Constraints (The Ban List)
@@ -562,6 +590,9 @@ Strictly follow the constraints below.
         Returns:
             Best variant string, or None if no valid variants
         """
+        # Import at method level to avoid repeated imports in loops
+        from nltk.tokenize import sent_tokenize
+
         if not variants:
             return None
 
@@ -584,15 +615,62 @@ Strictly follow the constraints below.
         # Priority 2: Select by length proximity
         if compliant_variants:
             if target_len:
-                best = min(compliant_variants,
-                          key=lambda v: abs(len(v.split()) - target_len))
+                if is_split:
+                    # For split, target_len is the desired AVERAGE length per sentence
+                    # Calculate average length of resulting sentences
+                    def calc_avg_len(variant):
+                        # Handle ||| separator format
+                        if "|||" in variant:
+                            parts = variant.split("|||")
+                            if len(parts) >= 2:
+                                total_words = sum(len(p.split()) for p in parts)
+                                return total_words / len(parts)
+                        # Fallback: try to detect sentences
+                        try:
+                            sentences = sent_tokenize(variant)
+                            if sentences:
+                                total_words = sum(len(s.split()) for s in sentences)
+                                return total_words / len(sentences)
+                        except:
+                            pass
+                        # Last resort: assume it's one sentence (shouldn't happen for split)
+                        return len(variant.split())
+
+                    best = min(compliant_variants,
+                              key=lambda v: abs(calc_avg_len(v) - target_len))
+                else:
+                    # Standard behavior: Total length
+                    best = min(compliant_variants,
+                              key=lambda v: abs(len(v.split()) - target_len))
             else:
                 best = compliant_variants[0]  # First compliant if no target
             return best
 
         # Fallback: Best effort from all variants
         if target_len:
-            return min(variants, key=lambda v: abs(len(v.split()) - target_len))
+            if is_split:
+                # Use same avg_len calculation for fallback
+                def calc_avg_len(variant):
+                    # Handle ||| separator format
+                    if "|||" in variant:
+                        parts = variant.split("|||")
+                        if len(parts) >= 2:
+                            total_words = sum(len(p.split()) for p in parts)
+                            return total_words / len(parts)
+                    # Fallback: try to detect sentences
+                    try:
+                        sentences = sent_tokenize(variant)
+                        if sentences:
+                            total_words = sum(len(s.split()) for s in sentences)
+                            return total_words / len(sentences)
+                    except:
+                        pass
+                    # Last resort: assume it's one sentence (shouldn't happen for split)
+                    return len(variant.split())
+
+                return min(variants, key=lambda v: abs(calc_avg_len(v) - target_len))
+            else:
+                return min(variants, key=lambda v: abs(len(v.split()) - target_len))
         return variants[0] if variants else None
 
     def _execute_sentence_repair(
@@ -622,6 +700,9 @@ Strictly follow the constraints below.
         Returns:
             Fixed sentence text, or None if error
         """
+        # Import at method level to avoid repeated imports in loops
+        from nltk.tokenize import sent_tokenize
+
         prev_context = " ".join(sentences[:sent_index]) if sent_index > 0 else ""
         next_sent = sentences[sent_index + 1] if sent_index + 1 < len(sentences) else ""
 
@@ -664,13 +745,33 @@ Output only the fixed sentence(s), no explanations.
         refinement_config = self.config.get("refinement", {})
         n_variants = refinement_config.get("repair_variants_per_attempt", 5)
 
+        # Initialize tracking variable for feedback loop (before existing best_attempt initialization)
+        best_variant = None  # Track the best variant from previous attempt for feedback
+
+        # Existing initialization (keep as is):
         best_attempt = None
         best_length_diff = float('inf')
 
         for attempt in range(max_retries):
-            # 1. Generate batch of variants
+            # Create a mutable copy of instruction for this attempt
+            current_instruction = instruction
+
+            # FEEDBACK INJECTION: If this is a retry and we have feedback from previous attempt
+            if attempt > 0 and target_len and best_variant:
+                failed_word_count = len(best_variant.split())
+                delta = abs(failed_word_count - target_len)
+
+                # Add specific feedback about previous failure
+                if failed_word_count > target_len:
+                    feedback_msg = f"\n\n**PREVIOUS ATTEMPT FAILED:** You generated {failed_word_count} words (target: {target_len}). You were {delta} words too long. You MUST shorten by removing approximately {delta} words this time."
+                else:
+                    feedback_msg = f"\n\n**PREVIOUS ATTEMPT FAILED:** You generated {failed_word_count} words (target: {target_len}). You were {delta} words too short. You MUST expand by adding approximately {delta} words this time."
+
+                current_instruction += feedback_msg
+
+            # 1. Generate batch of variants (use current_instruction instead of instruction)
             variants = self._generate_repair_variants(
-                sentence, instruction, action, target_len, author_name,
+                sentence, current_instruction, action, target_len, author_name,
                 n=n_variants, prev_context=prev_context, next_sent=next_sent,
                 forbidden_phrases=forbidden_phrases, verbose=verbose
             )
@@ -689,6 +790,9 @@ Output only the fixed sentence(s), no explanations.
             if verbose and target_len:
                 word_count = len(best_candidate.split())
                 print(f"      Selected best variant: {word_count} words (target: {target_len}) from {len(variants)} candidates")
+
+            # UPDATE: Store best_variant for next iteration's feedback (before validation)
+            best_variant = best_candidate
 
             # 3. Validate candidate (existing validation logic)
             fixed = best_candidate
@@ -725,8 +829,27 @@ Output only the fixed sentence(s), no explanations.
 
                 # Validation: Check if target length is met (if specified)
                 if target_len and fixed:
-                    word_count = len(fixed.split())
-                    length_diff = abs(word_count - target_len)
+                    if is_split:
+                        # For split, calculate average length of resulting sentences
+                        try:
+                            sentences_list = sent_tokenize(fixed)
+                            if sentences_list:
+                                sentence_lengths = [len(s.split()) for s in sentences_list]
+                                avg_len = sum(sentence_lengths) / len(sentence_lengths)
+                                length_diff = abs(avg_len - target_len)
+                                word_count = avg_len  # For logging
+                            else:
+                                # Fallback: treat as single sentence (shouldn't happen)
+                                word_count = len(fixed.split())
+                                length_diff = abs(word_count - target_len)
+                        except Exception:
+                            # Fallback if NLTK fails
+                            word_count = len(fixed.split())
+                            length_diff = abs(word_count - target_len)
+                    else:
+                        # Standard behavior: Total length
+                        word_count = len(fixed.split())
+                        length_diff = abs(word_count - target_len)
 
                     # Track best attempt (closest to target)
                     if length_diff < best_length_diff:
@@ -738,11 +861,11 @@ Output only the fixed sentence(s), no explanations.
 
                     if diff_ratio <= tolerance:
                         if verbose and attempt > 0:
-                            print(f"      ✓ Sentence repair validated (attempt {attempt + 1}): {word_count} words")
+                            print(f"      ✓ Sentence repair validated (attempt {attempt + 1}): {word_count:.1f} words avg" if is_split else f"      ✓ Sentence repair validated (attempt {attempt + 1}): {word_count} words")
                         return fixed
                     else:
                         if verbose:
-                            print(f"      ⚠ Attempt {attempt + 1}: {word_count} words (target: {target_len}), retrying...")
+                            print(f"      ⚠ Attempt {attempt + 1}: {word_count:.1f} words avg (target: {target_len})" if is_split else f"      ⚠ Attempt {attempt + 1}: {word_count} words (target: {target_len}), retrying...")
                         sentence = fixed  # Use this as base for next attempt
                         continue
                 else:
