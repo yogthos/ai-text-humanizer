@@ -313,7 +313,7 @@ class ParagraphAtlas:
                 ]
             return []
 
-    def _create_synthetic_archetype(self, input_text: str, target_density: float = 25.0) -> Dict:
+    def _create_synthetic_archetype(self, input_text: str, target_density: float = 25.0, author_profile: Optional[Dict] = None) -> Dict:
         """
         Creates a temporary archetype based on the input text's structure,
         reshaped to match the target author's sentence density.
@@ -321,6 +321,7 @@ class ParagraphAtlas:
         Args:
             input_text: Original input paragraph text
             target_density: Target words per sentence (from author's average)
+            author_profile: Optional author style profile containing structural_dna
 
         Returns:
             Dictionary with structure_map, content_map (grouped sentences), and stats
@@ -336,15 +337,31 @@ class ParagraphAtlas:
         content_map = []  # Store which sentences go into which slot
         total_words = 0
 
-        # Determine Style Inflation Factor
-        # If author usually writes long sentences (>25 words), assume they will expand the input.
-        # If author is concise (<15 words), assume they might contract it.
-        if target_density > 25:
-            inflation_factor = 1.20  # +20% budget for verbose authors
-        elif target_density < 15:
-            inflation_factor = 0.90  # -10% budget for concise authors
+        # DYNAMIC INFLATION CALCULATION
+        # Try to get stats from profile, otherwise fallback to density heuristic
+        struct_stats = author_profile.get('structural_dna', {}) if author_profile else {}
+        avg_len = struct_stats.get('avg_words_per_sentence')
+
+        if avg_len:
+            # Dynamic Formula: Calculate inflation based on author's base density
+            neutral_baseline = 15.0  # The input "Logical Beat" length
+            raw_ratio = avg_len / neutral_baseline
+
+            # Dampening Function: Pull the ratio closer to 1.0 to avoid runaway expansion
+            # e.g., Mao (27.0) / Neutral (15.0) = 1.8
+            # inflation = 1.0 + (1.8 - 1.0) * 0.5 = 1.4 (40% expansion)
+            inflation_factor = 1.0 + (raw_ratio - 1.0) * 0.5
+
+            # Clamp for safety (between 0.8 and 1.5)
+            inflation_factor = max(0.8, min(inflation_factor, 1.5))
         else:
-            inflation_factor = 1.10  # +10% standard buffer for style overhead
+            # Fallback Legacy Logic (if no structural_dna in profile)
+            if target_density > 25:
+                inflation_factor = 1.20  # +20% budget for verbose authors
+            elif target_density < 15:
+                inflation_factor = 0.90  # -10% budget for concise authors
+            else:
+                inflation_factor = 1.10  # +10% standard buffer for style overhead
 
         # Helper function to avoid code duplication
         def create_slot(word_count, grouping):

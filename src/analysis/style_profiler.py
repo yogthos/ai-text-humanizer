@@ -115,6 +115,7 @@ class StyleProfiler:
         openers_data = self._analyze_sentence_starters(sentences, entity_blocklist)
         punctuation_data = self._analyze_punctuation(doc, len(sentences))
         vocabulary_palette = self._extract_vocabulary_palette(doc)
+        structure_data = self._analyze_structure(sentences)  # NEW: Structural DNA
 
         return {
             **pov_data,
@@ -122,7 +123,8 @@ class StyleProfiler:
             **keywords_data,
             **openers_data,
             **punctuation_data,
-            "vocabulary_palette": vocabulary_palette
+            "vocabulary_palette": vocabulary_palette,
+            "structural_dna": structure_data  # NEW: Structural DNA
         }
 
     def _build_entity_blocklist(self, doc) -> set:
@@ -282,6 +284,18 @@ class StyleProfiler:
                 "sensory_verbs": [],
                 "connectives": [],
                 "intensifiers": []
+            },
+            "structural_dna": {
+                "avg_words_per_sentence": 0.0,
+                "complexity_ratio": 0.0,
+                "sentence_length_std_dev": 0.0
+            },
+            "stylistic_dna": {
+                "force_imperfection": False,
+                "use_fragments": False,
+                "allow_contractions": True,
+                "sensory_grounding": False,
+                "banned_transitions": []
             }
         }
 
@@ -637,5 +651,49 @@ class StyleProfiler:
             "dashes_per_100": round(dashes_per_100, 2),
             "exclamations_per_100": round(exclamations_per_100, 2),
             "punctuation_preference": preference
+        }
+
+    def _analyze_structure(self, sentences: List) -> Dict[str, Any]:
+        """Analyze structural characteristics of sentences.
+
+        Calculates average words per sentence, complexity ratio, and sentence length
+        standard deviation for use in dynamic inflation calculation.
+
+        Args:
+            sentences: List of spaCy sentence spans
+
+        Returns:
+            Dictionary with structural_dna metrics
+        """
+        if not sentences:
+            return {
+                "avg_words_per_sentence": 0.0,
+                "complexity_ratio": 0.0,
+                "sentence_length_std_dev": 0.0
+            }
+
+        # Calculate sentence lengths (in words, excluding punctuation)
+        sentence_lengths = [len([token for token in sent if not token.is_punct]) for sent in sentences]
+
+        if not sentence_lengths:
+            return {
+                "avg_words_per_sentence": 0.0,
+                "complexity_ratio": 0.0,
+                "sentence_length_std_dev": 0.0
+            }
+
+        avg_len = np.mean(sentence_lengths)
+
+        # Calculate complexity ratio (sentences with commas or semicolons)
+        complex_count = sum(1 for sent in sentences if ',' in sent.text or ';' in sent.text)
+        complexity_ratio = complex_count / len(sentences) if sentences else 0.0
+
+        # Calculate standard deviation for burstiness helper
+        std_dev = np.std(sentence_lengths) if len(sentence_lengths) > 1 else 0.0
+
+        return {
+            "avg_words_per_sentence": round(float(avg_len), 1),
+            "complexity_ratio": round(float(complexity_ratio), 2),
+            "sentence_length_std_dev": round(float(std_dev), 1)
         }
 

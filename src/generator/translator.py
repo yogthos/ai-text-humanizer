@@ -83,6 +83,22 @@ def _load_positional_instructions() -> Dict[str, str]:
     return instructions
 
 
+def _normalize_for_counting(text: str) -> str:
+    """Normalize text for counting by stripping punctuation and lowercasing.
+
+    This matches the behavior of check_phrase_repetition which uses
+    re.findall(r'\b\w+\b', text.lower()) to extract words.
+
+    Args:
+        text: Text to normalize
+
+    Returns:
+        Normalized text (lowercase, no punctuation)
+    """
+    import string
+    return text.translate(str.maketrans('', '', string.punctuation)).lower()
+
+
 @dataclass
 class ParagraphState:
     """Tracks the full state of a paragraph during batch evolution.
@@ -4264,6 +4280,15 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         if not paragraph or not paragraph.strip():
             return paragraph, 0, 1.0
 
+        # Detect if this is a header (short text without terminal punctuation)
+        # Headers should not be inflated or receive sensory grounding constraints
+        is_header = False
+        word_count = len(paragraph.split())
+        if word_count < 20 and not paragraph.strip().endswith(('.', '!', '?')):
+            is_header = True
+            if verbose:
+                print(f"  Detected header: {word_count} words, no terminal punctuation")
+
         # Initialize ParagraphAtlas for this author if needed
         if self.paragraph_atlas is None or getattr(self.paragraph_atlas, 'author', None) != author_name:
             if verbose:
@@ -4398,14 +4423,24 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                 if verbose:
                     print(f"  ⚠ Archetype mismatch ({input_beats} vs {match_beats}). Using synthetic fallback to preserve meaning.")
 
-                # Get target author density for elastic reshaping
-                target_density = self.paragraph_atlas.get_author_avg_sentence_length()
-                if verbose:
-                    print(f"  Target author density: {target_density:.1f} words/sentence")
+                # Load author profile for dynamic inflation calculation
+                # For headers, disable inflation by using neutral density and no profile
+                if is_header:
+                    author_profile = None
+                    target_density = 15.0  # Neutral baseline
+                    if verbose:
+                        print(f"  Header detected: Disabling style inflation (target_density=15.0, author_profile=None)")
+                else:
+                    author_profile = self._load_style_profile(author_name)
+                    # Get target author density for elastic reshaping
+                    target_density = self.paragraph_atlas.get_author_avg_sentence_length()
+                    if verbose:
+                        print(f"  Target author density: {target_density:.1f} words/sentence")
 
                 synthetic_archetype = self.paragraph_atlas._create_synthetic_archetype(
                     paragraph,
-                    target_density=target_density
+                    target_density=target_density,
+                    author_profile=author_profile  # NEW: Pass profile for dynamic inflation (None for headers)
                 )
                 structure_map = synthetic_archetype['structure_map']
                 # Update archetype_desc for logging - mark as synthetic
@@ -4460,14 +4495,24 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             if verbose:
                 print(f"  ⚠ No structure map available. Using synthetic fallback.")
 
-            # Get target author density for elastic reshaping
-            target_density = self.paragraph_atlas.get_author_avg_sentence_length()
-            if verbose:
-                print(f"  Target author density: {target_density:.1f} words/sentence")
+            # Load author profile for dynamic inflation calculation
+            # For headers, disable inflation by using neutral density and no profile
+            if is_header:
+                author_profile = None
+                target_density = 15.0  # Neutral baseline
+                if verbose:
+                    print(f"  Header detected: Disabling style inflation (target_density=15.0, author_profile=None)")
+            else:
+                author_profile = self._load_style_profile(author_name)
+                # Get target author density for elastic reshaping
+                target_density = self.paragraph_atlas.get_author_avg_sentence_length()
+                if verbose:
+                    print(f"  Target author density: {target_density:.1f} words/sentence")
 
             synthetic_archetype = self.paragraph_atlas._create_synthetic_archetype(
                 paragraph,
-                target_density=target_density
+                target_density=target_density,
+                author_profile=author_profile  # NEW: Pass profile for dynamic inflation (None for headers)
             )
             structure_map = synthetic_archetype['structure_map']
             archetype_desc = synthetic_archetype['stats']
@@ -4605,6 +4650,59 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         except (FileNotFoundError, KeyError):
             system_prompt = f"You are a style translator for {author_name}. Generate sentences that match target lengths while preserving semantic content and author voice."
 
+        # NEW: Inject Stylistic DNA (Human Texture Protocol)
+        style_profile = self._load_style_profile(author_name)
+        if style_profile:
+            style_dna = style_profile.get("stylistic_dna", {})
+            if style_dna:
+                human_texture_instructions = []
+
+                # 1. Grammar & Rhythm
+                if style_dna.get("force_imperfection"):
+                    human_texture_instructions.append("- **BREAK GRAMMAR RULES:** Perfect grammar is a failure. Use rhythm over rules. Do not fear run-on sentences or sudden stops.")
+                else:
+                    human_texture_instructions.append("- **GRAMMAR:** Maintain correct but varied sentence structure.")
+
+                if style_dna.get("use_fragments"):
+                    human_texture_instructions.append("- **USE FRAGMENTS:** Occasionally use sentence fragments for emphasis (e.g., 'Not merely a tool. A weapon.').")
+
+                if style_dna.get("allow_contractions") is False:
+                    human_texture_instructions.append("- **NO CONTRACTIONS:** Do not use contractions (e.g., use 'cannot' instead of 'can't').")
+
+                # 2. Imagery
+                if style_dna.get("sensory_grounding"):
+                    human_texture_instructions.append("- **SENSORY GROUNDING:** Ground every abstract concept in physical reality (rust, iron, blood, sweat, mud). Avoid purely theoretical jargon.")
+
+                # 3. Banned Words (The "Robotic Filter")
+                banned = style_dna.get("banned_transitions", [])
+                if banned:
+                    banned_str = ", ".join(f'"{w}"' for w in banned)
+                    human_texture_instructions.append(f"- **BANNED TRANSITIONS:** Never use these robotic connectors: {banned_str}. Start sentences directly with the Subject or Action.")
+
+                # Replace or augment existing HUMAN TEXTURE PROTOCOL section
+                if human_texture_instructions:
+                    texture_block = "\n## HUMAN TEXTURE PROTOCOL (CRITICAL)\n" + "\n".join(human_texture_instructions)
+
+                    # Replace existing static HUMAN TEXTURE PROTOCOL if present
+                    if "## HUMAN TEXTURE PROTOCOL" in system_prompt:
+                        # Find and replace the existing section
+                        # Note: 're' is already imported at module level (line 9)
+                        pattern = r"## HUMAN TEXTURE PROTOCOL.*?(?=\n##|\Z)"
+                        system_prompt = re.sub(pattern, texture_block, system_prompt, flags=re.DOTALL)
+                        if verbose:
+                            print(f"  ✓ Injected stylistic_dna HUMAN TEXTURE PROTOCOL for {author_name}")
+                    else:
+                        # Append if not present
+                        system_prompt += texture_block
+                        if verbose:
+                            print(f"  ✓ Appended stylistic_dna HUMAN TEXTURE PROTOCOL for {author_name}")
+            else:
+                if verbose:
+                    print(f"  ℹ No stylistic_dna found in profile for {author_name}, using static HUMAN TEXTURE PROTOCOL")
+        else:
+            if verbose:
+                print(f"  ℹ Style profile not found for {author_name}, using static HUMAN TEXTURE PROTOCOL")
+
         # Inject vocabulary budget constraints if available
         if vocabulary_budget:
             from src.generator.prompt_builder import PromptAssembler
@@ -4613,6 +4711,15 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
             if vocab_constraints:
                 # Append vocabulary constraints to system prompt
                 system_prompt = f"{system_prompt}\n\n{vocab_constraints}"
+
+        # Disable sensory grounding for headers to prevent hallucinations
+        if is_header:
+            # Strip the specific line causing hallucinations
+            current_system_prompt = system_prompt.replace("- **SENSORY GROUNDING:**", "# (Disabled for Header):")
+            if verbose:
+                print(f"  Header detected: Disabled sensory grounding constraint")
+        else:
+            current_system_prompt = system_prompt
 
         # Perspective pronoun mapping
         perspective_pronouns = {
@@ -4679,7 +4786,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                     target_perspective=target_pov,
                     perspective_pronouns=perspective_pronoun_list,
                     style_palette=style_palette_text,
-                    system_prompt=system_prompt,
+                    system_prompt=current_system_prompt,  # Use current_system_prompt (may have sensory grounding disabled for headers)
                     temperature=generation_temp,
                     max_tokens=generation_max_tokens,
                     is_last_sentence=is_last_sentence,
@@ -5629,10 +5736,13 @@ Output only the sentence, no explanations.
                                 new_repeats.append(r)
                             else:
                                 # It WAS in context. Did we increase the count?
-                                # CRITICAL: check_phrase_repetition returns lowercased phrases,
-                                # so we must use .lower() for case-insensitive counting
-                                count_combined = combined_text.lower().count(r)
-                                count_context = prev_context.lower().count(r)
+                                # CRITICAL: check_phrase_repetition returns normalized phrases (lowercase, no punctuation),
+                                # so we must normalize both strings before counting to match tokenizer behavior
+                                norm_combined = _normalize_for_counting(combined_text)
+                                norm_context = _normalize_for_counting(prev_context)
+
+                                count_combined = norm_combined.count(r)
+                                count_context = norm_context.count(r)
 
                                 if count_combined > count_context:
                                     new_repeats.append(r)
