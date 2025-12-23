@@ -49,10 +49,10 @@ def test_paragraph_fusion_success_no_sentence_fallback():
     with patch('src.pipeline.StyleTranslator') as MockTranslator:
         mock_translator = MockTranslator.return_value
 
-        # Mock translate_paragraph to return successful result (returns tuple: paragraph, rhythm_map, example)
-        def mock_translate_paragraph(paragraph, atlas, author_name, style_dna=None, verbose=False, **kwargs):
-            return ("Generated paragraph successfully.", None, None)
-        mock_translator.translate_paragraph = mock_translate_paragraph
+        # Mock translate_paragraph_statistical to return successful result (returns tuple: paragraph, arch_id, compliance_score)
+        def mock_translate_paragraph_statistical(paragraph, author_name, prev_archetype_id=None, perspective=None, verbose=False, **kwargs):
+            return ("Generated paragraph successfully.", 1, 0.9)
+        mock_translator.translate_paragraph_statistical = mock_translate_paragraph_statistical
 
         # Mock translate to track if it's called (sentence-by-sentence)
         def mock_translate(*args, **kwargs):
@@ -70,15 +70,7 @@ def test_paragraph_fusion_success_no_sentence_fallback():
                 "style_alignment": 0.8
             }
 
-            # Mock proposition extractor
-            with patch('src.pipeline.PropositionExtractor') as MockPropExtractor:
-                mock_prop_extractor = MockPropExtractor.return_value
-                mock_prop_extractor.extract_atomic_propositions.return_value = [
-                    "Human experience reinforces the rule of finitude",
-                    "The biological cycle defines our reality"
-                ]
-
-                # Mock BlueprintExtractor to return proper SemanticBlueprint objects
+            # Mock BlueprintExtractor to return proper SemanticBlueprint objects
                 with patch('src.pipeline.BlueprintExtractor') as MockBlueprintExtractor:
                     from src.ingestion.blueprint import SemanticBlueprint
                     mock_extractor = MockBlueprintExtractor.return_value
@@ -130,10 +122,10 @@ def test_paragraph_fusion_failure_triggers_sentence_fallback():
     with patch('src.pipeline.StyleTranslator') as MockTranslator:
         mock_translator = MockTranslator.return_value
 
-        # Mock translate_paragraph to return result (but will fail evaluation)
-        def mock_translate_paragraph(paragraph, atlas, author_name, style_dna=None, verbose=False, **kwargs):
-            return ("Generated paragraph with low recall.", None, None)
-        mock_translator.translate_paragraph = mock_translate_paragraph
+        # Mock translate_paragraph_statistical to return result (but will fail evaluation)
+        def mock_translate_paragraph_statistical(paragraph, author_name, prev_archetype_id=None, perspective=None, verbose=False, **kwargs):
+            return ("Generated paragraph with low recall.", 1, 0.5)
+        mock_translator.translate_paragraph_statistical = mock_translate_paragraph_statistical
 
         # Mock translate to track if it's called (sentence-by-sentence)
         def mock_translate(*args, **kwargs):
@@ -168,15 +160,7 @@ def test_paragraph_fusion_failure_triggers_sentence_fallback():
                     }
             mock_critic.evaluate = mock_evaluate
 
-            # Mock proposition extractor
-            with patch('src.pipeline.PropositionExtractor') as MockPropExtractor:
-                mock_prop_extractor = MockPropExtractor.return_value
-                mock_prop_extractor.extract_atomic_propositions.return_value = [
-                    "Human experience reinforces the rule of finitude",
-                    "The biological cycle defines our reality"
-                ]
-
-                # Mock BlueprintExtractor to return proper SemanticBlueprint objects
+            # Mock BlueprintExtractor to return proper SemanticBlueprint objects
                 with patch('src.pipeline.BlueprintExtractor') as MockBlueprintExtractor:
                     from src.ingestion.blueprint import SemanticBlueprint
                     mock_extractor = MockBlueprintExtractor.return_value
@@ -225,10 +209,10 @@ def test_paragraph_fusion_exception_triggers_sentence_fallback():
     with patch('src.pipeline.StyleTranslator') as MockTranslator:
         mock_translator = MockTranslator.return_value
 
-        # Mock translate_paragraph to raise exception
-        def mock_translate_paragraph(paragraph, atlas, author_name, style_dna=None, verbose=False, **kwargs):
+        # Mock translate_paragraph_statistical to raise exception
+        def mock_translate_paragraph_statistical(paragraph, author_name, prev_archetype_id=None, perspective=None, verbose=False, **kwargs):
             raise Exception("Paragraph fusion error")
-        mock_translator.translate_paragraph = mock_translate_paragraph
+        mock_translator.translate_paragraph_statistical = mock_translate_paragraph_statistical
 
         # Mock translate to track if it's called (sentence-by-sentence)
         def mock_translate(*args, **kwargs):
@@ -246,15 +230,7 @@ def test_paragraph_fusion_exception_triggers_sentence_fallback():
                 "style_alignment": 0.8
             }
 
-            # Mock proposition extractor
-            with patch('src.pipeline.PropositionExtractor') as MockPropExtractor:
-                mock_prop_extractor = MockPropExtractor.return_value
-                mock_prop_extractor.extract_atomic_propositions.return_value = [
-                    "Human experience reinforces the rule of finitude",
-                    "The biological cycle defines our reality"
-                ]
-
-                # Mock BlueprintExtractor to return proper SemanticBlueprint objects
+            # Mock BlueprintExtractor to return proper SemanticBlueprint objects
                 with patch('src.pipeline.BlueprintExtractor') as MockBlueprintExtractor:
                     from src.ingestion.blueprint import SemanticBlueprint
                     mock_extractor = MockBlueprintExtractor.return_value
@@ -306,11 +282,11 @@ def test_multiple_paragraphs_mixed_success_failure():
 
         # Track paragraph fusion calls
         para_fusion_call_count = {"value": 0}
-        def mock_translate_paragraph(paragraph, atlas, author_name, style_dna=None, verbose=False, **kwargs):
+        def mock_translate_paragraph_statistical(paragraph, author_name, prev_archetype_id=None, perspective=None, verbose=False, **kwargs):
             para_fusion_call_count["value"] += 1
             paragraph_fusion_results.append(f"Para {para_fusion_call_count['value']} fusion")
-            return (f"Generated paragraph {para_fusion_call_count['value']}.", None, None)
-        mock_translator.translate_paragraph = mock_translate_paragraph
+            return (f"Generated paragraph {para_fusion_call_count['value']}.", 1, 0.9)
+        mock_translator.translate_paragraph_statistical = mock_translate_paragraph_statistical
 
         # Track sentence-by-sentence calls
         sentence_call_count = {"value": 0}
@@ -352,15 +328,7 @@ def test_multiple_paragraphs_mixed_success_failure():
                     }
             mock_critic.evaluate = mock_evaluate
 
-            # Mock proposition extractor
-            with patch('src.pipeline.PropositionExtractor') as MockPropExtractor:
-                mock_prop_extractor = MockPropExtractor.return_value
-                mock_prop_extractor.extract_atomic_propositions.return_value = [
-                    "Human experience reinforces the rule of finitude",
-                    "The biological cycle defines our reality"
-                ]
-
-                # Mock BlueprintExtractor to return proper SemanticBlueprint objects
+            # Mock BlueprintExtractor to return proper SemanticBlueprint objects
                 with patch('src.pipeline.BlueprintExtractor') as MockBlueprintExtractor:
                     from src.ingestion.blueprint import SemanticBlueprint
                     mock_extractor = MockBlueprintExtractor.return_value
@@ -411,10 +379,10 @@ def test_context_propagation_across_fallback_boundary():
     with patch('src.pipeline.StyleTranslator') as MockTranslator:
         mock_translator = MockTranslator.return_value
 
-        # Mock translate_paragraph to fail
-        def mock_translate_paragraph(paragraph, atlas, author_name, style_dna=None, verbose=False, **kwargs):
-            return ("Generated paragraph.", None, None)
-        mock_translator.translate_paragraph = mock_translate_paragraph
+        # Mock translate_paragraph_statistical to fail
+        def mock_translate_paragraph_statistical(paragraph, author_name, prev_archetype_id=None, perspective=None, verbose=False, **kwargs):
+            return ("Generated paragraph.", 1, 0.5)
+        mock_translator.translate_paragraph_statistical = mock_translate_paragraph_statistical
 
         # Mock translate to track context
         def mock_translate(blueprint, author_name, style_dna, rhetorical_type, examples, verbose=False):
@@ -447,15 +415,7 @@ def test_context_propagation_across_fallback_boundary():
                     }
             mock_critic.evaluate = mock_evaluate
 
-            # Mock proposition extractor
-            with patch('src.pipeline.PropositionExtractor') as MockPropExtractor:
-                mock_prop_extractor = MockPropExtractor.return_value
-                mock_prop_extractor.extract_atomic_propositions.return_value = [
-                    "Human experience reinforces the rule of finitude",
-                    "The biological cycle defines our reality"
-                ]
-
-                # Mock BlueprintExtractor to return proper SemanticBlueprint objects
+            # Mock BlueprintExtractor to return proper SemanticBlueprint objects
                 with patch('src.pipeline.BlueprintExtractor') as MockBlueprintExtractor:
                     from src.ingestion.blueprint import SemanticBlueprint
                     mock_extractor = MockBlueprintExtractor.return_value

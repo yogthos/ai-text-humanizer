@@ -97,9 +97,8 @@ def test_phantom_removal_and_restore_work_together():
             }
         }
 
-        result, _, _ = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
@@ -162,9 +161,8 @@ def test_citations_at_sentence_boundaries():
             }
         }
 
-        result, _, _ = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
@@ -238,9 +236,8 @@ def test_multiple_phantom_citations_removed():
             }
         }
 
-        result, _, _ = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
@@ -317,9 +314,8 @@ def test_valid_citations_preserved_after_phantom_removal():
             }
         }
 
-        result, _, _ = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
@@ -395,9 +391,8 @@ def test_citation_cleanup_with_no_input_citations():
             }
         }
 
-        result, _, _ = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )

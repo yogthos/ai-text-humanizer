@@ -349,6 +349,9 @@ class ParagraphAtlas:
         # Helper function to avoid code duplication
         def create_slot(word_count, grouping):
             """Create a slot entry with inflation applied."""
+            # Store raw length BEFORE inflation
+            raw_len = word_count  # NEW: Capture the floor value
+
             # Apply Inflation
             adjusted_target = int(word_count * inflation_factor)
 
@@ -365,6 +368,7 @@ class ParagraphAtlas:
 
             return {
                 'target_len': final_target,
+                'raw_len': raw_len,  # NEW: Store the floor value
                 'type': slot_type
             }
 

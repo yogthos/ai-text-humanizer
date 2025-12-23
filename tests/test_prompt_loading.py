@@ -60,7 +60,7 @@ def test_prompt_loading_paragraph_fusion_exists():
     assert prompt is not None, "PARAGRAPH_FUSION_PROMPT should not be None"
     assert len(prompt) > 0, "PARAGRAPH_FUSION_PROMPT should not be empty"
     assert "{propositions_list}" in prompt, "Prompt should contain template variable {propositions_list}"
-    assert "{style_examples}" in prompt, "Prompt should contain template variable {style_examples}"
+    assert "{style_section}" in prompt, "Prompt should contain template variable {style_section}"
     assert "{citation_instruction}" in prompt, "Prompt should contain template variable {citation_instruction}"
     assert "{citation_output_instruction}" in prompt, "Prompt should contain template variable {citation_output_instruction}"
     print("✓ Contract: paragraph_fusion.md loads correctly")
@@ -78,12 +78,14 @@ def test_prompt_loading_template_variable_substitution():
         formatted = prompt.format(
             propositions_list="- Test proposition",
             proposition_count=1,
-            style_examples="Example 1: \"Test example\"",
+            style_section="Example 1: \"Test example\"",
             mandatory_vocabulary="",
+            global_context="",
             rhetorical_connectors="",
             citation_instruction="",
             structural_blueprint="",
-            citation_output_instruction=""
+            citation_output_instruction="",
+            num_variations=1
         )
 
         assert "Test proposition" in formatted, "Template substitution should work"

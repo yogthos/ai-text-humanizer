@@ -382,16 +382,18 @@ class StatisticalCritic:
         feedback = "## Directive Fixes (Execute These Edits EXACTLY):\n\n" + "\n\n".join(instructions)
         return feedback
 
-    def evaluate_sentence(self, sentence: str, target_length: int, tolerance: float = None) -> Tuple[float, str]:
-        """Evaluate a single sentence against target length using Hybrid Logic.
+    def evaluate_sentence(self, sentence: str, target_length: int, tolerance: float = None, raw_length: Optional[int] = None) -> Tuple[float, str]:
+        """Evaluate a single sentence against target length using Hybrid Logic with Safe Range.
 
         Uses Absolute Tolerance for micro-sentences (<6 words) and Percentage Tolerance
         for standard sentences to prevent false rejections of very short sentences.
+        With raw_length provided, accepts any length within Safe Range (floor to ceiling).
 
         Args:
             sentence: The sentence text to evaluate
-            target_length: Target word count for the sentence
+            target_length: Target word count for the sentence (inflated target)
             tolerance: Acceptable deviation ratio (default: uses stat_tolerance from config)
+            raw_length: Optional raw input word count (floor value for Safe Range)
 
         Returns:
             Tuple of (score, feedback) where:
@@ -431,11 +433,26 @@ class StatisticalCritic:
             else:
                 return 0.0, f"Too short ({word_count} words). Expand to {target_length} words."
 
-        # STANDARD CHECK: Use Percentage Tolerance (Existing Logic)
+        # STANDARD CHECK: Use Percentage Tolerance with Safe Range
+        # 1. Check Standard Target (Inflated) - This checks if we hit the "Verbose" goal
         diff_ratio = abs(word_count - target_length) / target_length
 
         if diff_ratio <= tolerance:
             return 1.0, "Sentence length matches target."
+
+        # 2. Check Raw Input Length (The Floor) - Safe Range Logic
+        # This checks if we hit the "Concise" goal (closer to original meaning)
+        if raw_length and raw_length > 0:
+            # Calculate safe floor based on raw input
+            # We use a tighter tolerance for the floor to prevent over-compression
+            min_safe = raw_length * (1 - tolerance)
+
+            # The ceiling is the Target Length (plus tolerance)
+            max_safe = target_length * (1 + tolerance)
+
+            # If we fall anywhere in this natural range, we are good.
+            if min_safe <= word_count <= max_safe:
+                return 1.0, "Match (Within Safe Inflation Range)"
 
         # Generate specific feedback
         if word_count > target_length:

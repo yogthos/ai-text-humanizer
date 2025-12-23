@@ -4645,6 +4645,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         for slot_idx, slot in enumerate(structure_map):
             content = content_slots[slot_idx] if slot_idx < len(content_slots) else ""
             target_len = slot.get('target_len', 20)
+            raw_len = slot.get('raw_len')  # NEW: Extract raw length
             slot_type = slot.get('type', 'moderate')
 
             # Check if this is the last sentence
@@ -4670,6 +4671,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                 variants = self._generate_sentence_variants(
                     content=content,
                     target_length=target_len,
+                    raw_length=raw_len,  # NEW: Pass raw_length
                     prev_context=context_so_far,
                     author_name=author_name,
                     n=sentence_variants_per_attempt,
@@ -4695,6 +4697,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
                 # 2. Select best candidate (Zipper-Aware: filters during selection)
                 sentence = self._select_best_sentence_variant(
                     variants, target_len, context_so_far,
+                    raw_length=raw_len,  # NEW: Pass raw_length
                     verbose=verbose and attempt == 0,
                     global_context=global_context
                 )
@@ -4710,7 +4713,7 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
                 # Validate strict compliance (math only)
                 score, feedback = self.statistical_critic.evaluate_sentence(
-                    sentence, target_len
+                    sentence, target_len, raw_length=raw_len  # NEW: Pass raw_length
                 )
 
                 if verbose:
@@ -5323,7 +5326,8 @@ Output only the sentence, no explanations.
         temperature: float = 0.8,
         max_tokens: int = 1500,
         is_last_sentence: bool = False,
-        verbose: bool = False
+        verbose: bool = False,
+        raw_length: Optional[int] = None  # NEW: Add parameter (for consistency)
     ) -> List[str]:
         """Generate N variants of a sentence for a specific slot.
 
@@ -5500,7 +5504,8 @@ Output only the sentence, no explanations.
         target_length: int,
         prev_context: str,
         verbose: bool = False,
-        global_context: Optional[Dict] = None
+        global_context: Optional[Dict] = None,
+        raw_length: Optional[int] = None  # NEW: Add parameter
     ) -> Optional[str]:
         """Select best sentence variant based on format compliance, zipper check, and length proximity.
 
@@ -5642,6 +5647,17 @@ Output only the sentence, no explanations.
                         if verbose:
                             print(f"      Variant filtered (3-Gram Repetition): {v[:50]}... (repeats: {current_repeats[:2]})")
                         continue
+
+            # 4. NEW: LENGTH VALIDATION (Safe Range Check)
+            # Filter out variants that don't meet Safe Range criteria
+            if raw_length is not None:
+                length_score, length_feedback = self.statistical_critic.evaluate_sentence(
+                    v, target_length, raw_length=raw_length
+                )
+                if length_score < 1.0:
+                    if verbose:
+                        print(f"      Variant filtered (Length): {v[:50]}... ({length_feedback})")
+                    continue  # Skip variants outside Safe Range
 
             valid_candidates.append(v)
 

@@ -272,9 +272,15 @@ Output ONLY the JSON array, no other text.
                 plan = response
 
             # Validate repair plan structure
-            if not plan:
+            if plan is None:
                 if verbose:
                     print(f"  ⚠ Failed to extract JSON from repair plan response")
+                return []
+
+            # NEW FIX: Handle Empty Plan (check before type conversion)
+            if isinstance(plan, list) and len(plan) == 0:
+                if verbose:
+                    print("  ℹ Repair planner returned empty plan (no changes needed)")
                 return []
 
             if not isinstance(plan, list):

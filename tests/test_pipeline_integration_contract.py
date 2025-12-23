@@ -50,11 +50,11 @@ def test_pipeline_multi_paragraph_mixed_success():
         mock_translator = MockTranslator.return_value
 
         para_count = {"value": 0}
-        def mock_translate_paragraph(paragraph, atlas, author_name, style_dna=None, verbose=False, **kwargs):
+        def mock_translate_paragraph_statistical(paragraph, author_name, prev_archetype_id=None, perspective=None, verbose=False, **kwargs):
             para_count["value"] += 1
             paragraph_results.append(f"Para {para_count['value']}")
-            return (f"Generated paragraph {para_count['value']}.", None, None)
-        mock_translator.translate_paragraph = mock_translate_paragraph
+            return (f"Generated paragraph {para_count['value']}.", 1, 0.9)
+        mock_translator.translate_paragraph_statistical = mock_translate_paragraph_statistical
 
         sent_count = {"value": 0}
         def mock_translate(*args, **kwargs):

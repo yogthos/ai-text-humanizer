@@ -101,73 +101,87 @@ def test_repair_loop_full_checklist_format():
 
     mock_atlas = MockStyleAtlas()
 
-    # Mock critic to return low recall (triggers repair)
-    with patch('src.validator.semantic_critic.SemanticCritic') as MockCritic:
-        mock_critic_instance = MockCritic.return_value
+    # Mock ParagraphAtlas to avoid file system dependencies
+    with patch('src.generator.translator.ParagraphAtlas') as MockParagraphAtlas:
+        mock_para_atlas = Mock()
+        mock_para_atlas.select_next_archetype.return_value = 1
+        mock_para_atlas.get_structure_map.return_value = [{"target_len": 20, "type": "moderate"}]
+        mock_para_atlas.get_example_paragraph.return_value = "Example paragraph text."
+        mock_para_atlas.get_archetype_description.return_value = {"sentence_count": 1, "avg_words_per_sent": 20}
+        mock_para_atlas._create_synthetic_archetype.return_value = {
+            "id": "synthetic_fallback",
+            "structure_map": [{"target_len": 20, "type": "moderate"}],
+            "content_map": ["Test content"],
+            "stats": {"sentence_count": 1, "avg_words_per_sent": 20}
+        }
+        MockParagraphAtlas.return_value = mock_para_atlas
 
-        call_count = {"value": 0}
-        def mock_evaluate(*args, **kwargs):
-            call_count["value"] += 1
-            if call_count["value"] == 1:
-                # Initial evaluation: low recall
-                return {
-                    "pass": False,
-                    "score": 0.6,
-                    "proposition_recall": 0.5,  # Below threshold
-                    "style_alignment": 0.7,
-                    "feedback": "Missing propositions",
-                    "recall_details": {
-                        "preserved": ["Human experience reinforces the rule of finitude"],
-                        "missing": [
-                            "The biological cycle of birth, life, and decay defines our reality",
-                            "Every object we touch eventually breaks"
-                        ],
-                        "scores": {}
+        # Mock critic to return low recall (triggers repair)
+        with patch('src.validator.semantic_critic.SemanticCritic') as MockCritic:
+            mock_critic_instance = MockCritic.return_value
+
+            call_count = {"value": 0}
+            def mock_evaluate(*args, **kwargs):
+                call_count["value"] += 1
+                if call_count["value"] == 1:
+                    # Initial evaluation: low recall
+                    return {
+                        "pass": False,
+                        "score": 0.6,
+                        "proposition_recall": 0.5,  # Below threshold
+                        "style_alignment": 0.7,
+                        "feedback": "Missing propositions",
+                        "recall_details": {
+                            "preserved": ["Human experience reinforces the rule of finitude"],
+                            "missing": [
+                                "The biological cycle of birth, life, and decay defines our reality",
+                                "Every object we touch eventually breaks"
+                            ],
+                            "scores": {}
+                        }
                     }
-                }
-            else:
-                # Repair evaluation: improved
-                return {
-                    "pass": True,
-                    "score": 0.85,
-                    "proposition_recall": 0.9,
-                    "style_alignment": 0.8,
-                    "feedback": "Passed",
-                    "recall_details": {
-                        "preserved": [
-                            "Human experience reinforces the rule of finitude",
-                            "The biological cycle of birth, life, and decay defines our reality",
-                            "Every object we touch eventually breaks"
-                        ],
-                        "missing": [],
-                        "scores": {}
+                else:
+                    # Repair evaluation: improved
+                    return {
+                        "pass": True,
+                        "score": 0.85,
+                        "proposition_recall": 0.9,
+                        "style_alignment": 0.8,
+                        "feedback": "Passed",
+                        "recall_details": {
+                            "preserved": [
+                                "Human experience reinforces the rule of finitude",
+                                "The biological cycle of birth, life, and decay defines our reality",
+                                "Every object we touch eventually breaks"
+                            ],
+                            "missing": [],
+                            "scores": {}
+                        }
                     }
-                }
-        mock_critic_instance.evaluate = mock_evaluate
+            mock_critic_instance.evaluate = mock_evaluate
 
-        input_paragraph = "Human experience reinforces the rule of finitude. The biological cycle of birth, life, and decay defines our reality. Every object we touch eventually breaks."
+            input_paragraph = "Human experience reinforces the rule of finitude. The biological cycle of birth, life, and decay defines our reality. Every object we touch eventually breaks."
 
-        result = translator.translate_paragraph(
-            paragraph=input_paragraph,
-            atlas=mock_atlas,
-            author_name="Test Author",
-            verbose=False
-        )
+            result, _, _ = translator.translate_paragraph_statistical(
+                paragraph=input_paragraph,
+                author_name="Test Author",
+                verbose=False
+            )
 
-        # Verify repair prompt was called
-        assert len(repair_prompts) > 0, "Repair prompt should be called"
+            # Verify repair prompt was called
+            assert len(repair_prompts) > 0, "Repair prompt should be called"
 
-        # Verify FULL CHECKLIST format
-        repair_prompt = repair_prompts[0]
-        assert "FULL CHECKLIST" in repair_prompt or "all propositions" in repair_prompt.lower(), \
-            "Repair prompt should include FULL CHECKLIST"
+            # Verify FULL CHECKLIST format
+            repair_prompt = repair_prompts[0]
+            assert "FULL CHECKLIST" in repair_prompt or "all propositions" in repair_prompt.lower(), \
+                "Repair prompt should include FULL CHECKLIST"
 
-        # Verify both preserved and missing propositions are listed
-        assert "Human experience reinforces the rule of finitude" in repair_prompt, \
-            "Preserved proposition should be in checklist"
-        assert "The biological cycle" in repair_prompt or "biological cycle" in repair_prompt, \
-            "Missing proposition should be in checklist"
-    print("✓ Contract: Repair prompt includes FULL CHECKLIST")
+            # Verify both preserved and missing propositions are listed
+            assert "Human experience reinforces the rule of finitude" in repair_prompt, \
+                "Preserved proposition should be in checklist"
+            assert "The biological cycle" in repair_prompt or "biological cycle" in repair_prompt, \
+                "Missing proposition should be in checklist"
+        print("✓ Contract: Repair prompt includes FULL CHECKLIST")
 
 
 def test_repair_loop_generation_failure_stops_gracefully():
@@ -220,9 +234,8 @@ def test_repair_loop_generation_failure_stops_gracefully():
         input_paragraph = "Human experience reinforces the rule of finitude. The biological cycle defines our reality."
 
         # Should not crash, should return best available
-        result = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
@@ -285,9 +298,8 @@ def test_repair_loop_flatline_stops_after_max_attempts():
 
         input_paragraph = "Human experience reinforces the rule of finitude. The biological cycle defines our reality."
 
-        result = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
@@ -378,9 +390,8 @@ def test_repair_loop_missing_propositions_identified_correctly():
 
         input_paragraph = "Human experience reinforces the rule of finitude. The biological cycle of birth, life, and decay defines our reality. Every object we touch eventually breaks."
 
-        result = translator.translate_paragraph(
+        result, _, _ = translator.translate_paragraph_statistical(
             paragraph=input_paragraph,
-            atlas=mock_atlas,
             author_name="Test Author",
             verbose=False
         )
