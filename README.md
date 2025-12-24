@@ -5,9 +5,11 @@ Transform text to match a target author's style while preserving semantic meanin
 - **Style Atlas**: ChromaDB-based vector store for paragraph-level style retrieval
 - **Paragraph Atlas**: Statistical archetype system with Markov chain transitions for paragraph generation
 - **Style RAG**: Dynamic retrieval of semantically relevant style fragments (3-sentence windows) for concrete phrasing examples
+- **Graph Pipeline**: Topological style transfer using logical dependency graphs and anchored skeletons
 - **Semantic Translation**: Neutral summary extraction to preserve meaning while removing source style
 - **Perspective Anchoring**: Point of view preservation through the entire pipeline (prevents neutralizer from stripping personal pronouns)
 - **Statistical Generation**: Paragraph-level generation using archetype statistics, style palettes, and iterative refinement
+- **Graph-Based Generation**: Sentence generation using logical graph matching and syntactic skeleton injection
 - **Semantic Validation**: Multi-metric validation ensuring meaning preservation and style alignment
 
 ## Dependencies
@@ -75,13 +77,14 @@ python3 -c "from sentence_transformers import SentenceTransformer; SentenceTrans
 
 2. Initialize author (one command sets up everything):
    ```bash
-   python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt
+   python3 scripts/init_author.py --author "Mao" --style-file data/corpus/mao.txt
    ```
 
    This single command automatically:
    - Loads styles into ChromaDB (Style Atlas)
    - Builds paragraph atlas (statistical archetypes)
    - Builds Style RAG index (semantic style fragment retrieval)
+   - Builds style graph index (graph-based generation with logical topologies)
 
    **Note:** If you need to run steps individually, see the [Usage](#usage) section below.
 
@@ -98,17 +101,17 @@ python3 -c "from sentence_transformers import SentenceTransformer; SentenceTrans
 
 Use the turnkey script to set up everything in one command:
 ```bash
-# Initialize author (loads styles, builds atlas, builds RAG)
-python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt
+# Initialize author (loads styles, builds atlas, builds RAG, builds graph index)
+python3 scripts/init_author.py --author "Mao" --style-file data/corpus/mao.txt
 
 # With verbose output
-python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt --verbose
+python3 scripts/init_author.py --author "Mao" --style-file data/corpus/mao.txt --verbose
 
 # Skip steps that are already done
-python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt --skip-style-load
+python3 scripts/init_author.py --author "Mao" --style-file data/corpus/mao.txt --skip-style-load
 
 # Use relaxed filtering (if you get "No valid paragraphs found" error)
-python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt --relaxed
+python3 scripts/init_author.py --author "Mao" --style-file data/corpus/mao.txt --relaxed
 ```
 
 **Manual Setup (Individual Steps):**
@@ -116,29 +119,29 @@ python3 scripts/init_author.py --author "Mao" --style-file styles/sample_mao.txt
 **1. Load Style Atlas** (for paragraph-level style retrieval):
 ```bash
 # Single author
-python3 scripts/load_style.py --style-file styles/sample_mao.txt --author "Mao"
+python3 scripts/load_style.py --style-file data/corpus/mao.txt --author "Mao"
 
 # Multiple authors
 python3 scripts/load_style.py \
-  --style-file styles/sample_hemingway.txt --author "Hemingway" \
-  --style-file styles/sample_lovecraft.txt --author "Lovecraft"
+  --style-file data/corpus/hemingway.txt --author "Hemingway" \
+  --style-file data/corpus/lovecraft.txt --author "Lovecraft"
 ```
 
 **2. Build Paragraph Atlas** (for statistical archetype generation):
 ```bash
 # Basic usage
-python3 scripts/build_paragraph_atlas.py styles/sample_mao.txt --author "Mao"
+python3 scripts/build_paragraph_atlas.py data/corpus/mao.txt --author "Mao"
 
 # Use relaxed filtering (if you get "No valid paragraphs found" error)
 # This lowers thresholds: min-sentences=1, min-style-score=3
-python3 scripts/build_paragraph_atlas.py styles/sample_mao.txt --author "Mao" --relaxed
+python3 scripts/build_paragraph_atlas.py data/corpus/mao.txt --author "Mao" --relaxed
 
 # Custom filtering thresholds
-python3 scripts/build_paragraph_atlas.py styles/sample_mao.txt --author "Mao" \
+python3 scripts/build_paragraph_atlas.py data/corpus/mao.txt --author "Mao" \
   --min-sentences 1 --min-style-score 3
 
 # Specify number of clusters
-python3 scripts/build_paragraph_atlas.py styles/sample_mao.txt --author "Mao" --clusters 15
+python3 scripts/build_paragraph_atlas.py data/corpus/mao.txt --author "Mao" --clusters 15
 ```
 
 **Filtering Options:**
@@ -157,19 +160,50 @@ This creates:
 **3. Build Style RAG Index** (for dynamic style palette retrieval):
 ```bash
 # Specify corpus file
-python3 scripts/build_rag_index.py --author "Mao" --corpus-file styles/sample_mao.txt
+python3 scripts/build_rag_index.py --author "Mao" --corpus-file data/corpus/mao.txt
 ```
 
 This creates:
 - `atlas_cache/paragraph_atlas/{author}/style_fragments_chroma/` - ChromaDB collection with 3-sentence style fragments
 - Uses high-fidelity `all-mpnet-base-v2` embeddings for semantic retrieval
 
-**4. Generate Style DNA** (optional, for style profiling):
+**4. Build Style Graph Index** (for graph-based generation):
+```bash
+# Basic usage (uses 5 parallel workers by default)
+python3 scripts/build_style_graph_index.py --corpus-file data/corpus/mao.txt --author "Mao"
+
+# With more parallel workers for faster processing (adjust based on API rate limits)
+python3 scripts/build_style_graph_index.py --corpus-file data/corpus/mao.txt --author "Mao" --max-workers 10
+
+# With more frequent checkpointing (saves progress every 50 extractions)
+python3 scripts/build_style_graph_index.py --corpus-file data/corpus/mao.txt --author "Mao" --checkpoint-interval 50
+
+# Clear existing index and rebuild
+python3 scripts/build_style_graph_index.py --corpus-file data/corpus/mao.txt --author "Mao" --clear-style-graphs
+```
+
+**Options:**
+- `--max-workers N`: Number of parallel workers for LLM calls (default: 5). Increase for faster processing if your API supports higher concurrency.
+- `--checkpoint-interval N`: Save progress every N successful extractions (default: 100). Lower values provide more frequent checkpoints.
+- `--clear-style-graphs`: Clear the existing collection before indexing (useful when adding new metadata fields).
+
+**Features:**
+- **Parallel Processing**: Processes multiple sentences concurrently for faster indexing (5x speedup with default settings)
+- **Resumable**: If interrupted, rerun the script and it will automatically skip already-processed sentences
+- **Checkpointing**: Progress is saved periodically, so you won't lose work if the script is interrupted
+- **Deduplication**: Automatically skips duplicate graph structures (same logical topology from different sentences)
+
+This creates:
+- ChromaDB collection: `style_graphs` at `atlas_cache/chroma`
+- Stores: Abstract logical topologies (Mermaid graphs + syntactic skeletons) extracted from author's sentences
+- Used for: Graph-based generation (topological style transfer with anchored skeletons)
+
+**5. Generate Style DNA** (optional, for style profiling):
 ```bash
 python3 scripts/generate_style_dna.py --author "Mao"
 ```
 
-**5. List Loaded Styles**:
+**6. List Loaded Styles**:
 ```bash
 python3 scripts/list_styles.py
 ```
@@ -195,6 +229,7 @@ python3 restyle.py input/small.md -o output/small.md \
 - `--atlas-cache`: ChromaDB persistence directory (overrides config)
 - `--blend-ratio`: Style blending ratio (0.0-1.0, default: 0.6)
 - `--perspective`: Force specific perspective: `first_person_singular`, `first_person_plural`, or `third_person` (overrides author profile and input detection)
+- `--graph-mode`: Force graph-based generation mode (requires style graph index to be built)
 - `-v, --verbose`: Enable verbose output
 
 ### Python API
@@ -549,6 +584,46 @@ When enabled, the system uses document-level context (thesis, intent, keywords) 
 
 The Style RAG system retrieves actual phrases and sentence structures from the author's corpus that are semantically similar to the content being generated, providing concrete examples for the LLM to mimic.
 
+**`graph_pipeline`** (object): Graph-based generation settings for topological style transfer:
+```json
+{
+  "enabled": true,
+  "indexer": {
+    "opener_ratio": 0.15,
+    "closer_ratio": 0.15
+  },
+  "matcher": {
+    "top_k_candidates": 5,
+    "strict_node_count": false
+  },
+  "fracturing": {
+    "enabled": true,
+    "target_density": 4,
+    "max_density": 6
+  },
+  "telemetry": {
+    "enabled": true,
+    "log_path": "logs/graph_debug.md"
+  }
+}
+```
+- `enabled`: Enable graph-based generation (default: true). When enabled, the system uses topological style transfer; when disabled, falls back to statistical generation.
+- `indexer`: Settings for style graph indexer:
+  - `opener_ratio`: Ratio of paragraphs to mark as "opener" (default: 0.15)
+  - `closer_ratio`: Ratio of paragraphs to mark as "closer" (default: 0.15)
+- `matcher`: Settings for graph matching:
+  - `top_k_candidates`: Number of candidate style graphs to retrieve from ChromaDB (default: 5)
+  - `strict_node_count`: Whether to strictly enforce node count matching (default: false, allows semantic grafting)
+- `fracturing`: Settings for dynamic graph fracturing:
+  - `enabled`: Enable semantic fracturing (default: true). When enabled, propositions are grouped into logical clusters; when disabled, uses fixed-size chunking.
+  - `target_density`: Target number of propositions per sentence cluster (default: 4)
+  - `max_density`: Maximum propositions per cluster (default: 6)
+- `telemetry`: Settings for graph debugging:
+  - `enabled`: Enable graph telemetry logging (default: true)
+  - `log_path`: Path to log file for graph matching decisions (default: "logs/graph_debug.md")
+
+The graph pipeline extracts logical topologies from the author's corpus and uses them to structure generated text, ensuring the output matches the author's logical patterns and syntactic frames.
+
 ### Perspective Anchoring
 
 **Perspective Configuration** (via `generation.default_perspective`): Controls how the system preserves narrative point of view (POV) through the translation pipeline:
@@ -590,10 +665,13 @@ text-style-transfer/
 │   │   ├── navigator.py        # RAG retrieval
 │   │   ├── paragraph_atlas.py  # Paragraph archetype loader
 │   │   ├── style_rag.py        # Style fragment retrieval (RAG)
-│   │   └── style_registry.py   # Style DNA storage
+│   │   ├── style_registry.py   # Style DNA storage
+│   │   ├── input_mapper.py     # Input proposition to graph mapper
+│   │   └── fracturer.py         # Dynamic graph fracturing
 │   ├── generator/
-│   │   ├── translator.py       # Text generation
+│   │   ├── translator.py       # Text generation (statistical + graph-based)
 │   │   ├── semantic_translator.py # Neutral summary extraction
+│   │   ├── graph_matcher.py    # Topological graph matching
 │   │   └── mutation_operators.py # Prompt templates
 │   ├── validator/
 │   │   ├── semantic_critic.py  # Semantic validation
@@ -606,10 +684,12 @@ text-style-transfer/
 │       └── semantic_analyzer.py # Proposition extraction
 ├── prompts/                     # LLM prompt templates (markdown)
 ├── scripts/
-│   ├── init_author.py          # Turnkey script to initialize author (loads styles, builds atlas & RAG)
+│   ├── init_author.py          # Turnkey script to initialize author (loads styles, builds atlas, RAG & graph index)
 │   ├── load_style.py           # Load author styles into Style Atlas
 │   ├── build_paragraph_atlas.py # Build paragraph archetype atlas
 │   ├── build_rag_index.py      # Build Style RAG fragment index
+│   ├── build_style_graph_index.py # Build style graph index (logical topologies)
+│   ├── verify_graph_pipeline.py # Verify graph pipeline end-to-end
 │   ├── generate_style_dna.py   # Generate Style DNA profiles
 │   ├── list_styles.py          # List loaded authors
 │   └── clear_chromadb.py       # Clear ChromaDB collections
@@ -625,6 +705,10 @@ text-style-transfer/
 ## How It Works
 
 ### Pipeline Flow
+
+The system supports two generation modes:
+
+#### Statistical Generation (Fallback Mode)
 
 ```mermaid
 flowchart TD
@@ -649,16 +733,40 @@ flowchart TD
     MorePara -->|No| End([Output Text])
 ```
 
+#### Graph-Based Generation (Primary Mode)
+
+```mermaid
+flowchart TD
+    Start([Input Text]) --> ProcessPara[Process Each Paragraph]
+    ProcessPara --> ExtractProps[Extract Propositions]
+    ExtractProps --> Fracture[Dynamic Graph Fracturing]
+    Fracture --> MapInput[Map to Input Graph]
+    MapInput --> MatchStyle[Match Style Graph from ChromaDB]
+    MatchStyle --> InjectSkeleton[Inject Content into Skeleton]
+    InjectSkeleton --> GenerateText[Generate Text]
+    GenerateText --> MorePara{More<br/>Paragraphs?}
+    MorePara -->|Yes| ProcessPara
+    MorePara -->|No| End([Output Text])
+
+    MatchStyle -.->|Fallback if no match| StatisticalMode[Statistical Generation]
+    InjectSkeleton -.->|Fallback if fails| StatisticalMode
+```
+
 ### Key Components
 
 1. **Style Atlas**: ChromaDB-based vector store with dual embeddings (semantic + style) and K-means clustering for paragraph-level style retrieval
 2. **Paragraph Atlas**: Statistical archetype system with Markov chain transitions for generating paragraphs matching author's structural patterns
 3. **Style RAG**: Dynamic retrieval of semantically relevant style fragments (3-sentence windows) to provide concrete phrasing examples during generation
-4. **Semantic Translator**: Extracts neutral logical summaries from input text, removing style while preserving meaning and perspective
-5. **Perspective Anchoring**: Preserves point of view (POV) through the entire pipeline, preventing the neutralizer from converting personal narratives into detached academic prose
-6. **Statistical Critic**: Validates generated paragraphs against statistical archetype parameters (sentence length, sentence count, burstiness)
-7. **Semantic Critic**: Validates generated text using proposition recall and style alignment metrics
-8. **Style Registry**: Sidecar JSON storage for author Style DNA profiles
+4. **Style Graph Index**: ChromaDB collection storing abstract logical topologies (Mermaid graphs + syntactic skeletons) extracted from author's corpus
+5. **Semantic Fracturer**: Groups input propositions into logical clusters that match target style density, preserving causal chains
+6. **Input Logic Mapper**: Converts propositions into structured logical dependency graphs (Mermaid format)
+7. **Topological Matcher**: Queries ChromaDB for matching style graphs and maps input nodes to style nodes
+8. **Anchored Skeleton Injection**: Injects user content into author's exact syntactic frame (conjunctions, prepositions, transitions) to prevent AI hallucination
+9. **Semantic Translator**: Extracts neutral logical summaries from input text, removing style while preserving meaning and perspective
+10. **Perspective Anchoring**: Preserves point of view (POV) through the entire pipeline, preventing the neutralizer from converting personal narratives into detached academic prose
+11. **Statistical Critic**: Validates generated paragraphs against statistical archetype parameters (sentence length, sentence count, burstiness)
+12. **Semantic Critic**: Validates generated text using proposition recall and style alignment metrics
+13. **Style Registry**: Sidecar JSON storage for author Style DNA profiles
 
 ### Statistical Paragraph Generation Process
 
@@ -847,13 +955,21 @@ For more details, see `tests/integration/README.md`.
 
 **Author not found**: Check `blend.authors` in config.json matches loaded author names
 
+**Slow graph index building**: The `build_style_graph_index.py` script uses parallel processing by default (5 workers). If your API supports higher concurrency, increase `--max-workers` (e.g., `--max-workers 10`) for faster processing. The script is resumable, so you can safely interrupt and resume it without losing progress.
+
 **Low quality output**:
-- Adjust `generation.compliance_threshold` or `semantic_critic.recall_threshold`
-- Ensure Style RAG index is built for better style palette retrieval (`scripts/build_rag_index.py` or use `scripts/init_author.py`)
-- Check that paragraph atlas is built for statistical generation (`scripts/build_paragraph_atlas.py`)
-- Verify that Style DNA is generated for the author (`scripts/generate_style_dna.py`)
-- Increase `generation.num_candidates` for more diverse generation
-- Adjust `generation.temperature` (higher = more creative, lower = more conservative)
+- For graph-based generation:
+  - Ensure style graph index is built (`scripts/build_style_graph_index.py` or use `scripts/init_author.py`)
+  - Check `graph_pipeline.enabled` is `true` in `config.json`
+  - Adjust `graph_pipeline.fracturing.target_density` to match author's sentence density
+  - Review graph telemetry logs at `logs/graph_debug.md` to inspect matching decisions
+- For statistical generation:
+  - Adjust `generation.compliance_threshold` or `semantic_critic.recall_threshold`
+  - Ensure Style RAG index is built for better style palette retrieval (`scripts/build_rag_index.py` or use `scripts/init_author.py`)
+  - Check that paragraph atlas is built for statistical generation (`scripts/build_paragraph_atlas.py`)
+  - Verify that Style DNA is generated for the author (`scripts/generate_style_dna.py`)
+  - Increase `generation.num_candidates` for more diverse generation
+  - Adjust `generation.temperature` (higher = more creative, lower = more conservative)
 
 **Import errors**: Ensure virtual environment is activated and dependencies are installed
 

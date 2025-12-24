@@ -33,9 +33,13 @@ from src.generator.mutation_operators import (
 )
 from src.atlas.paragraph_atlas import ParagraphAtlas
 from src.atlas.style_rag import StyleRAG
+from src.utils.graph_telemetry import GraphLogger
+from src.atlas.input_mapper import InputLogicMapper
+from src.atlas.fracturer import SemanticFracturer
 from src.generator.semantic_translator import SemanticTranslator
 from src.generator.content_planner import ContentPlanner
 from src.generator.refiner import ParagraphRefiner
+from src.generator.graph_matcher import TopologicalMatcher
 from src.validator.statistical_critic import StatisticalCritic
 from src.utils.nlp_manager import NLPManager
 from src.utils.text_processing import check_zipper_merge, parse_variants_from_response
@@ -166,6 +170,18 @@ class StyleTranslator:
 
         # Initialize skeleton cache for atlas memorization
         self._skeleton_cache = {}  # Key: (author, rhetorical_type, prop_count_bucket) -> (teacher_example, templates)
+
+        # Initialize graph-based matching components
+        self.input_mapper = InputLogicMapper(self.llm_provider)
+        self.graph_matcher = TopologicalMatcher(config_path=config_path)
+        self.fracturer = SemanticFracturer(self.llm_provider)
+
+        # Initialize graph telemetry logger
+        graph_config = self.config.get("graph_pipeline", {})
+        if graph_config.get("telemetry", {}).get("enabled", True):
+            self.telemetry = GraphLogger(config_path=config_path)
+        else:
+            self.telemetry = None
 
     def _get_nlp(self):
         """Get or load spaCy model for noun extraction."""
@@ -4252,6 +4268,543 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
         return filtered
 
+    def _extract_propositions_from_text(self, text: str) -> List[str]:
+        """Extract atomic propositions from paragraph text using LLM.
+
+        Args:
+            text: Input paragraph text.
+
+        Returns:
+            List of atomic proposition strings.
+        """
+        if not text or not text.strip():
+            return []
+
+        system_prompt = "You are a Proposition Extractor. Break text into atomic, independent facts."
+
+        user_prompt = f"""Break the following text into atomic, standalone facts (propositions).
+Each proposition should be a complete, independent statement.
+Return a JSON object with a key 'propositions' containing the list of strings.
+Example: {{"propositions": ["fact 1", "fact 2"]}}
+
+Text: {text}"""
+
+        try:
+            response = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                require_json=True,
+                temperature=0.3,
+                max_tokens=500
+            )
+
+            # Strip markdown code blocks if present
+            response = response.strip()
+            if response.startswith('```'):
+                # Remove markdown code blocks
+                response = re.sub(r'```json\s*\n?(.*?)\n?```', r'\1', response, flags=re.DOTALL)
+                response = re.sub(r'```\s*\n?(.*?)\n?```', r'\1', response, flags=re.DOTALL)
+                response = response.replace('```', '').strip()
+
+            # Parse JSON
+            parsed = json.loads(response)
+
+            # Handle both JSON object and array responses
+            # DeepSeek with require_json=True returns objects, not arrays
+            if isinstance(parsed, dict):
+                # Try common field names (check 'propositions' first as it's what we request)
+                if "propositions" in parsed:
+                    propositions = parsed["propositions"]
+                elif "items" in parsed:
+                    propositions = parsed["items"]
+                elif "list" in parsed:
+                    propositions = parsed["list"]
+                elif len(parsed) == 1:
+                    # If dict has one key, assume it's the list
+                    propositions = list(parsed.values())[0]
+                else:
+                    print("Warning: LLM returned JSON object but couldn't find propositions list")
+                    return []
+            elif isinstance(parsed, list):
+                # Direct array response (some providers may return this)
+                propositions = parsed
+            else:
+                print("Warning: LLM returned non-list and non-dict for propositions")
+                return []
+
+            # Validate it's a list of strings
+            if not isinstance(propositions, list):
+                print("Warning: Extracted propositions is not a list")
+                return []
+
+            # Filter to ensure all items are strings
+            propositions = [str(p).strip() for p in propositions if p and str(p).strip()]
+
+            return propositions
+
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"Warning: Failed to extract propositions: {e}")
+            return []
+
+    def _generate_from_graph(
+        self,
+        blueprint: Dict,
+        input_node_map: Dict[str, str],
+        author_name: str,
+        verbose: bool = False
+    ) -> str:
+        """
+        Generate text by traversing the style graph structure and filling it with mapped content.
+        Uses anchored skeleton injection if available, otherwise falls back to graph walking.
+        """
+        style_mermaid = blueprint.get('style_mermaid', '')
+        node_mapping = blueprint.get('node_mapping', {})
+        style_metadata = blueprint.get('style_metadata', {})
+        skeleton = style_metadata.get('skeleton', '')
+        intent = style_metadata.get('intent', 'ARGUMENT')  # Default to ARGUMENT if not specified
+
+        # Load style profile for dynamic style guidance
+        style_profile = self._load_style_profile(author_name)
+        style_description = None
+        if style_profile:
+            # Try to get style_description or tone_markers directly
+            style_description = style_profile.get('description') or style_profile.get('style_description')
+            tone_markers = style_profile.get('tone_markers')
+
+            # If not found, construct from available fields
+            if not style_description:
+                style_parts = []
+                if style_profile.get('rhythm_desc'):
+                    style_parts.append(f"rhythm: {style_profile['rhythm_desc']}")
+                stylistic_dna = style_profile.get('stylistic_dna', {})
+                if stylistic_dna.get('sentence_structure'):
+                    style_parts.append(f"sentence structure: {stylistic_dna['sentence_structure']}")
+                if style_profile.get('pov'):
+                    style_parts.append(f"point of view: {style_profile['pov']}")
+                if tone_markers:
+                    style_parts.append(f"tone markers: {', '.join(tone_markers) if isinstance(tone_markers, list) else tone_markers}")
+
+                if style_parts:
+                    style_description = "; ".join(style_parts)
+                else:
+                    # Fallback: use stylistic_dna flags to construct description
+                    dna_flags = []
+                    if stylistic_dna.get('force_active_voice'):
+                        dna_flags.append("active voice")
+                    if stylistic_dna.get('allow_complex_connectors'):
+                        dna_flags.append("complex connectors")
+                    if stylistic_dna.get('sensory_grounding'):
+                        dna_flags.append("sensory grounding")
+                    if dna_flags:
+                        style_description = f"Style traits: {', '.join(dna_flags)}"
+
+        # Fallback if no style profile found
+        if not style_description:
+            style_description = f"Mimic the author {author_name} explicitly"
+
+        # 1. Resolve node_mapping values to actual text (Style Node -> Actual Input String)
+        resolved_content = {}
+        for style_node, input_nodes_ref in node_mapping.items():
+            if input_nodes_ref == 'UNUSED':
+                continue  # Skip unused nodes
+
+            # Handle comma-separated values (e.g., 'P1, P2')
+            if ',' in str(input_nodes_ref):
+                input_node_keys = [key.strip() for key in str(input_nodes_ref).split(',')]
+                resolved_texts = []
+                for key in input_node_keys:
+                    if key in input_node_map:
+                        resolved_texts.append(input_node_map[key])
+                if resolved_texts:
+                    resolved_content[style_node] = ' '.join(resolved_texts)
+            else:
+                # Single node reference
+                if input_nodes_ref in input_node_map:
+                    resolved_content[style_node] = input_node_map[input_nodes_ref]
+
+        # 2. Prepare the Prompt
+        if skeleton and skeleton.strip():
+            # --- SKELETON MODE: Structural Adaptation Strategy ---
+            processed_skeleton = skeleton
+
+            # Smart Skeleton Cleaning: Remove placeholders that don't have resolved content
+            # Find all placeholders in skeleton (e.g., [EXAMPLE], [QUALIFIER])
+            placeholder_pattern = r'\[([A-Z_][A-Z0-9_]*)\]'
+            placeholders = re.findall(placeholder_pattern, processed_skeleton)
+
+            for placeholder_node in placeholders:
+                # If this node doesn't have resolved content, remove the placeholder
+                if placeholder_node not in resolved_content:
+                    # Remove the placeholder and any surrounding whitespace/commas
+                    # Case 1: ", [NODE]" -> remove leading comma/space
+                    processed_skeleton = re.sub(
+                        r',\s*\[' + re.escape(placeholder_node) + r'\]',
+                        '',
+                        processed_skeleton
+                    )
+                    # Case 2: "[NODE], " -> remove trailing comma/space
+                    processed_skeleton = re.sub(
+                        r'\[' + re.escape(placeholder_node) + r'\]\s*,',
+                        '',
+                        processed_skeleton
+                    )
+                    # Case 3: Just "[NODE]"
+                    processed_skeleton = re.sub(
+                        r'\[' + re.escape(placeholder_node) + r'\]',
+                        '',
+                        processed_skeleton
+                    )
+
+            # Cleanup cleanup: Fix double spaces or commas created by removal
+            processed_skeleton = re.sub(r'\s+', ' ', processed_skeleton).strip()
+            processed_skeleton = re.sub(r'\s*,\s*,', ',', processed_skeleton)
+            processed_skeleton = re.sub(r',\s*\.', '.', processed_skeleton)
+
+            # Extract structural anchors (key connectors) from skeleton
+            # Remove placeholders to get clean skeleton text
+            skeleton_clean = re.sub(placeholder_pattern, '', processed_skeleton)
+            # Extract key structural words (connectors, negations, etc.)
+            structural_words = {
+                'not', 'but', 'and', 'or', 'nor', 'yet', 'so', 'for', 'while', 'whereas',
+                'although', 'though', 'however', 'therefore', 'thus', 'hence', 'consequently',
+                'namely', 'i.e.', 'e.g.', 'such as', 'that is', 'which is', 'who is',
+                'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+                'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+                'must', 'can', 'if', 'then', 'when', 'where', 'as', 'since', 'because'
+            }
+            skeleton_tokens = re.findall(r'\b\w+\b', skeleton_clean.lower())
+            found_anchors = [word for word in skeleton_tokens if word in structural_words]
+            # Remove duplicates while preserving order
+            unique_anchors = []
+            seen = set()
+            for anchor in found_anchors:
+                if anchor not in seen:
+                    unique_anchors.append(anchor)
+                    seen.add(anchor)
+
+            anchors_text = ', '.join(unique_anchors) if unique_anchors else "structural connectors from the skeleton"
+
+            # Strategy: Adaptive Structural Mimicry with Dynamic Style
+            system_prompt = f"""You are a Literary Architect.
+**Target Voice:** {author_name}
+**Style Traits:** {style_description}
+**Task:** Rewrite the content to match the Rhythm of the Blueprint and the Voice of the Author."""
+
+            # Prepare input propositions list
+            input_node_list = list(input_node_map.values())
+
+            user_prompt = f"""**STYLE BLUEPRINT (Rhythm Target):**
+"{processed_skeleton}"
+
+**INTENT:** {intent}
+(This blueprint has rhetorical intent: {intent}. Match this intent in your output.)
+
+**INPUT PROPOSITIONS (Content):**
+{json.dumps(input_node_list, indent=2)}
+
+**INSTRUCTIONS:**
+1. **Mimic the Structure:** Write a single sentence (or linked sentences) that follows the grammatical depth and clause structure of the Blueprint.
+2. **Adapt Connectors:**
+   - If the Blueprint's connectors (e.g., 'At such a time') fit the content, USE THEM.
+   - If they contradict the content (e.g., Blueprint is Temporal, Content is Definition), **REPLACE THEM** with stylistically similar connectors that fit.
+   - *Example:* Blueprint 'After the war...', Input 'The phone is...', Output 'In this context...' (Keeps the introductory prepositional phrase structure).
+3. **Merge Repetition:** Combine repetitive subjects naturally (e.g. 'The car is red and the car is fast' -> 'The car is red and fast').
+4. **Tone:** Maintain the formality and density of the Blueprint.
+5. **Author Voice:** Follow the Style Traits provided above. Match the voice and style characteristics of {author_name} as described.
+6. **Intent Alignment:** Ensure your output matches the rhetorical intent ({intent}) of the blueprint.
+
+Generate the text:"""
+
+        else:
+            # --- FALLBACK: GRAPH WALKING ---
+            if verbose:
+                print("  Warning: Skeleton not available, using graph-walking approach")
+            system_prompt = f"""You are a Graph Walker.
+**Target Voice:** {author_name}
+**Style Traits:** {style_description}
+**Task:** Generate text by traversing the provided logical graph, matching the Voice of the Author."""
+            user_prompt = f"""Blueprint Graph (Mermaid):
+{style_mermaid}
+
+**INTENT:** {intent}
+(This blueprint has rhetorical intent: {intent}. Match this intent in your output.)
+
+Input Content (Style Node -> Actual Text):
+{json.dumps(resolved_content, indent=2)}
+
+Instructions:
+1. Write a natural, grammatically correct sentence following the graph structure.
+2. Use the Content: Fill the style graph nodes using the resolved content.
+3. IGNORE any nodes marked as 'UNUSED'.
+4. **Style Enforcement:** Adhere to the sentence length and rhythm of {author_name}.
+5. **Author Voice:** Follow the Style Traits provided above. Match the voice and style characteristics of {author_name} as described.
+6. **Intent Alignment:** Ensure your output matches the rhetorical intent ({intent}) of the blueprint.
+
+Generate text matching the author's voice:"""
+
+        # 3. Call LLM
+        try:
+            result = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                require_json=False,
+                temperature=0.7,
+                max_tokens=500
+            )
+
+            # 4. Post-Process Cleanup using repair method
+            text = result.strip() if result else ""
+            text = self._repair_generated_text(text, verbose=verbose)
+
+            return text
+
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Graph generation failed: {e}")
+            return ""
+
+    def translate_paragraph_propositions(
+        self,
+        paragraph: str,
+        author_name: str,
+        document_context: Optional[Dict] = None,
+        verbose: bool = False
+    ) -> tuple[str, int, float]:
+        """Generate text from propositions using the graph-based pipeline.
+
+        Args:
+            paragraph: Input paragraph text.
+            author_name: Target author name.
+            document_context: Optional dict with 'current_index' and 'total_paragraphs'.
+            verbose: Enable verbose logging.
+
+        Returns:
+            Generated paragraph text.
+        """
+        if not paragraph or not paragraph.strip():
+            return ("", 0, 1.0)
+
+        try:
+            # Step 1: Extract propositions
+            if verbose:
+                print(f"  Extracting propositions from paragraph...")
+            propositions = self._extract_propositions_from_text(paragraph)
+
+            if not propositions:
+                if verbose:
+                    print(f"  ⚠ No propositions extracted, using fallback")
+                # Fallback: simple generation
+                return self._fallback_simple_generation(paragraph, author_name, verbose)
+
+            if verbose:
+                print(f"  Extracted {len(propositions)} propositions")
+
+            # Step 2: Dynamic Fracturing - group propositions into logical clusters
+            graph_config = self.config.get("graph_pipeline", {})
+            fracturing_config = graph_config.get("fracturing", {})
+            fracturing_enabled = fracturing_config.get("enabled", True)
+            target_density = fracturing_config.get("target_density", 4)
+            max_density = fracturing_config.get("max_density", 6)
+
+            if fracturing_enabled and len(propositions) > target_density:
+                if verbose:
+                    print(f"  Using dynamic fracturing (target density: {target_density})")
+                # Use semantic fracturer
+                group_indices = self.fracturer.fracture(propositions, target_density, max_density)
+                chunks = [[propositions[i] for i in group] for group in group_indices]
+            else:
+                # Fallback to fixed chunking for small inputs or when disabled
+                chunk_size = target_density
+                chunks = []
+                for i in range(0, len(propositions), chunk_size):
+                    chunks.append(propositions[i:i + chunk_size])
+
+            if verbose:
+                print(f"  Processing {len(chunks)} logical clusters")
+
+            # Step 3: Process each chunk
+            generated_sentences = []
+            for chunk_idx, chunk in enumerate(chunks):
+                try:
+                    if verbose:
+                        print(f"  Processing chunk {chunk_idx + 1}/{len(chunks)}: {len(chunk)} propositions")
+
+                    # Map propositions to input graph
+                    input_graph = self.input_mapper.map_propositions(chunk)
+                    if input_graph is None:
+                        if verbose:
+                            print(f"  ⚠ Graph mapping failed for chunk {chunk_idx + 1}, using fallback")
+                        # Fallback for this chunk
+                        fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                        if fallback_text:
+                            generated_sentences.append(fallback_text)
+                        continue
+
+                    # Match to style graph
+                    blueprint = self.graph_matcher.get_best_match(input_graph, document_context)
+                    if not blueprint:
+                        if verbose:
+                            print(f"  ⚠ No style graph match for chunk {chunk_idx + 1}, using fallback")
+                        fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                        if fallback_text:
+                            generated_sentences.append(fallback_text)
+                        continue
+
+                    # Render from graph
+                    sentence = self._generate_from_graph(
+                        blueprint,
+                        input_graph['node_map'],
+                        author_name,
+                        verbose
+                    )
+
+                    if sentence:
+                        generated_sentences.append(sentence)
+                        if verbose:
+                            print(f"  ✓ Generated sentence from graph: {sentence[:80]}...")
+
+                        # Log graph match for debugging
+                        if self.telemetry and blueprint:
+                            try:
+                                self.telemetry.log_match(
+                                    paragraph_index=document_context.get('current_index', 0) if document_context else 0,
+                                    input_graph=input_graph,
+                                    style_match=blueprint,
+                                    final_text=sentence
+                                )
+                            except Exception as e:
+                                if verbose:
+                                    print(f"  ⚠ Telemetry logging failed: {e}")
+                    else:
+                        if verbose:
+                            print(f"  ⚠ Graph generation returned empty, using fallback")
+                        fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                        if fallback_text:
+                            generated_sentences.append(fallback_text)
+
+                except Exception as e:
+                    if verbose:
+                        print(f"  ⚠ Error processing chunk {chunk_idx + 1}: {e}, using fallback")
+                    # Fallback for this chunk
+                    fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                    if fallback_text:
+                        generated_sentences.append(fallback_text)
+
+            # Step 4: Assembly
+            if generated_sentences:
+                result = " ".join(generated_sentences)
+                if verbose:
+                    print(f"  ✓ Generated paragraph with {len(generated_sentences)} sentences")
+                # Return tuple: (text, arch_id, compliance_score)
+                # arch_id and compliance_score are not applicable for graph-based generation
+                return (result, 0, 1.0)
+            else:
+                if verbose:
+                    print(f"  ⚠ No sentences generated, using fallback")
+                fallback_text = self._fallback_simple_generation(paragraph, author_name, verbose)
+                return (fallback_text, 0, 1.0)
+
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠ Graph pipeline failed: {e}, using fallback")
+            fallback_text = self._fallback_simple_generation(paragraph, author_name, verbose)
+            return (fallback_text, 0, 1.0)
+
+    def _fallback_simple_generation_chunk(
+        self,
+        chunk: List[str],
+        author_name: str,
+        verbose: bool = False
+    ) -> str:
+        """Fallback: simple generation for a chunk of propositions.
+
+        Args:
+            chunk: List of proposition strings.
+            author_name: Target author name.
+            verbose: Enable verbose logging.
+
+        Returns:
+            Generated sentence string.
+        """
+        if not chunk:
+            return ""
+
+        facts_text = "\n".join([f"- {prop}" for prop in chunk])
+
+        system_prompt = f"You are a writer in the style of {author_name}."
+
+        user_prompt = f"""Write a sentence combining these facts:
+{facts_text}
+
+Write in the style of {author_name}."""
+
+        try:
+            result = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                require_json=False,
+                temperature=0.7,
+                max_tokens=200
+            )
+
+            text = result.strip() if result else ""
+            if text and not text.endswith(('.', '!', '?')):
+                text += '.'
+
+            return text
+
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Fallback generation failed: {e}")
+            return ""
+
+    def _fallback_simple_generation(
+        self,
+        paragraph: str,
+        author_name: str,
+        verbose: bool = False
+    ) -> tuple[str, int, float]:
+        """Fallback: simple generation for entire paragraph.
+
+        Args:
+            paragraph: Input paragraph text.
+            author_name: Target author name.
+            verbose: Enable verbose logging.
+
+        Returns:
+            Tuple of (generated_text, arch_id, compliance_score).
+        """
+        system_prompt = f"You are a writer in the style of {author_name}."
+
+        user_prompt = f"""Write a sentence combining these facts from the following text:
+{paragraph}
+
+Write in the style of {author_name}."""
+
+        try:
+            result = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                require_json=False,
+                temperature=0.7,
+                max_tokens=300
+            )
+
+            text = result.strip() if result else ""
+            if text and not text.endswith(('.', '!', '?')):
+                text += '.'
+
+            return (text, 0, 1.0)
+
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Fallback generation failed: {e}")
+            return ("", 0, 1.0)
+
     def translate_paragraph_statistical(
         self,
         paragraph: str,
@@ -4260,7 +4813,8 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
         perspective: Optional[str] = None,
         verbose: bool = False,
         vocabulary_budget: Optional['VocabularyBudget'] = None,
-        global_context: Optional[Dict] = None
+        global_context: Optional[Dict] = None,
+        document_context: Optional[Dict] = None
     ) -> tuple[str, int, float]:
         """Translate paragraph using statistical archetype generation with iterative refinement.
 
@@ -4363,6 +4917,9 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
         # Format style palette as newline-joined string
         style_palette_text = "\n".join([f'"{fragment}"' for fragment in style_palette_fragments]) if style_palette_fragments else ""
+
+        # Step 1.6: Graph-based matching removed - now handled by translate_paragraph_propositions
+        # Old graph matching code removed (was calling non-existent methods)
 
         # Step 2: Select next archetype
         if verbose:
@@ -6030,6 +6587,95 @@ Output only the corrected sentence.
             return "Low"
         else:
             return "Moderate"
+
+    def _repair_generated_text(self, text: str, verbose: bool = False) -> str:
+        """Repair generated text by removing artifacts and fixing dangling connectors.
+
+        Args:
+            text: Generated text to repair
+            verbose: Enable verbose logging
+
+        Returns:
+            Repaired text string
+        """
+        if not text or not text.strip():
+            return text
+
+        # Step 1: Regex Cleaning - Remove surviving artifacts
+        # Remove any lingering placeholders [TAG]
+        text = re.sub(r'\[([A-Z_][A-Z0-9_]*)\]', '', text)
+        # Remove literal "UNUSED"
+        text = re.sub(r'\bUNUSED\b', '', text, flags=re.IGNORECASE)
+
+        # Remove dangling connectors that lead to nothing
+        dangling_connectors = [
+            r'\bnamely\s*,?\s*,',  # "namely, ," or "namely ,"
+            r'\bsuch as\s*,?\s*,',  # "such as, ,"
+            r'\bi\.e\.\s*,?\s*,',  # "i.e., ,"
+            r'\be\.g\.\s*,?\s*,',  # "e.g., ,"
+            r'\bwhich is\s*,?\s*\.',  # "which is ."
+            r'\bthat is\s*,?\s*\.',  # "that is ."
+            r'\bof\s+UNUSED\b',  # "of UNUSED"
+            r'\bin\s+UNUSED\b',  # "in UNUSED"
+        ]
+        for pattern in dangling_connectors:
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+
+        # Fix double punctuation
+        text = re.sub(r',\s*,', ',', text)  # Double commas
+        text = re.sub(r'\.\s*\.', '.', text)  # Double periods
+        text = re.sub(r'\s+', ' ', text)  # Multiple spaces
+        text = re.sub(r',\s*\.', '.', text)  # Comma before period
+        text = text.strip()
+
+        # Step 2: Heuristic Check - Detect dangling connectors at sentence end
+        # Check if text ends with a connector that suggests incomplete sentence
+        dangling_end_patterns = [
+            r'\bnamely\.\s*$',
+            r'\bbecause\.\s*$',
+            r'\bsuch as\.\s*$',
+            r'\bi\.e\.\s*$',
+            r'\be\.g\.\s*$',
+            r'\bwhich is\.\s*$',
+            r'\bthat is\.\s*$',
+        ]
+
+        needs_repair = False
+        for pattern in dangling_end_patterns:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                needs_repair = True
+                break
+
+        # Step 3: LLM Repair if needed
+        if needs_repair:
+            try:
+                if verbose:
+                    print(f"  Repairing dangling connector in generated text")
+
+                repair_prompt = f"""Fix the grammar of this sentence. Remove dangling connectors. Do not change the style: '{text}'"""
+
+                repaired = self.llm_provider.call(
+                    system_prompt="You are a Grammar Repairer. Fix broken sentences by removing dangling connectors.",
+                    user_prompt=repair_prompt,
+                    model_type="editor",
+                    require_json=False,
+                    temperature=0.2,
+                    max_tokens=200
+                )
+
+                if repaired and repaired.strip():
+                    text = repaired.strip()
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: LLM repair failed: {e}, using regex-only cleanup")
+                # Fallback: just remove the dangling connector
+                for pattern in dangling_end_patterns:
+                    text = re.sub(pattern, '.', text, flags=re.IGNORECASE)
+
+        # Final cleanup using existing clean_generated_text
+        text = clean_generated_text(text)
+
+        return text
 
     def _translate_paragraph_holistic(
         self,

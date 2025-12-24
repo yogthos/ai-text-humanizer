@@ -215,5 +215,34 @@
     "auto_regenerate_on_violation": true,
     "force_programmatic_fix": true,
     "max_retries_before_force": 1
+  },
+  "style_graph_indexer": {
+    "opener_percentage": 0.15,
+    "closer_percentage": 0.15,
+    "transition_detection": {
+      "use_heuristics": true,
+      "use_llm_refinement": true
+    }
+  },
+  "graph_matcher": {
+    "top_k": 10,
+    "structural_fit_weight": 0.7,
+    "semantic_similarity_weight": 0.3,
+    "fallback_on_no_role_match": true
+  },
+  "graph_pipeline": {
+    "enabled": true,
+    "indexer": {
+      "opener_ratio": 0.15,
+      "closer_ratio": 0.15
+    },
+    "matcher": {
+      "top_k_candidates": 5,
+      "strict_node_count": false
+    },
+    "telemetry": {
+      "enabled": true,
+      "log_path": "logs/graph_debug.md"
+    }
   }
 }

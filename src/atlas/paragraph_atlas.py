@@ -38,11 +38,11 @@ class ParagraphAtlas:
                 f"Missing file: {archetypes_path}\n\n"
                 f"To fix this, build the paragraph atlas for '{self.author}':\n\n"
                 f"  Option 1 (Recommended - sets up everything):\n"
-                f"    python3 scripts/init_author.py --author \"{self.author}\" --style-file styles/sample_{self.author.lower()}.txt\n\n"
+                f"    python3 scripts/init_author.py --author \"{self.author}\" --style-file data/corpus/{self.author.lower()}.txt\n\n"
                 f"  Option 2 (Just build the atlas):\n"
-                f"    python3 scripts/build_paragraph_atlas.py styles/sample_{self.author.lower()}.txt --author \"{self.author}\"\n\n"
+                f"    python3 scripts/build_paragraph_atlas.py data/corpus/{self.author.lower()}.txt --author \"{self.author}\"\n\n"
                 f"  If you get 'No valid paragraphs found', try:\n"
-                f"    python3 scripts/build_paragraph_atlas.py styles/sample_{self.author.lower()}.txt --author \"{self.author}\" --relaxed\n"
+                f"    python3 scripts/build_paragraph_atlas.py data/corpus/{self.author.lower()}.txt --author \"{self.author}\" --relaxed\n"
                 f"{'='*70}\n"
             )
             raise FileNotFoundError(error_msg)
@@ -66,9 +66,9 @@ class ParagraphAtlas:
                 f"Missing file: {transition_path}\n\n"
                 f"This file should be created when building the paragraph atlas.\n"
                 f"To fix this, rebuild the paragraph atlas:\n\n"
-                f"    python3 scripts/build_paragraph_atlas.py styles/sample_{self.author.lower()}.txt --author \"{self.author}\"\n\n"
+                f"    python3 scripts/build_paragraph_atlas.py data/corpus/{self.author.lower()}.txt --author \"{self.author}\"\n\n"
                 f"Or use the turnkey script:\n"
-                f"    python3 scripts/init_author.py --author \"{self.author}\" --style-file styles/sample_{self.author.lower()}.txt\n"
+                f"    python3 scripts/init_author.py --author \"{self.author}\" --style-file data/corpus/{self.author.lower()}.txt\n"
                 f"{'='*70}\n"
             )
             raise FileNotFoundError(error_msg)

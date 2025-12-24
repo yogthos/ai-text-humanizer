@@ -400,36 +400,65 @@ def process_text(
             if verbose:
                 print(f"  Context reset (new paragraph)")
 
-        # Check if we should transcribe single-sentence paragraphs as-is (likely headings)
-        # Load config once for both heading detection and paragraph fusion settings
-        paragraph_fusion_config = {}
+        # Check if we should skip title case headers (headings)
+        # Load config to check both generation.skip_title_case_headers and paragraph_fusion.transcribe_headings_as_is
+        skip_title_case_headers = False
+        transcribe_headings_as_is = False
         try:
             with open(config_path, 'r') as f:
                 config = json.load(f)
+            # Check generation.skip_title_case_headers (newer setting)
+            generation_config = config.get("generation", {})
+            skip_title_case_headers = generation_config.get("skip_title_case_headers", False)
+            # Also check paragraph_fusion.transcribe_headings_as_is (legacy setting)
             paragraph_fusion_config = config.get("paragraph_fusion", {})
+            transcribe_headings_as_is = paragraph_fusion_config.get("transcribe_headings_as_is", False)
         except Exception:
             pass
 
-        transcribe_headings_as_is = paragraph_fusion_config.get("transcribe_headings_as_is", False)
+        # If either setting is enabled and single sentence, check if it looks like a heading
+        should_skip_headers = skip_title_case_headers or transcribe_headings_as_is
 
-        # If enabled and single sentence, check if it looks like a heading
-        if transcribe_headings_as_is and len(sentences) == 1:
+        if should_skip_headers and len(sentences) == 1:
             single_sentence = sentences[0].strip()
             # Heuristics for heading detection:
             # 1. Short length (typically headings are < 100 chars)
             # 2. All caps or no lowercase letters (common in headings)
-            # 3. Ends with no sentence-ending punctuation or just colon
+            # 3. Title case (most words capitalized, like "The Toolset of Reality: A Practical Introduction")
+            # 4. Ends with no sentence-ending punctuation or just colon
             is_short = len(single_sentence) < 100
             is_all_caps = single_sentence.isupper() and len(single_sentence) > 3
             has_no_lowercase = not any(c.islower() for c in single_sentence)
+
+            # Check for title case: most words (excluding first word and common short words) are capitalized
+            words = single_sentence.split()
+            if len(words) > 1:
+                # Count capitalized words (excluding first word and common short words like "a", "of", "the", "to", "in")
+                short_words = {'a', 'an', 'the', 'of', 'to', 'in', 'on', 'at', 'for', 'and', 'or', 'but', 'is', 'are', 'was', 'were'}
+                capitalized_count = 0
+                total_count = 0
+                for i, word in enumerate(words):
+                    # Strip punctuation from word for comparison (e.g., "Reality:" -> "Reality")
+                    clean_word = word.rstrip(':,;.!?')
+                    # Skip first word (always capitalized) and short common words
+                    if i > 0 and clean_word.lower() not in short_words:
+                        total_count += 1
+                        if clean_word and clean_word[0].isupper():
+                            capitalized_count += 1
+
+                # Consider title case if >50% of non-short words are capitalized
+                is_title_case = total_count > 0 and (capitalized_count / total_count) > 0.5
+            else:
+                is_title_case = False
+
             stripped = single_sentence.rstrip()
             ends_with_colon = stripped.endswith(':')
             ends_with_sentence_punct = stripped.endswith(('.', '!', '?'))
             # Heading if: ends with colon OR doesn't end with sentence punctuation
             ends_like_heading = ends_with_colon or not ends_with_sentence_punct
 
-            # Consider it a heading if it's short and (all caps OR no lowercase) and ends like a heading
-            looks_like_heading = is_short and (is_all_caps or has_no_lowercase) and ends_like_heading
+            # Consider it a heading if it's short and (all caps OR no lowercase OR title case) and ends like a heading
+            looks_like_heading = is_short and (is_all_caps or has_no_lowercase or is_title_case) and ends_like_heading
 
             if looks_like_heading:
                 if verbose:
@@ -442,20 +471,68 @@ def process_text(
                         is_first_paragraph = False
                 continue  # Skip restyling for this paragraph
 
-        # Use statistical paragraph generation
+        # Try graph-based generation first, fall back to statistical if needed
         if verbose:
-            print(f"  Using statistical paragraph generation mode")
+            print(f"  Processing paragraph {para_idx + 1}/{total_paragraphs}...")
 
-        # Translate paragraph using statistical archetype generation
-        generated_paragraph, arch_id, compliance_score = translator.translate_paragraph_statistical(
-            paragraph,
-            author_name,
-            prev_archetype_id=prev_archetype_id,
-            perspective=perspective,
-            verbose=verbose,
-            global_context=global_context,
-            vocabulary_budget=vocabulary_budget
-        )
+        # Build document context for graph matching
+        document_context = {
+            "current_index": para_idx,
+            "total_paragraphs": total_paragraphs,
+            "prev_paragraph_end_type": None  # Could be enhanced to track previous paragraph end type
+        }
+
+        # Check if graph pipeline is enabled
+        graph_config = config.get("graph_pipeline", {})
+        graph_enabled = graph_config.get("enabled", True)
+
+        # Try graph-based generation first (if enabled)
+        generated_paragraph = None
+        arch_id = 0
+        compliance_score = 1.0
+
+        if graph_enabled:
+            try:
+                if verbose:
+                    print(f"  Attempting graph-based generation...")
+                generated_paragraph, arch_id, compliance_score = translator.translate_paragraph_propositions(
+                    paragraph,
+                    author_name,
+                    document_context=document_context,
+                    verbose=verbose
+                )
+
+                # If graph-based generation returned empty, fall back to statistical
+                if generated_paragraph and generated_paragraph.strip():
+                    if verbose:
+                        print(f"  ✓ Graph-based generation succeeded")
+                else:
+                    if verbose:
+                        print(f"  ⚠ Graph-based generation returned empty, falling back to statistical method")
+                    generated_paragraph = None
+
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠ Graph-based generation failed: {e}, falling back to statistical method")
+                generated_paragraph = None
+        else:
+            if verbose:
+                print(f"  Graph pipeline disabled in config, using statistical method")
+
+        # Fall back to statistical method if graph-based failed or disabled
+        if generated_paragraph is None:
+            if verbose:
+                print(f"  Using statistical paragraph generation mode")
+            generated_paragraph, arch_id, compliance_score = translator.translate_paragraph_statistical(
+                paragraph,
+                author_name,
+                prev_archetype_id=prev_archetype_id,
+                perspective=perspective,
+                verbose=verbose,
+                global_context=global_context,
+                vocabulary_budget=vocabulary_budget,
+                document_context=document_context
+            )
 
         # Update previous archetype ID for Markov chain continuity
         prev_archetype_id = arch_id
