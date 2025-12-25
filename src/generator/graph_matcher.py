@@ -463,6 +463,8 @@ class TopologicalMatcher:
         input_role: Optional[str] = None,
         prev_paragraph_summary: Optional[str] = None,
         input_graph: Optional[Dict[str, Any]] = None,
+        original_context: Optional[str] = None,
+        style_tracker: Optional[Any] = None,
         verbose: bool = False
     ) -> Dict[str, Any]:
         """Synthesize a custom blueprint from propositions using The Architect pattern.
@@ -735,6 +737,26 @@ class TopologicalMatcher:
             print(f"     Retrieved {len(candidates)} style candidates")
             print(f"     Effective signature: {effective_signature or 'None (emergency fallback)'}")
 
+        # Filter candidates: Exclude CONCLUSION templates for INTRO role
+        if input_role == 'INTRO' and candidates:
+            original_count = len(candidates)
+            filtered_candidates = []
+            excluded_count = 0
+            for candidate in candidates:
+                candidate_role = candidate.get('role')
+                if candidate_role == 'CONCLUSION':
+                    excluded_count += 1
+                    if verbose:
+                        print(f"     ⚠ Excluded candidate with role=CONCLUSION (not suitable for INTRO input)")
+                else:
+                    filtered_candidates.append(candidate)
+            candidates = filtered_candidates
+            if verbose and excluded_count > 0:
+                if len(candidates) > 0:
+                    print(f"     ✓ Filtered {excluded_count} CONCLUSION candidates for INTRO role (kept {len(candidates)} candidates)")
+                else:
+                    print(f"     ⚠ WARNING: All {original_count} candidates were filtered out (all were CONCLUSION). Will proceed with empty candidate list and use fallback methods.")
+
         # ====================================================================
         # PRIORITY 1: THE ARCHITECT (Style Grafting) - RUNS FIRST
         # ====================================================================
@@ -786,17 +808,22 @@ class TopologicalMatcher:
 
         candidates_text = "\n\n".join(candidates_list)
 
-        system_prompt = f"""You are a Style Adaptation Engine.
-Your Goal: Rewrite the Input Propositions to match the **Rhetorical Structure** and **Complexity** of the Style Candidate.
+        system_prompt = f"""You are a ghostwriter mimicking a specific author's voice.
+Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1-3 sentences) that mimics the **Rhetorical Structure, Tone, and Syntax** of the Style Target.
 
 **CRITICAL INSTRUCTIONS:**
-1. **Analyze the Candidate:** Identify its rhetorical moves (e.g., "A is defined by B," "Contrast X with Y," "Passive voice attribution," "Complex dependent clauses," "Formal inversions").
-2. **Adapt, Don't Copy:** Use the Candidate's *structure* (clause depth, transition types, sentence complexity, formal tone), but **DO NOT** force specific metaphors (like "permeates", "blood", "war") if they don't fit the Input Facts.
+1. **Analyze the Style Target:** Identify its rhetorical moves (e.g., "A is defined by B," "Contrast X with Y," "Passive voice attribution," "Complex dependent clauses," "Formal inversions").
+2. **Adapt, Don't Copy:** Use the Style Target's *structure* (clause depth, transition types, sentence complexity, formal tone), but **DO NOT** force specific metaphors (like "permeates", "blood", "war") if they don't fit the Input Facts.
 3. **Merge Inputs:** If multiple propositions describe the same subject (e.g., "People hear", "People assume"), MERGE them into a single complex clause.
-4. **Preserve Meaning:** The Input Propositions are the Truth. The Style Candidate is just the Clothing.
-5. **Structural Emulation:** Copy the Candidate's sentence architecture (e.g., "Subject + Active Transitive Verb + Object + Scope"), not its specific vocabulary.
-6. **NO Run-On Chains:** Do NOT create structures like "X to Y by Z from A". Use the candidate's clean grammatical structure.
-7. **CRITICAL:** If the Input Logic does not match any candidate well, return a simple structure that preserves the Input Propositions without adding invented connectors.
+4. **Preserve Meaning:** The Input Propositions are the Truth. The Style Target is just the Clothing.
+5. **Structural Emulation:** Copy the Style Target's sentence architecture (e.g., "Subject + Active Transitive Verb + Object + Scope"), not its specific vocabulary.
+6. **NO Run-On Chains:** Do NOT create structures like "X to Y by Z from A". Use the style target's clean grammatical structure.
+7. **CRITICAL:** You MUST include all key information from the Input Propositions. Do not hallucinate new facts.
+8. **OUTPUT DIRECT TEXT:** Write the final English text. Do NOT output a skeleton with placeholders like [S0] or [P0]. Write complete, grammatically correct sentences.
+9. **SENTENCE LENGTH & STRUCTURE:**
+   - **Dense Input Rule:** If the input has 4+ propositions, you MUST split the output into 2-3 distinct sentences. Do NOT create a single massive run-on sentence.
+   - **Target Length:** Aim for 30-50 words per sentence.
+   - **Transitions:** Use natural transitions (e.g., "Furthermore," "In contrast," "Consequently") to link the split sentences, mimicking the Author's flow.
 
 **CRITICAL GRAMMAR RULE - MERGE REPETITIVE SUBJECTS:**
 - **Merge Repetitive Subjects:** If multiple input propositions share the same subject (e.g., "Many people hear...", "Many people assume..."), you MUST merge them into a single cohesive clause.
@@ -825,106 +852,96 @@ Your Goal: Rewrite the Input Propositions to match the **Rhetorical Structure** 
 **PREVIOUS PARAGRAPH CONTEXT:**
 {prev_paragraph_summary}
 
-**CONTEXT INSTRUCTION:** Use connectors that flow naturally from the previous paragraph. For example, if the previous paragraph ended with a question, use connectors like "This question leads us to..." or "To answer this...". If it ended with a premise, use connectors like "Following this logic..." or "Building on this foundation...".
+**CONTEXT INSTRUCTION:** Use connectors that flow naturally from the previous paragraph. For example, if the previous paragraph ended with a question, use connectors like "This question leads us to..." or "To answer this...". If it ended with a premise, use connectors like "Following this logic..." or "Furthermore..." or "In contrast..." or "Consequently...". **DO NOT use "Building on this foundation" as it is overused and repetitive.**
 """
 
-        user_prompt = f"""**INPUT PROPOSITIONS:**
+        # Build original context section if available
+        original_context_section = ""
+        if original_context:
+            original_context_section = f"""
+**ORIGINAL CONTEXT:**
+{original_context}
+
+**CONTEXT INSTRUCTION:** Use this original paragraph text to understand the full meaning and context. The Input Propositions below are extracted from this text and represent the factual constraints you must preserve.
+"""
+
+        # Build state tracking constraints section
+        state_constraints_section = ""
+        forbidden_openers = []
+        if style_tracker:
+            forbidden_openers = style_tracker.get_forbidden_openers()
+            if forbidden_openers:
+                forbidden_list = ', '.join([f'"{f}"' for f in forbidden_openers])
+                state_constraints_section = f"""
+**NEGATIVE CONSTRAINTS (CRITICAL - MANDATORY):**
+- **FORBIDDEN OPENERS:** You MUST NOT start the sentence with any of these recently used phrases: {forbidden_list}
+- **DO NOT REPEAT:** Do NOT use "Building on this foundation" - it is overused and repetitive
+- **ROLE CONSTRAINT:** If this is an INTRO paragraph (first paragraph), do NOT start with "Thus" or "Therefore" - these are conclusion connectors, not introduction connectors
+- **VARIETY REQUIRED:** Use diverse connectors and openings. Avoid repeating the same phrase structure multiple times.
+
+"""
+
+        user_prompt = f"""**ORIGINAL CONTEXT:**
+{original_context if original_context else "Not provided"}
+
+**INPUT PROPOSITIONS (Factual Constraints):**
 {indexed_propositions_text}
 
-**STYLE CANDIDATES (The Spare Parts):**
+**STYLE TARGET (Mimic This Style):**
 {candidates_text}
-{style_guidance}{prev_context_section}{graph_context}
+{style_guidance}{prev_context_section}{original_context_section}{graph_context}{state_constraints_section}
 **TASK:**
 
 **CRITICAL: PRESERVE INPUT LOGIC STRUCTURE**
-- The skeleton MUST preserve the logical structure of the input propositions
-- If input says "People assume X" and "People assume Y" (two separate assumptions),
-  the skeleton should say "[P0] and [P1]" or "[P0], while [P1]", NOT "For all [P0] and [P1] are interconnected"
+- You MUST preserve the logical structure of the input propositions
+- If input says "People assume X" and "People assume Y" (two separate assumptions), merge them into a single cohesive clause like "People assume X and Y" or "People assume X; they also assume Y"
 - Do NOT reinterpret or restructure the meaning
 - Do NOT force separate facts into unified systems unless the input explicitly states they are unified
-- Map propositions directly: P0 maps to first proposition, P1 to second, etc.
 - Preserve the original logical relationships (separate vs. unified, independent vs. dependent)
 - If input has no quotes, do NOT add quote structures like "when he said that..." or "as X stated..."
-- If input describes separate events/facts, keep them separate in the skeleton
+- If input describes separate events/facts, merge them fluidly while maintaining their distinctness
 
 1. **Analyze Input Logic Flow:**
    - The Input Logic is: {input_intent} with signature {input_signature}.
    - Identify the logical sequence (e.g., "Definition -> Contrast" or "Purpose -> Attribution").
    - **CRITICAL:** Identify whether propositions are SEPARATE/INDEPENDENT or UNIFIED/INTERCONNECTED in the input
    - **NARRATIVE DETECTION:** If the input is NARRATIVE (describes actions/perceptions like "People assume...", "Many hear..."), you MUST:
-     * **AVOID** definition templates like "It is not [S0]..." or "This is [S0]..."
-     * **PREFER** subject-first structures like "[S0]..." or "While [S0]..."
+     * **AVOID** definition templates like "It is not..." or "This is..."
+     * **PREFER** subject-first structures like "People..." or "While people..."
      * Use narrative connectors: ", yet ", "; however, ", ", whereas " (NOT "It is not")
 
-2. **Select Best Structural Match:**
-   - Find the candidate whose skeleton structure BEST matches this logical flow.
-   - **CRITICAL:** Do NOT invent a new skeleton. If none match well, select the closest one and adapt minimally.
-   - **Structural Mapping:** Map the Input Logic pattern onto the candidate's grammatical structure.
+2. **Select Best Style Target:**
+   - Find the style candidate whose structure BEST matches this logical flow.
+   - **CRITICAL:** Do NOT invent a new structure. If none match well, select the closest one and adapt minimally.
+   - **Structural Mapping:** Map the Input Logic pattern onto the style target's grammatical structure.
    - **NARRATIVE CONSTRAINT (CRITICAL):** If input is NARRATIVE (describes actions/perceptions like "People assume...", "Many hear..."):
-     * **AVOID** definition templates: "It is not [S0]...", "This is [S0]...", "Far from being [S0]..."
-     * **PREFER** subject-first structures: "[S0]...", "While [S0]...", "When [S0]..."
+     * **AVOID** definition templates: "It is not...", "This is...", "Far from being..."
+     * **PREFER** subject-first structures: "People...", "While people...", "When people..."
      * Use narrative connectors: ", yet ", "; however, ", ", whereas " (NOT "It is not")
      * **PENALIZE** candidates that start with definition patterns for narrative inputs
-   - **If NO candidate matches:** Return a simple structure like "[S0] and [S1]" that preserves facts without style.
+   - **If NO candidate matches:** Return a simple structure that preserves facts without style.
 
-2b. **Analyze Candidate Structure (Style Adaptation):**
-   - Identify the Candidate's rhetorical structure (e.g., "It is X to Y" = formal definition pattern, "X, whereas Y" = contrast pattern).
-   - Match the Input Logic to this structure, but **adapt the vocabulary** to fit the Input Facts.
-   - *Example:* If Candidate says "X permeates Y" (Structure: Subject + Active Transitive Verb + Object) and Input is "People assume Z", adapt to "The assumption of Z pervades [their understanding]" (same structure, adapted verb).
-   - **Seek structural patterns:** Formal inversions, complex dependent clauses, passive voice attributions, contrast connectors.
-   - **Avoid forcing metaphors:** Don't use "permeates", "blood", "war" if they don't fit the Input Facts semantically.
-
-3. **MERGE REDUNDANCIES AND REPETITIVE SUBJECTS:**
-   - **CRITICAL:** If multiple propositions express the same fact (e.g., "Stalin coined the term" and "The term was coined by Stalin"), you MUST merge them into a SINGLE slot.
-   - **CRITICAL:** If multiple propositions share the same subject (e.g., "Many people hear...", "Many people assume..."), merge them into a cohesive sentence structure.
-   - **Example (Subject Merging):** If P0="Many people hear X" and P1="Many people assume Y":
-     * **CORRECT:** Merge into "[S0]" where S0 contains both facts: "Many people hear X and assume Y"
-     * **WRONG:** "[S0], while [S1]" where S0="Many people hear X" and S1="Many people assume Y" (repetitive subject)
-   - Do not create repetitive structures. Redundant propositions should share one `[P#]` slot.
-   - Example: If P0 and P1 are redundant, use `[P0]` for both and skip `[P1]` in the skeleton.
-
-4. **Construct the Skeleton (Style Adaptation):**
-   - Create a skeleton that matches the Candidate's **rhetorical structure** and **sentence complexity**, not its exact words.
-   - **CRITICAL:** Adapt the Candidate's structure to fit the Input Facts. For example:
-     * If Candidate says "X permeates Y" (Structure: Subject + Active Transitive Verb + Object), and Input is "People assume Z", adapt to: "The assumption of Z pervades [their understanding]" (same structure, adapted verb).
-     * If Candidate says "It is a fundamental error to view X as Y", and Input is "People misunderstand A", adapt to: "It is a fundamental error to view [S0] as [S1]" (same structure, adapted content).
-   - **DO NOT** force metaphors that don't fit (e.g., don't say "blood permeates" if the input is about abstract concepts).
-   - **DO** match the Candidate's clause depth, formal tone, and transition patterns.
-   - If you must combine structures from multiple candidates, SPLICE them together (e.g., Candidate 2's opening structure + Candidate 14's transition pattern).
-   - **Constraint:** The final skeleton MUST use the Candidate's **sentence architecture** + `[S#]` slots (NOT `[P#]` - those are input propositions).
-   - **PRESERVE LOGIC:** Do NOT add connectors that change the meaning (e.g., if input has two separate assumptions, do NOT say "For all [S0] and [S1] are interconnected" - use "[S0] and [S1]" or "[S0], while [S1]" instead).
-
-6. **Define Slot Mapping (CRITICAL - DENSITY MISMATCH HANDLING):**
-   - For each Skeleton Slot `[S0]`, `[S1]`, etc., you MUST specify which Input Proposition Indices (0, 1, 2...) map to it.
-   - **Merging Rule:** If multiple input propositions should be merged into one slot (e.g., P0 and P1 are redundant), map them both: `"[S0]": [0, 1]`
-   - **CLUSTERING Rule (DENSITY MISMATCH):** If you have MORE propositions than slots (e.g., 5 propositions but candidate has 2 slots):
-     * You MUST **CLUSTER** the propositions into the available slots.
-     * Example: 5 propositions, 2-slot template -> Merge P0, P1, P2 into `[S0]`, and P3, P4 into `[S1]`.
-     * Do NOT break the candidate's syntax. Do NOT add extra slots. CLUSTER the facts.
-   - **Splitting Rule:** If one input proposition should be split across slots, you may reference it multiple times (rare).
-   - **Example (NARRATIVE):** If Input has P0="People assume X", P1="People assume Y" (redundant), and P2="Reality is Z", then:
-     - Skeleton: "[S0], yet [S1]" (subject-first, NOT "It is not [S0]...")
-     - slot_mapping: `{{"[S0]": [0, 1], "[S1]": [2]}}` (merged P0 and P1 into S0)
-   - **Example (DEFINITION):** If Input has P0="X is Y", P1="X is not Z", then:
-     - Skeleton: "[S0] is [S1], not [S2]"
-     - slot_mapping: `{{"[S0]": [0], "[S1]": [1], "[S2]": [2]}}`
-   - **Example (DENSITY MISMATCH):** If Input has 5 propositions (P0-P4) but candidate has 2 slots:
-     - Skeleton: "[S0], but [S1]" (preserve candidate's 2-slot structure)
-     - slot_mapping: `{{"[S0]": [0, 1, 2], "[S1]": [3, 4]}}` (CLUSTER propositions into slots)
-
-5. **Fallback:**
-   - If you absolutely cannot find a match, you may adapt a candidate, but you MUST maintain the **dense, archaic, or revolutionary tone** of the group.
+3. **Rewrite the Text:**
+   - Rewrite the Input Propositions into a cohesive paragraph (typically 1-3 sentences, depending on the number of propositions) that mimics the Style Target's **rhetorical structure** and **sentence complexity**, not its exact words.
+   - **SENTENCE LENGTH CONSTRAINT (CRITICAL):**
+     * **If you have 3 or fewer propositions:** You may combine them into 1-2 sentences
+     * **If you have 4-6 propositions:** Split into 2-3 sentences (aim for ~30-50 words per sentence)
+     * **If you have 7+ propositions:** Split into 3-4 sentences (aim for ~30-50 words per sentence)
+     * **Split at natural logical breaks:** After completing a thought, before introducing a new subject, at major transitions
+     * **Each sentence must be grammatically complete and readable**
+     * **Use transitions:** Connect split sentences with natural transitions (e.g., "Furthermore," "In contrast," "Consequently," "Moreover") that match the Author's style
+   - **CRITICAL:** Adapt the Style Target's structure to fit the Input Facts. For example:
+     * If Style Target says "X permeates Y" (Structure: Subject + Active Transitive Verb + Object), and Input is "People assume Z", adapt to: "The assumption of Z pervades their understanding" (same structure, adapted verb).
+     * If Style Target says "It is a fundamental error to view X as Y", and Input is "People misunderstand A", adapt to: "It is a fundamental error to view A as B" (same structure, adapted content).
+   - **DO NOT** force metaphors that don't fit (e.g., don't use "permeates", "blood", "war" if they don't fit the Input Facts semantically).
+   - **DO** match the Style Target's clause depth, formal tone, and transition patterns.
+   - **MERGE REPETITIVE SUBJECTS:** If multiple propositions share the same subject (e.g., "Many people hear...", "Many people assume..."), merge them into a cohesive sentence structure like "Many people hear X and assume Y".
+   - **PRESERVE LOGIC:** Do NOT add connectors that change the meaning (e.g., if input has two separate assumptions, do NOT say "For all X and Y are interconnected" - use "X and Y" or "X, while Y" instead).
 
 **OUTPUT JSON:**
 {{
-  "selected_source_indices": [2, 14],
-  "revised_skeleton": "It is a naive assumption among some to view [S0] as [S1]; on the contrary, the objective reality [S2]...",
-  "slot_mapping": {{
-    "[S0]": [0, 1],
-    "[S1]": [2],
-    "[S2]": [3]
-  }},
-  "rationale": "Spliced Candidate 2 (Misconception Opening) with Candidate 14 (Dialectical Correction). Merged P0 and P1 into S0 because they express the same misconception."
+  "revised_text": "The complete rewritten text here, fully written out with no placeholders. This should be grammatically correct English that mimics the Style Target's structure and tone while preserving all facts from the Input Propositions.",
+  "rationale": "Brief explanation of which style candidate was used and how the structure was adapted."
 }}"""
 
         try:
@@ -942,66 +959,131 @@ Your Goal: Rewrite the Input Propositions to match the **Rhetorical Structure** 
 
             # Parse JSON
             result = json.loads(response)
-            revised_skeleton = result.get('revised_skeleton', '')
+            revised_text = result.get('revised_text', '')
             rationale = result.get('rationale', '')
-            # Support both old format (selected_donor_index) and new format (selected_source_indices)
-            selected_source_indices = result.get('selected_source_indices', [])
-            if not selected_source_indices:
-                # Fallback to old format for backward compatibility
-                selected_donor_index = result.get('selected_donor_index', 0)
-                if selected_donor_index is not None:
-                    selected_source_indices = [selected_donor_index]
-            original_donor_connectors = result.get('original_donor_connectors', [])
 
-            # Parse slot_mapping (new format) - maps skeleton slots [S0], [S1] to input proposition indices
-            slot_mapping = result.get('slot_mapping', {})
-
-            # Fallback: If slot_mapping is None or empty, extract from placeholders in revised_skeleton
-            if not slot_mapping and revised_skeleton:
-                import re
-                placeholders = re.findall(r'\[S(\d+)\]', revised_skeleton)
-                if placeholders:
-                    # Create default mapping: S0->P0, S1->P1, etc. (up to available propositions)
-                    slot_mapping = {}
-                    for placeholder in placeholders:
-                        slot_idx = int(placeholder)
-                        if slot_idx < len(propositions):
-                            slot_mapping[f"[S{slot_idx}]"] = [slot_idx]
+            # Support both new format (revised_text) and old format (revised_skeleton) for backward compatibility
+            if not revised_text:
+                # Fallback to old skeleton format if revised_text not provided
+                revised_skeleton = result.get('revised_skeleton', '')
+                if revised_skeleton:
                     if verbose:
-                        print(f"     ⚠ No slot_mapping provided, extracted from placeholders: {len(slot_mapping)} slots")
+                        print(f"     ⚠ Received skeleton format instead of direct text, will use skeleton-based approach")
+                    architect_failed = False  # Skeleton-based approach succeeded
+                    revised_text = None  # No direct text, will use skeleton
+                else:
+                    architect_failed = True  # Both formats missing, treat as failure
+            else:
+                revised_skeleton = None  # Direct synthesis mode - no skeleton needed
+                architect_failed = False  # Architect succeeded with direct synthesis
 
-            architect_failed = False  # Architect succeeded - will return blueprint below
-
-            if verbose:
-                print(f"     ✓ Assembler created skeleton: {revised_skeleton[:80]}...")
-                if rationale:
-                    print(f"     Rationale: {rationale[:100]}...")
-                if selected_source_indices:
-                    indices_str = ', '.join(map(str, selected_source_indices[:5]))
-                    if len(selected_source_indices) > 5:
-                        indices_str += "..."
-                    print(f"     Source candidate indices: [{indices_str}]")
-                    # Log which candidate was selected
-                    if candidates and len(selected_source_indices) > 0 and selected_source_indices[0] < len(candidates):
-                        selected_candidate = candidates[selected_source_indices[0]]
-                        candidate_text = selected_candidate.get('skeleton', '')[:60]
-                        print(f"     [DEBUG] 🏛️  Architect selected Candidate #{selected_source_indices[0]}: \"{candidate_text}...\"")
-                if original_donor_connectors:
-                    connectors_str = ', '.join(original_donor_connectors[:3])
-                    if len(original_donor_connectors) > 3:
-                        connectors_str += "..."
-                    print(f"     Harvested connectors: {connectors_str}")
+            if revised_text and revised_text.strip():
+                if verbose:
+                    print(f"     ✓ Direct Synthesis created text: {revised_text[:80]}...")
+                    if rationale:
+                        print(f"     Rationale: {rationale[:100]}...")
 
         except (json.JSONDecodeError, Exception) as e:
             if verbose:
-                print(f"     ⚠ Assembler LLM call failed: {e}, will try graph-based fallback")
+                print(f"     ⚠ Direct Synthesis LLM call failed: {e}, will try graph-based fallback")
             # Architect failed - will fall through to Priority 2 (Graph Traversal)
+            revised_text = None
             revised_skeleton = None
-            slot_mapping = {}
-            selected_source_indices = []
             architect_failed = True
 
-        # Build node_mapping from slot_mapping (only if Architect succeeded)
+        # ====================================================================
+        # PRIORITY 1 SUCCESS: DIRECT SYNTHESIS - Return blueprint immediately
+        # ====================================================================
+        if revised_text and revised_text.strip():
+            # Use effective_signature (may be different from input_signature if fallback was used)
+            # Default to DEFINITION if effective_signature is None (emergency fallback)
+            final_signature = effective_signature if effective_signature is not None else 'DEFINITION'
+
+            # Extract connector_pool for style state tracking (if candidates available)
+            connector_pool = []
+            if candidates:
+                style_vocab = self._harvest_style_vocab(candidates, verbose=verbose)
+                raw_pool = style_vocab.get(final_signature, [])
+                valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
+                connector_pool = list(set(valid_pool))  # UNIQUE list
+
+            # target_role already set at line 749, no need to recalculate
+
+            blueprint = {
+                'style_metadata': {
+                    'revised_text': revised_text.strip(),
+                    'node_count': len(propositions),
+                    'edge_types': [],
+                    'original_text': original_context or '',
+                    'paragraph_role': target_role,
+                    'intent': input_intent,
+                    'signature': final_signature
+                },
+                'node_mapping': {},  # No node mapping needed for direct synthesis
+                'intent': input_intent,
+                'signature': final_signature,
+                'distance': 0.0,
+                'source_method': 'direct_synthesis',  # Tag as direct synthesis
+                'connector_pool': connector_pool,
+            }
+
+            if verbose:
+                print(f"     ✓ Blueprint created with direct_synthesis method")
+
+            return blueprint
+
+        # ====================================================================
+        # PRIORITY 1 FAILED: Fall back to skeleton-based approach (old method)
+        # ====================================================================
+        # If direct synthesis failed, try the old skeleton-based approach
+        if architect_failed:
+            if verbose:
+                print(f"     [DEBUG] ⚠ Direct Synthesis failed, attempting skeleton-based approach...")
+
+            # Try old skeleton-based prompt as fallback
+            try:
+                # Use a simpler skeleton-based prompt
+                fallback_system_prompt = """You are a Style Adaptation Engine. Create a skeleton structure with placeholders."""
+                fallback_user_prompt = f"""**INPUT PROPOSITIONS:**
+{indexed_propositions_text}
+
+**STYLE CANDIDATES:**
+{candidates_text}
+
+Create a skeleton structure with [S0], [S1] placeholders that matches the style candidates.
+
+**OUTPUT JSON:**
+{{
+  "revised_skeleton": "Skeleton with [S0], [S1] placeholders...",
+  "slot_mapping": {{"[S0]": [0], "[S1]": [1]}}
+}}"""
+
+                fallback_response = self.llm_provider.call(
+                    system_prompt=fallback_system_prompt,
+                    user_prompt=fallback_user_prompt,
+                    model_type="editor",
+                    require_json=True,
+                    temperature=0.3,
+                    max_tokens=800
+                )
+
+                fallback_response = self._strip_markdown_code_blocks(fallback_response)
+                fallback_result = json.loads(fallback_response)
+                revised_skeleton = fallback_result.get('revised_skeleton', '')
+                slot_mapping = fallback_result.get('slot_mapping', {})
+
+                if revised_skeleton:
+                    architect_failed = False
+                    if verbose:
+                        print(f"     ✓ Fallback skeleton created: {revised_skeleton[:80]}...")
+            except Exception as e:
+                if verbose:
+                    print(f"     ⚠ Fallback skeleton creation also failed: {e}")
+                revised_skeleton = None
+                slot_mapping = {}
+                architect_failed = True
+
+        # Build node_mapping from slot_mapping (only if skeleton-based approach succeeded)
         if revised_skeleton:
             if slot_mapping:
                 # Convert slot_mapping format {"[S0]": [0, 1], "[S1]": [2]}

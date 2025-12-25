@@ -4616,6 +4616,22 @@ Text: {text}"""
         Generate text by traversing the style graph structure and filling it with mapped content.
         Uses anchored skeleton injection if available, otherwise falls back to graph walking.
         """
+        # ====================================================================
+        # PRIORITY: Direct Synthesis - Bypass slot filling entirely
+        # ====================================================================
+        if blueprint.get('source_method') == 'direct_synthesis':
+            style_metadata = blueprint.get('style_metadata', {})
+            revised_text = style_metadata.get('revised_text', '')
+            if revised_text and revised_text.strip():
+                if verbose:
+                    print(f"  ✓ Using Direct Synthesis - bypassing slot filling")
+                # Pass directly to repair/validation
+                return self._repair_generated_text(revised_text, verbose=verbose)
+            else:
+                if verbose:
+                    print(f"  ⚠ Direct Synthesis text is empty, falling back to skeleton method")
+                # Fall through to skeleton-based approach
+
         style_mermaid = blueprint.get('style_mermaid', '')
         node_mapping = blueprint.get('node_mapping', {})
         style_metadata = blueprint.get('style_metadata', {})
@@ -5346,6 +5362,8 @@ Return JSON: {{"signature": "CONTRAST"}}"""
         # For now, we'll just call synthesize_match again - the signature filter should help
         # In a more sophisticated implementation, we could add a "strict_correction" mode
 
+        # Reconstruct original context from propositions for Direct Synthesis
+        original_context_repair = ' '.join(propositions) if propositions else None
         repaired_blueprint = self.graph_matcher.synthesize_match(
             propositions,
             input_intent,
@@ -5356,6 +5374,8 @@ Return JSON: {{"signature": "CONTRAST"}}"""
             input_role=input_role,
             prev_paragraph_summary=prev_paragraph_summary,
             input_graph=None,  # Repair doesn't have input_graph, will generate structural_summary
+            original_context=original_context_repair,  # Pass original context for Direct Synthesis
+            style_tracker=self.style_tracker,  # Pass style tracker for state constraints
             verbose=verbose
         )
 
@@ -6097,6 +6117,8 @@ Insert the missing information into the current text. You may:
                     # Use paragraph_index and total_paragraphs from parameters (Phase 5)
                     global_idx = paragraph_index if paragraph_index is not None else (document_context.get('current_index') if document_context else None)
                     try:
+                        # Use original paragraph text for Direct Synthesis context
+                        # The paragraph parameter contains the full original text
                         blueprint = self.graph_matcher.synthesize_match(
                             chunk,
                             input_intent,
@@ -6107,6 +6129,8 @@ Insert the missing information into the current text. You may:
                             input_role=input_role,
                             prev_paragraph_summary=prev_paragraph_summary,
                             input_graph=input_graph,  # Pass input_graph with structural_summary
+                            original_context=paragraph,  # Pass original paragraph text for Direct Synthesis
+                            style_tracker=self.style_tracker,  # Pass style tracker for state constraints
                             verbose=verbose
                         )
                     except Exception as e:
