@@ -28,7 +28,7 @@ class StyleBlender:
             if hasattr(atlas, '_client'):
                 try:
                     atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
-                except:
+                except Exception:
                     raise ValueError("Could not access ChromaDB collection from atlas")
 
     def get_author_centroid(self, author_id: str) -> np.ndarray:
@@ -232,7 +232,7 @@ class StyleBlender:
                 )
                 if results.get('documents'):
                     return " ".join(results['documents'])
-            except:
+            except Exception:
                 pass
             return ""
 

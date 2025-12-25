@@ -25,7 +25,7 @@ class ParagraphRefiner:
             config_path: Path to configuration file
         """
         self.config_path = config_path
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         self.llm_provider = LLMProvider(config_path=config_path)
         self.statistical_critic = StatisticalCritic(config_path=config_path)
@@ -167,7 +167,8 @@ class ParagraphRefiner:
                     original_instruction = instr.get("instruction", "")
                     if repeated_phrase:
                         # Specific synonym injection directive
-                        first_word = repeated_phrase.split()[0] if repeated_phrase else ""
+                        words = repeated_phrase.strip().split()
+                        first_word = words[0] if words else ""
                         enhanced = f"Replace the repeated phrase '{repeated_phrase}' with a semantic synonym. Do not use the word '{first_word}'."
                         instr["instruction"] = (original_instruction + " " + enhanced).strip()
                     else:
@@ -638,7 +639,7 @@ Strictly follow the constraints below.
                             if sentences:
                                 total_words = sum(len(s.split()) for s in sentences)
                                 return total_words / len(sentences)
-                        except:
+                        except Exception:
                             pass
                         # Last resort: assume it's one sentence (shouldn't happen for split)
                         return len(variant.split())
@@ -670,7 +671,7 @@ Strictly follow the constraints below.
                         if sentences:
                             total_words = sum(len(s.split()) for s in sentences)
                             return total_words / len(sentences)
-                    except:
+                    except Exception:
                         pass
                     # Last resort: assume it's one sentence (shouldn't happen for split)
                     return len(variant.split())
@@ -825,7 +826,7 @@ Output only the fixed sentence(s), no explanations.
                             # Fallback
                             word_count = len(best_candidate.split())
                             print(f"      Selected best variant: {word_count} words (target: {target_len}) from {len(variants)} candidates")
-                    except:
+                    except Exception:
                         word_count = len(best_candidate.split())
                         print(f"      Selected best variant: {word_count} words (target: {target_len}) from {len(variants)} candidates")
                 else:

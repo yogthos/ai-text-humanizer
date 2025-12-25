@@ -478,7 +478,7 @@ def find_situation_match(
                 atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
             else:
                 return None
-        except:
+        except Exception:
             return None
 
     collection = atlas._collection
@@ -552,7 +552,7 @@ def retrieve_window_match(
                 atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
             else:
                 return None
-        except:
+        except Exception:
             return None
 
     collection = atlas._collection
@@ -727,7 +727,7 @@ def find_structure_match(
                 atlas._collection = atlas._client.get_collection(name=atlas.collection_name)
             else:
                 return None
-        except:
+        except Exception:
             return None
 
     collection = atlas._collection

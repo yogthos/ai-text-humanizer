@@ -73,7 +73,7 @@ class ParagraphAtlas:
             )
             raise FileNotFoundError(error_msg)
 
-        with open(transition_path, 'r') as f:
+        with open(transition_path, 'r', encoding='utf-8') as f:
             transition_data = json.load(f)
 
         self.transition_matrix = transition_data.get("matrix", {})

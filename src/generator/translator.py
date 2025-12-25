@@ -555,18 +555,22 @@ class StyleTranslator:
                 if len(chunk_nodes) > 1:
                     edge_strings = [f"{chunk_nodes[i]} --> {chunk_nodes[i+1]}" for i in range(len(chunk_nodes)-1)]
                     subgraph_mermaid = f"graph LR; {'; '.join(edge_strings)}"
-                else:
+                elif len(chunk_nodes) == 1:
                     subgraph_mermaid = f"graph LR; {chunk_nodes[0]}"
+                else:
+                    # Empty chunk_nodes - create minimal graph
+                    subgraph_mermaid = "graph LR; P0"
 
             # Build subgraph node_map
             # Populate from global_node_map, with fallback to chunk propositions for missing entries
             subgraph_node_map = {}
-            for i, node in enumerate(chunk_nodes):
+            for node_idx, node in enumerate(chunk_nodes):
                 if node in global_node_map:
                     subgraph_node_map[node] = global_node_map[node]
-                elif i < len(chunk):
-                    # Fallback: use chunk proposition directly if not in global map
-                    subgraph_node_map[node] = chunk[i]
+                elif node_idx < len(chunk):
+                    # Use node_idx directly since it corresponds to chunk position
+                    # chunk_indices[node_idx] is a global index, not a chunk index
+                    subgraph_node_map[node] = chunk[node_idx]
                     if verbose:
                         print(f"     ⚠ Node {node} not in global_node_map, using chunk proposition as fallback")
 
@@ -2146,7 +2150,8 @@ Output PURE JSON. A single list of strings:
                 except Exception:
                     # Fallback to simple check
                     question_starters = ["where", "what", "how", "why", "when", "do", "does", "is", "are"]
-                    first_word = text.strip().split()[0].lower() if text.strip().split() else ""
+                    words = text.strip().split()
+                    first_word = words[0].lower() if words else ""
                     return first_word in question_starters or text.strip().endswith("?")
 
             example_is_question = _is_sentence_question(examples[0])
@@ -4267,9 +4272,12 @@ Example: ["Observation of material conditions", "Theoretical implication", "Fina
 
         if not selected_example:
             # Last resort: use first example
-            selected_example = raw_examples[0]
-            if verbose:
-                print(f"  Warning: Using first example as last resort")
+            if raw_examples:
+                selected_example = raw_examples[0]
+                if verbose:
+                    print(f"  Warning: Using first example as last resort")
+            else:
+                raise ValueError(f"No valid examples found after processing {len(raw_examples)} raw examples")
 
         if verbose:
             example_sentences = sent_tokenize(selected_example)
@@ -5551,10 +5559,14 @@ Return JSON: {{"signature": "CONTRAST"}}"""
 
         if not best_candidate:
             # Fallback if scoring failed
-            fallback_text = candidates[0]['text']
-            fallback_eval = self._evaluate_variant(fallback_text, chunk, verbose=False)
-            fallback_score = fallback_eval.get('score', 0.0)
-            return fallback_text, fallback_score
+            if candidates:
+                fallback_text = candidates[0]['text']
+                fallback_eval = self._evaluate_variant(fallback_text, chunk, verbose=False)
+                fallback_score = fallback_eval.get('score', 0.0)
+                return fallback_text, fallback_score
+            else:
+                # No candidates available - return empty
+                return "", 0.0
 
         current_text = best_candidate['text']
         current_score = best_score
@@ -6012,6 +6024,7 @@ Insert the missing information into the current text. You may:
                 if not chunk:
                     if verbose:
                         print(f"  Skipping empty chunk {chunk_idx + 1}")
+                    chunk_scores.append(0.0)  # Track as failure
                     continue
 
                 try:
@@ -6044,13 +6057,27 @@ Insert the missing information into the current text. You may:
 
                             # Extract the global indices used in the subgraph
                             # The _extract_chunk_graph_from_global method creates nodes like P6, P7, P8
-                            # We need to track which global indices these correspond to
+                            # We need to track which global indices these correspond to, in chunk order
                             chunk_node_map = input_graph.get('node_map', {})
-                            for node_key in chunk_node_map.keys():
-                                if node_key.startswith('P') and node_key[1:].isdigit():
-                                    global_idx = int(node_key[1:])
-                                    if global_idx not in chunk_global_indices:
-                                        chunk_global_indices.append(global_idx)
+                            if not chunk_node_map:
+                                if verbose:
+                                    print(f"     ⚠ chunk_node_map is empty, cannot extract global indices")
+                            else:
+                                # Extract global indices in the order they appear in the chunk
+                                # Match chunk propositions to node_map entries to preserve order
+                                for chunk_idx, chunk_prop in enumerate(chunk):
+                                    matched = False
+                                    for node_key, node_text in chunk_node_map.items():
+                                        if node_key.startswith('P') and node_key[1:].isdigit():
+                                            # Check if this node maps to the current chunk proposition
+                                            if node_text == chunk_prop:
+                                                global_idx = int(node_key[1:])
+                                                if global_idx not in chunk_global_indices:
+                                                    chunk_global_indices.append(global_idx)
+                                                matched = True
+                                                break
+                                    if not matched and verbose:
+                                        print(f"     ⚠ Could not find node_map match for chunk proposition {chunk_idx}: {chunk_prop[:60]}...")
 
                     # Fallback: Create new graph for this chunk if extraction failed
                     if not input_graph:
@@ -6145,6 +6172,48 @@ Insert the missing information into the current text. You may:
                         input_node_map = {f'P{i}': prop for i, prop in zip(chunk_global_indices, chunk)}
                         if verbose:
                             print(f"     Using global indices for input_node_map: {chunk_global_indices}")
+                    elif chunk_global_indices and len(chunk_global_indices) > 0:
+                        # Partial mapping - use what we have, fallback for missing
+                        if verbose:
+                            print(f"     ⚠ Partial global mapping ({len(chunk_global_indices)}/{len(chunk)}), using hybrid mapping")
+                        input_node_map = {}
+
+                        # First, map matched propositions
+                        for i, prop in enumerate(chunk):
+                            if i < len(chunk_global_indices):
+                                input_node_map[f'P{chunk_global_indices[i]}'] = prop
+
+                        # Then, try to map remaining chunk propositions to remaining unmatched nodes in chunk_node_map
+                        if input_graph:
+                            chunk_node_map = input_graph.get('node_map', {})
+                            used_global_indices = set(chunk_global_indices)
+                            remaining_chunk_props = chunk[len(chunk_global_indices):]
+
+                            for chunk_idx, chunk_prop in enumerate(remaining_chunk_props, start=len(chunk_global_indices)):
+                                # Find an unmatched node in chunk_node_map that might correspond to this proposition
+                                matched_remaining = False
+                                for node_key, node_text in chunk_node_map.items():
+                                    if node_key.startswith('P') and node_key[1:].isdigit():
+                                        global_idx = int(node_key[1:])
+                                        if global_idx not in used_global_indices:
+                                            # Try to match (exact match for now)
+                                            if node_text == chunk_prop:
+                                                input_node_map[f'P{global_idx}'] = chunk_prop
+                                                used_global_indices.add(global_idx)
+                                                matched_remaining = True
+                                                if verbose:
+                                                    print(f"     ✓ Matched remaining chunk prop {chunk_idx} to node P{global_idx}")
+                                                break
+
+                                # If no match found, use local index as last resort
+                                if not matched_remaining:
+                                    input_node_map[f'P{chunk_idx}'] = chunk_prop
+                                    if verbose:
+                                        print(f"     ⚠ No graph node match for chunk prop {chunk_idx}, using local index P{chunk_idx}")
+                        else:
+                            # No input_graph, use local indices for remaining
+                            for i, prop in enumerate(chunk[len(chunk_global_indices):], start=len(chunk_global_indices)):
+                                input_node_map[f'P{i}'] = prop
                     else:
                         # Fallback to local indices if mapping fails
                         input_node_map = {f'P{i}': prop for i, prop in enumerate(chunk)}
@@ -6216,16 +6285,19 @@ Insert the missing information into the current text. You may:
                                 if verbose:
                                     print(f"  ⚠ Telemetry logging failed: {e}")
                     else:
-                        # Explicitly track failures with zero score
-                        chunk_scores.append(0.0)
+                        # Generated empty sentence, try fallback
                         if verbose:
-                            print(f"  ⚠ Generated empty sentence for chunk {chunk_idx + 1}, tracking as 0.0 score")
-                            print(f"  ⚠ Graph generation returned empty, using fallback")
+                            print(f"  ⚠ Generated empty sentence for chunk {chunk_idx + 1}, using fallback")
                         fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
                         if fallback_text:
                             generated_sentences.append(fallback_text)
                             # Track fallback score (use a conservative score for fallbacks)
                             chunk_scores.append(0.5)  # Conservative score for fallback
+                        else:
+                            # Fallback also failed, track as complete failure
+                            chunk_scores.append(0.0)
+                            if verbose:
+                                print(f"  ⚠ Fallback also failed for chunk {chunk_idx + 1}, tracking as 0.0 score")
 
                 except Exception as e:
                     if verbose:

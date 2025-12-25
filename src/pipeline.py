@@ -12,16 +12,12 @@ import json
 import re
 from pathlib import Path
 from typing import List, Optional, Callable, Dict
-from concurrent.futures import ThreadPoolExecutor
-from src.ingestion.blueprint import SemanticBlueprint, BlueprintExtractor
+from src.ingestion.blueprint import BlueprintExtractor
 from src.atlas.rhetoric import RhetoricalType, RhetoricalClassifier
 from src.generator.translator import StyleTranslator
-from src.validator.semantic_critic import SemanticCritic
 from src.atlas.builder import StyleAtlas, load_atlas
 from src.atlas.style_registry import StyleRegistry
-from src.analyzer.style_extractor import StyleExtractor
 # PropositionExtractor removed in Phase 1 - replaced by SemanticTranslator
-from src.utils.structure_tracker import StructureTracker
 from src.analyzer.global_context import GlobalContextAnalyzer
 from src.utils.nlp_manager import NLPManager
 from src.utils.vocabulary_budget import VocabularyBudget
@@ -118,106 +114,6 @@ def _split_into_sentences_safe(paragraph: str) -> List[str]:
     return sentences
 
 
-def _prepare_paragraphs_parallel(
-    paragraphs: List[str],
-    atlas: StyleAtlas,
-    author_name: str,
-    extractor: BlueprintExtractor,
-    proposition_extractor,  # Removed - no longer used
-    translator: StyleTranslator,
-    classifier: RhetoricalClassifier,
-    verbose: bool = False
-) -> List[Dict]:
-    """Prepare all paragraphs in parallel (proposition extraction, mapping, skeleton retrieval).
-
-    This function performs independent operations in parallel:
-    - Extract propositions
-    - Extract blueprints
-    - Classify rhetorical type
-    - Retrieve skeletons (uses cache from Phase 1.2)
-
-    Args:
-        paragraphs: List of paragraph strings to prepare
-        atlas: StyleAtlas instance for skeleton retrieval
-        author_name: Author name for skeleton retrieval
-        extractor: BlueprintExtractor instance
-        proposition_extractor: PropositionExtractor instance
-        translator: StyleTranslator instance (for skeleton retrieval)
-        classifier: RhetoricalClassifier instance
-        verbose: Enable verbose logging
-
-    Returns:
-        List of preparation results, one per paragraph. Each dict contains:
-        - paragraph: str - Original paragraph text
-        - propositions: List[str] - Extracted propositions
-        - blueprint: SemanticBlueprint - Extracted blueprint
-        - rhetorical_type: RhetoricalType - Classified rhetorical type
-        - templates: List[str] - Retrieved sentence templates
-        - teacher_example: str - Teacher example used for templates
-    """
-    def prepare_paragraph(para_idx: int, paragraph: str) -> Dict:
-        """Prepare a single paragraph (runs in parallel)."""
-        try:
-            # Extract propositions
-            propositions = proposition_extractor.extract_atomic_propositions(paragraph)
-
-            # Extract blueprint
-            blueprint = extractor.extract(paragraph)
-
-            # Classify rhetoric
-            rhetorical_type = classifier.classify_heuristic(paragraph)
-
-            # Retrieve skeleton (uses cache from Phase 1.2)
-            try:
-                teacher_example, templates = translator._retrieve_robust_skeleton(
-                    rhetorical_type=rhetorical_type.value if hasattr(rhetorical_type, 'value') else str(rhetorical_type),
-                    author=author_name,
-                    prop_count=len(propositions),
-                    atlas=atlas,
-                    verbose=verbose
-                )
-            except Exception as e:
-                if verbose:
-                    print(f"  Warning: Skeleton retrieval failed for para {para_idx}: {e}")
-                templates = ["[NP] [VP] [NP]."]  # Fallback
-                teacher_example = None
-
-            return {
-                'paragraph': paragraph,
-                'propositions': propositions,
-                'blueprint': blueprint,
-                'rhetorical_type': rhetorical_type,
-                'templates': templates,
-                'teacher_example': teacher_example
-            }
-        except Exception as e:
-            if verbose:
-                print(f"  Error preparing paragraph {para_idx}: {e}")
-            # Return minimal result on error
-            return {
-                'paragraph': paragraph,
-                'propositions': [],
-                'blueprint': None,
-                'rhetorical_type': RhetoricalType.OBSERVATION,
-                'templates': ["[NP] [VP] [NP]."],
-                'teacher_example': None
-            }
-
-    # Execute in parallel
-    if verbose:
-        print(f"  Preparing {len(paragraphs)} paragraphs in parallel...")
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(prepare_paragraph, idx, para)
-                  for idx, para in enumerate(paragraphs)]
-        results = [f.result() for f in futures]
-
-    if verbose:
-        print(f"  ✅ Prepared {len(results)} paragraphs")
-
-    return results
-
-
 def process_text(
     input_text: str,
     atlas: StyleAtlas,
@@ -244,6 +140,15 @@ def process_text(
     Returns:
         List of generated paragraphs (each paragraph is a space-joined string of sentences).
     """
+    # Load config once at the start to avoid multiple file reads and ensure it's always available
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠ Could not read config: {e}, using empty config")
+        config = {}  # Fallback to empty dict
+
     # Initialize spaCy model early (shared across all components)
     if verbose:
         print("Initializing NLP pipeline...")
@@ -258,9 +163,6 @@ def process_text(
 
     # Read blending configuration
     try:
-        import json
-        with open(config_path, 'r') as f:
-            config = json.load(f)
         blend_config = config.get("blend", {})
         blend_authors = blend_config.get("authors", [])
         blend_ratio = blend_config.get("ratio", 0.5)
@@ -297,8 +199,6 @@ def process_text(
     extractor = BlueprintExtractor()
     classifier = RhetoricalClassifier()
     translator = StyleTranslator(config_path=config_path)
-    critic = SemanticCritic(config_path=config_path)
-    style_extractor = StyleExtractor(config_path=config_path)
     # PropositionExtractor removed - no longer needed
 
     # Split into paragraphs first
@@ -310,8 +210,6 @@ def process_text(
     # Extract global context if enabled (Read First step)
     global_context = None
     try:
-        with open(config_path, 'r') as f:
-            config = json.load(f)
         global_context_config = config.get("global_context", {})
         if global_context_config.get("enabled", True):
             if verbose:
@@ -360,14 +258,8 @@ def process_text(
         vocabulary_budget = None
 
     generated_paragraphs = []
-    current_paragraph_sentences = []  # Track sentences for current paragraph
     is_first_paragraph = True
 
-    # Track used examples to prevent repetition
-    used_examples = set()
-
-    # Structure tracking for paragraph diversity
-    structure_tracker = StructureTracker()
     total_paragraphs = len(paragraphs)
 
     # Track previous archetype ID for Markov chain continuity
@@ -398,18 +290,15 @@ def process_text(
 
         # Reset context if crossing paragraph boundary
         if para_idx != previous_paragraph_id:
-            previous_generated_text = ""
             previous_paragraph_id = para_idx
             if verbose:
                 print(f"  Context reset (new paragraph)")
 
         # Check if we should skip title case headers (headings)
-        # Load config to check both generation.skip_title_case_headers and paragraph_fusion.transcribe_headings_as_is
+        # Check both generation.skip_title_case_headers and paragraph_fusion.transcribe_headings_as_is
         skip_title_case_headers = False
         transcribe_headings_as_is = False
         try:
-            with open(config_path, 'r') as f:
-                config = json.load(f)
             # Check generation.skip_title_case_headers (newer setting)
             generation_config = config.get("generation", {})
             skip_title_case_headers = generation_config.get("skip_title_case_headers", False)
@@ -468,10 +357,15 @@ def process_text(
                     print(f"  ℹ Detected heading, transcribing as-is: {single_sentence[:50]}{'...' if len(single_sentence) > 50 else ''}")
                 generated_paragraphs.append(single_sentence)
                 if write_callback:
-                    is_new_paragraph = True
-                    write_callback(single_sentence, is_new_paragraph, is_first_paragraph)
-                    if is_first_paragraph:
-                        is_first_paragraph = False
+                    try:
+                        is_new_paragraph = True
+                        write_callback(single_sentence, is_new_paragraph, is_first_paragraph)
+                        if is_first_paragraph:
+                            is_first_paragraph = False
+                    except Exception as e:
+                        if verbose:
+                            print(f"  ⚠ Write callback failed: {e}, continuing...")
+                        # Continue processing even if callback fails
                 continue  # Skip restyling for this paragraph
 
         # Try graph-based generation first, fall back to statistical if needed
@@ -540,6 +434,14 @@ def process_text(
                 document_context=document_context
             )
 
+            # Validate result from statistical generation
+            if not generated_paragraph or not generated_paragraph.strip():
+                if verbose:
+                    print(f"  ⚠ Statistical generation returned empty, using original paragraph as fallback")
+                generated_paragraph = paragraph  # Fallback to original
+                arch_id = 0
+                compliance_score = 0.0
+
         # Update previous archetype ID for Markov chain continuity
         prev_archetype_id = arch_id
 
@@ -551,7 +453,7 @@ def process_text(
         if vocabulary_budget:
             try:
                 vocab_config = config.get("vocabulary_budget", {})
-            except:
+            except Exception:
                 vocab_config = {}
             auto_regenerate = vocab_config.get("auto_regenerate_on_violation", True)
             enforce_clustering = vocab_config.get("enforce_clustering", True)
@@ -582,11 +484,18 @@ def process_text(
                 if verbose:
                     print(f"  🔧 Repairing vocabulary violations (preserving graph structure)...")
                 # Use vocabulary repair to fix violations while preserving graph structure
-                generated_paragraph = translator._repair_vocabulary(
+                repaired_paragraph = translator._repair_vocabulary(
                     generated_paragraph,
                     violations,
                     verbose=verbose
                 )
+                # Validate repair result
+                if repaired_paragraph and repaired_paragraph.strip():
+                    generated_paragraph = repaired_paragraph
+                else:
+                    if verbose:
+                        print(f"  ⚠ Vocabulary repair returned empty, keeping original")
+                    # Keep original paragraph if repair fails
                 # Re-check violations after repair
                 found_words = vocabulary_budget.find_restricted_words(generated_paragraph)
                 violations = []
@@ -611,7 +520,14 @@ def process_text(
                     print(f"  🔨 Applying programmatic cleanup (semantic scalpel) to remove violations...")
                 # Extract just the words from violations (which are tuples of (word, reason))
                 violation_words = [v[0] if isinstance(v, tuple) else v for v in violations]
-                generated_paragraph = translator._programmatic_cleanup(generated_paragraph, violation_words, author_name=author_name)
+                cleaned_paragraph = translator._programmatic_cleanup(generated_paragraph, violation_words, author_name=author_name)
+                # Validate cleanup result
+                if cleaned_paragraph and cleaned_paragraph.strip():
+                    generated_paragraph = cleaned_paragraph
+                else:
+                    if verbose:
+                        print(f"  ⚠ Programmatic cleanup returned empty, keeping original")
+                    # Keep original paragraph if cleanup fails
                 # Re-check after cleanup to verify violations are gone
                 found_words = vocabulary_budget.find_restricted_words(generated_paragraph)
                 violations = []
@@ -638,6 +554,12 @@ def process_text(
                 vocabulary_budget.update_total_words(word_count)
 
         # Accept the generated paragraph
+        # Defensive check: ensure paragraph is not None before appending
+        if generated_paragraph is None:
+            if verbose:
+                print(f"  ⚠ Generated paragraph is None, skipping")
+            continue  # Skip this paragraph
+
         if verbose:
             print(f"  ✓ Generated paragraph accepted")
 
@@ -648,10 +570,15 @@ def process_text(
 
         # Write paragraph if callback provided
         if write_callback:
-            is_new_paragraph = True
-            write_callback(generated_paragraph, is_new_paragraph, is_first_paragraph)
-            if is_first_paragraph:
-                is_first_paragraph = False
+            try:
+                is_new_paragraph = True
+                write_callback(generated_paragraph, is_new_paragraph, is_first_paragraph)
+                if is_first_paragraph:
+                    is_first_paragraph = False
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠ Write callback failed: {e}, continuing...")
+                # Continue processing even if callback fails
 
         # Continue to next paragraph (old sentence-by-sentence logic removed)
         continue
@@ -695,7 +622,7 @@ def run_pipeline(
             input_text = f.read()
 
     # Load config
-    with open(config_path, 'r') as f:
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
     # Resolve atlas_cache_path from config if not provided
@@ -756,6 +683,7 @@ def run_pipeline(
         if not style_dna:
             style_dna = atlas.author_style_dna.get(author_name, "")
     else:
+        # If no atlas_cache_path, fall back to atlas
         style_dna = atlas.author_style_dna.get(author_name, "")
 
     # Open output file early if specified

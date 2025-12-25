@@ -350,7 +350,7 @@ def _detect_false_positive_omission(
                     concepts_present = sum(1 for concept in key_concepts if concept in generated_lower)
                     if concepts_present >= len(key_concepts) * 0.8:
                         return True  # False positive - minor word missing but key concepts present
-                except:
+                except Exception:
                     # NLTK not available, use simple heuristic
                     # If generated text has most of the original words, minor word omission is OK
                     original_words = set(original_lower.split())
@@ -497,7 +497,8 @@ def is_text_complete(text: str) -> bool:
         return False
 
     # 2. Must not end in a cliffhanger word
-    last_word = text.split()[-1].lower().strip(".,!?;:()[]{}'\"")
+    words = text.split()
+    last_word = words[-1].lower().strip(".,!?;:()[]{}'\"") if words else ""
     if last_word in ["and", "or", "but", "the", "a", "of", "in", "to", "with"]:
         return False
 
@@ -2325,14 +2326,14 @@ def generate_with_critic(
                 print(f"    ✓ Edit improved/maintained score ({last_score_before_edit:.3f} -> {score:.3f})")
 
         # Phase 3: Determine next action - Edit or Regenerate
-        feedback = critic_result.get("feedback", "")
+        feedback = critic_result.get("feedback", "") or ""
         is_specific_edit = _is_specific_edit_instruction(feedback)
 
         # Phase 1: Add diagnostic logging
         print(f"    DEBUG: Original input: '{content_unit.original_text}'")
         print(f"    DEBUG: Generated text: '{current_text}'")
         print(f"    DEBUG: Feedback classified as: {'SURGICAL EDIT' if is_specific_edit else 'FULL REGENERATION'}")
-        print(f"    DEBUG: Feedback content: '{feedback[:80]}...'")
+        print(f"    DEBUG: Feedback content: '{feedback[:80] if feedback else ''}...'")
         print(f"    DEBUG: Current score: {score:.3f}, Edit attempts: {edit_attempts}/{max_edit_attempts}, Generation attempts: {generation_attempts}/{max_retries}")
 
         # Check if last edit improved the score (only check if we've already edited)

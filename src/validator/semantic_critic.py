@@ -1449,7 +1449,10 @@ Does the generated text align with the intent '{intent}'? Consider:
 
         if total_weight == 0:
             # No weights configured - return simple average
-            return sum(active_metrics.values()) / len(active_metrics)
+            if active_metrics:
+                return sum(active_metrics.values()) / len(active_metrics)
+            else:
+                return 0.5  # Fallback if somehow active_metrics is empty
 
         # Normalize weights and calculate weighted average
         composite = sum(
@@ -2719,7 +2722,7 @@ Does the generated text align with the intent '{intent}'? Consider:
                 if best_sentences and best_sentences[slot_idx - 1]:
                     prev_sentence_context = best_sentences[slot_idx - 1]
                     prev_sentence_for_repetition = best_sentences[slot_idx - 1]
-                elif candidate_populations[slot_idx - 1]:
+                elif candidate_populations[slot_idx - 1] and len(candidate_populations[slot_idx - 1]) > 0:
                     # FALLBACK: Use the first candidate of the previous slot as a proxy for context
                     # This prevents "Deadlock" where Slot 1 fails because Slot 0 isn't finished.
                     prev_sentence_context = candidate_populations[slot_idx - 1][0]

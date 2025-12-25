@@ -39,7 +39,7 @@ class GlobalContextAnalyzer:
         self.llm_provider = LLMProvider(config_path=config_path)
 
         # Load config
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             config = json.load(f)
         self.global_context_config = config.get("global_context", {})
         self.max_summary_tokens = self.global_context_config.get("max_summary_tokens", 500)

@@ -447,7 +447,10 @@ class TopologicalMatcher:
         except (json.JSONDecodeError, Exception) as e:
             print(f"Warning: Synthesis LLM call failed: {e}")
             # Fallback: return top candidate (lowest distance)
-            return candidates[0]
+            if candidates:
+                return candidates[0]
+            else:
+                return None
 
     def synthesize_match(
         self,
@@ -732,120 +735,38 @@ class TopologicalMatcher:
             print(f"     Retrieved {len(candidates)} style candidates")
             print(f"     Effective signature: {effective_signature or 'None (emergency fallback)'}")
 
-        # Graph-Based Skeleton Building: Use input graph structure instead of guessing
-        if input_graph and input_graph.get('mermaid'):
-            if verbose:
-                print(f"     🕸️  Building skeleton from input graph structure")
+        # ====================================================================
+        # PRIORITY 1: THE ARCHITECT (Style Grafting) - RUNS FIRST
+        # ====================================================================
+        # Initialize Architect state
+        revised_skeleton = None
+        slot_mapping = {}
+        selected_source_indices = []
+        architect_failed = False
+        node_mapping = {}
+        graph_skeleton = None  # Will be set if graph traversal succeeds
+        target_role = self._determine_role(document_context)
 
-            # Harvest style vocabulary from candidates
-            style_vocab = self._harvest_style_vocab(candidates, verbose=verbose)
+        if verbose:
+            print(f"     [DEBUG] 🏗️  Attempting Architect Grafting (Priority 1)...")
 
-            # Extract connector_pool for style state tracking
-            raw_pool = style_vocab.get(input_signature, [])
-            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
-            connector_pool = list(set(valid_pool))  # UNIQUE list
-
-            # Build skeleton by traversing the input graph
-            graph_skeleton = self._build_skeleton_from_graph(
-                input_graph,
-                style_vocab,
-                len(propositions),
-                global_signature=input_signature,  # Pass global signature for contextual override
-                input_intent=input_intent,  # Pass intent to handle narrative vs definition
-                verbose=verbose
-            )
-
-            if graph_skeleton:
-                if verbose:
-                    print(f"     ✓ Built skeleton from graph: {graph_skeleton[:80]}...")
-                return {
-                    'style_metadata': {
-                        'mermaid': input_graph.get('mermaid', f"graph LR; {' '.join([f'P{i} --> P{i+1}' for i in range(len(propositions)-1)])}" if len(propositions) > 1 else f"graph LR; P0"),
-                        'skeleton': graph_skeleton,
-                        'intent': input_intent,
-                        'signature': input_signature,
-                        'node_count': len(propositions),
-                        'edge_types': ['graph_based'],
-                        'is_graph_based': True
-                    },
-                    'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
-                    'intent': input_intent,
-                    'signature': input_signature,
-                    'source_method': 'graph_traversal',  # Tag as graph-based
-                    'connector_pool': connector_pool  # Store connector pool for style tracking
-                }
-
-        # Fallback: If graph-based building fails, use statistical synthesis
-        STRUCTURAL_DISTANCE_THRESHOLD = 0.4  # If best match distance > 0.4, synthesize from candidates
-        if candidates:
-            # Harvest style vocabulary for connector_pool extraction
-            style_vocab = self._harvest_style_vocab(candidates, verbose=verbose)
-            raw_pool = style_vocab.get(input_signature, [])
-            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
-            connector_pool = list(set(valid_pool))  # UNIQUE list
-
-            best_distance = candidates[0].get('distance', float('inf'))
-            if best_distance > STRUCTURAL_DISTANCE_THRESHOLD:
-                if verbose:
-                    print(f"     ⚠ Graph-based building unavailable, synthesizing statistical template")
-
-                # Synthesize template from candidates using statistical analysis
-                synthesized_skeleton = self._synthesize_template_from_candidates(
-                    candidates=candidates,  # Pass the full list of 20 candidates
-                    input_signature=input_signature,
-                    num_propositions=len(propositions),
-                    input_intent=input_intent,
-                    verbose=verbose
-                )
-
-                if synthesized_skeleton:
-                    if verbose:
-                        print(f"     ✓ Synthesized statistical template: {synthesized_skeleton[:80]}...")
-                    return {
-                        'style_metadata': {
-                            'mermaid': f"graph LR; {' '.join([f'P{i} --> P{i+1}' for i in range(len(propositions)-1)])}" if len(propositions) > 1 else f"graph LR; P0",
-                            'skeleton': synthesized_skeleton,
-                            'intent': input_intent,
-                            'signature': input_signature,
-                            'node_count': len(propositions),
-                            'edge_types': ['synthesized'],
-                            'is_synthesized': True
-                        },
-                        'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
-                        'intent': input_intent,
-                        'signature': input_signature,
-                        'source_method': 'statistical_synthesis',  # Tag as statistical synthesis
-                        'connector_pool': connector_pool  # Store connector pool for style tracking
-                    }
-                else:
-                    # Fallback to generic if synthesis fails
-                    if verbose:
-                        print(f"     ⚠ Synthesis failed, falling back to generic template")
-                    generic_skeleton = self._generate_generic_template(input_signature, len(propositions))
-                    if generic_skeleton:
-                        return {
-                            'style_metadata': {
-                                'mermaid': f"graph LR; {' '.join([f'P{i} --> P{i+1}' for i in range(len(propositions)-1)])}" if len(propositions) > 1 else f"graph LR; P0",
-                                'skeleton': generic_skeleton,
-                                'intent': input_intent,
-                                'signature': input_signature,
-                                'node_count': len(propositions),
-                                'edge_types': ['generic'],
-                                'is_generic': True
-                            },
-                            'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
-                            'intent': input_intent,
-                            'signature': input_signature,
-                            'source_method': 'generic_template',  # Tag as generic fallback
-                            'connector_pool': connector_pool  # Store connector pool for style tracking
-                        }
-
-        # Step B: The Grafter - Call LLM to construct custom blueprint via topological grafting
         # Format indexed propositions
         indexed_propositions = []
         for i, prop in enumerate(propositions):
             indexed_propositions.append(f"P{i}: {prop}")
         indexed_propositions_text = "\n".join(indexed_propositions)
+
+        # Add input_graph context if available
+        graph_context = ""
+        if input_graph:
+            structural_summary = input_graph.get('structural_summary', '')
+            if structural_summary:
+                graph_context = f"""
+**INPUT LOGIC STRUCTURE (for matching, NOT for building):**
+{structural_summary}
+
+*Use this to help select the candidate that best matches the logical flow. Do NOT use it to build a new sentence structure.*
+"""
 
         # Format candidates
         candidates_list = []
@@ -865,19 +786,24 @@ class TopologicalMatcher:
 
         candidates_text = "\n\n".join(candidates_list)
 
-        system_prompt = f"""You are a Structural Mapper (NOT a Fiction Writer).
-Your Goal: Analyze the Input Logic flow (e.g., Purpose -> Contrast -> Attribution) and select the Style Candidate that BEST matches this structural pattern.
+        system_prompt = f"""You are a Style Adaptation Engine.
+Your Goal: Rewrite the Input Propositions to match the **Rhetorical Structure** and **Complexity** of the Style Candidate.
 
-**Core Principle:** Map the Input Logic structure onto the Candidate's grammatical structure. Do NOT create run-on chains.
+**CRITICAL INSTRUCTIONS:**
+1. **Analyze the Candidate:** Identify its rhetorical moves (e.g., "A is defined by B," "Contrast X with Y," "Passive voice attribution," "Complex dependent clauses," "Formal inversions").
+2. **Adapt, Don't Copy:** Use the Candidate's *structure* (clause depth, transition types, sentence complexity, formal tone), but **DO NOT** force specific metaphors (like "permeates", "blood", "war") if they don't fit the Input Facts.
+3. **Merge Inputs:** If multiple propositions describe the same subject (e.g., "People hear", "People assume"), MERGE them into a single complex clause.
+4. **Preserve Meaning:** The Input Propositions are the Truth. The Style Candidate is just the Clothing.
+5. **Structural Emulation:** Copy the Candidate's sentence architecture (e.g., "Subject + Active Transitive Verb + Object + Scope"), not its specific vocabulary.
+6. **NO Run-On Chains:** Do NOT create structures like "X to Y by Z from A". Use the candidate's clean grammatical structure.
+7. **CRITICAL:** If the Input Logic does not match any candidate well, return a simple structure that preserves the Input Propositions without adding invented connectors.
 
-Constraints:
-1. **Structural Matching:** Analyze the Input Logic sequence (e.g., "Purpose -> Contrast"). Find the Candidate whose skeleton structure matches this flow.
-2. **DO NOT invent new skeletons.** Only select from the provided Candidates.
-3. **DO NOT write generic English** (e.g., "In reality," "However").
-4. **HARVEST exact connectors** from the Candidates. Use their grammatical structure.
-5. **NO Run-On Chains:** Do NOT create structures like "X to Y by Z from A". Use the candidate's clean grammatical structure.
-6. **Adapt Connector Slots:** If needed, adapt the candidate's connector slots to fit the input, but preserve its grammatical structure.
-7. **CRITICAL:** If the Input Logic does not match any candidate well, return a simple structure that preserves the Input Propositions without adding invented connectors."""
+**CRITICAL GRAMMAR RULE - MERGE REPETITIVE SUBJECTS:**
+- **Merge Repetitive Subjects:** If multiple input propositions share the same subject (e.g., "Many people hear...", "Many people assume..."), you MUST merge them into a single cohesive clause.
+- **Example:** If P0="Many people hear X" and P1="Many people assume Y", merge to: "Many people hear X and assume Y" or "Many people hear X; they assume Y".
+- **Never** create: "Many people hear X, while many people assume Y" or "They assume X, they assume Y".
+- **Use the Style Candidate's structure**, but adapt the slots to fit the merged content while maintaining grammatical flow.
+- **Emulate the author's voice** by matching their sentence complexity and rhetorical patterns, not by copying exact words."""
 
         # Build style guidance from style_profile if available
         style_guidance = ""
@@ -907,7 +833,7 @@ Constraints:
 
 **STYLE CANDIDATES (The Spare Parts):**
 {candidates_text}
-{style_guidance}{prev_context_section}
+{style_guidance}{prev_context_section}{graph_context}
 **TASK:**
 
 **CRITICAL: PRESERVE INPUT LOGIC STRUCTURE**
@@ -941,28 +867,40 @@ Constraints:
      * **PENALIZE** candidates that start with definition patterns for narrative inputs
    - **If NO candidate matches:** Return a simple structure like "[S0] and [S1]" that preserves facts without style.
 
-2. **Harvest Connectors (The Frankenstein Step):**
-   - Look through the 20 candidates for phrases that match this topology.
-   - *Example Match:* If Input is "Misconception", find a Candidate that says: *"Some comrades naively imagine..."* or *"It is a fundamental error to view..."*
-   - *Example Match:* If Input is "Correction", find a Candidate that says: *"...whereas the objective reality is..."*
-   - **Seek:** "It is a fundamental error...", "We must strictly distinguish...", "The objective reality manifests..."
-   - **Avoid:** "Basically", "In reality", "However" (unless a candidate explicitly uses them).
+2b. **Analyze Candidate Structure (Style Adaptation):**
+   - Identify the Candidate's rhetorical structure (e.g., "It is X to Y" = formal definition pattern, "X, whereas Y" = contrast pattern).
+   - Match the Input Logic to this structure, but **adapt the vocabulary** to fit the Input Facts.
+   - *Example:* If Candidate says "X permeates Y" (Structure: Subject + Active Transitive Verb + Object) and Input is "People assume Z", adapt to "The assumption of Z pervades [their understanding]" (same structure, adapted verb).
+   - **Seek structural patterns:** Formal inversions, complex dependent clauses, passive voice attributions, contrast connectors.
+   - **Avoid forcing metaphors:** Don't use "permeates", "blood", "war" if they don't fit the Input Facts semantically.
 
-3. **MERGE REDUNDANCIES:**
+3. **MERGE REDUNDANCIES AND REPETITIVE SUBJECTS:**
    - **CRITICAL:** If multiple propositions express the same fact (e.g., "Stalin coined the term" and "The term was coined by Stalin"), you MUST merge them into a SINGLE slot.
+   - **CRITICAL:** If multiple propositions share the same subject (e.g., "Many people hear...", "Many people assume..."), merge them into a cohesive sentence structure.
+   - **Example (Subject Merging):** If P0="Many people hear X" and P1="Many people assume Y":
+     * **CORRECT:** Merge into "[S0]" where S0 contains both facts: "Many people hear X and assume Y"
+     * **WRONG:** "[S0], while [S1]" where S0="Many people hear X" and S1="Many people assume Y" (repetitive subject)
    - Do not create repetitive structures. Redundant propositions should share one `[P#]` slot.
    - Example: If P0 and P1 are redundant, use `[P0]` for both and skip `[P1]` in the skeleton.
 
-4. **Construct the Skeleton:**
-   - Stitch these harvested phrases around the Skeleton Slots `[S0]`, `[S1]`, etc.
-   - **CRITICAL:** You must use the **exact vocabulary** of the candidates (e.g., use "constitutes", "manifests as", "stem from" instead of "is").
-   - If you must combine phrases from multiple candidates, SPLICE them together (e.g., Candidate 2's opening + Candidate 14's transition).
-   - **Constraint:** The final skeleton MUST consist of **Real Author Phrases** + `[S#]` slots (NOT `[P#]` - those are input propositions).
+4. **Construct the Skeleton (Style Adaptation):**
+   - Create a skeleton that matches the Candidate's **rhetorical structure** and **sentence complexity**, not its exact words.
+   - **CRITICAL:** Adapt the Candidate's structure to fit the Input Facts. For example:
+     * If Candidate says "X permeates Y" (Structure: Subject + Active Transitive Verb + Object), and Input is "People assume Z", adapt to: "The assumption of Z pervades [their understanding]" (same structure, adapted verb).
+     * If Candidate says "It is a fundamental error to view X as Y", and Input is "People misunderstand A", adapt to: "It is a fundamental error to view [S0] as [S1]" (same structure, adapted content).
+   - **DO NOT** force metaphors that don't fit (e.g., don't say "blood permeates" if the input is about abstract concepts).
+   - **DO** match the Candidate's clause depth, formal tone, and transition patterns.
+   - If you must combine structures from multiple candidates, SPLICE them together (e.g., Candidate 2's opening structure + Candidate 14's transition pattern).
+   - **Constraint:** The final skeleton MUST use the Candidate's **sentence architecture** + `[S#]` slots (NOT `[P#]` - those are input propositions).
    - **PRESERVE LOGIC:** Do NOT add connectors that change the meaning (e.g., if input has two separate assumptions, do NOT say "For all [S0] and [S1] are interconnected" - use "[S0] and [S1]" or "[S0], while [S1]" instead).
 
-6. **Define Slot Mapping (CRITICAL):**
+6. **Define Slot Mapping (CRITICAL - DENSITY MISMATCH HANDLING):**
    - For each Skeleton Slot `[S0]`, `[S1]`, etc., you MUST specify which Input Proposition Indices (0, 1, 2...) map to it.
    - **Merging Rule:** If multiple input propositions should be merged into one slot (e.g., P0 and P1 are redundant), map them both: `"[S0]": [0, 1]`
+   - **CLUSTERING Rule (DENSITY MISMATCH):** If you have MORE propositions than slots (e.g., 5 propositions but candidate has 2 slots):
+     * You MUST **CLUSTER** the propositions into the available slots.
+     * Example: 5 propositions, 2-slot template -> Merge P0, P1, P2 into `[S0]`, and P3, P4 into `[S1]`.
+     * Do NOT break the candidate's syntax. Do NOT add extra slots. CLUSTER the facts.
    - **Splitting Rule:** If one input proposition should be split across slots, you may reference it multiple times (rare).
    - **Example (NARRATIVE):** If Input has P0="People assume X", P1="People assume Y" (redundant), and P2="Reality is Z", then:
      - Skeleton: "[S0], yet [S1]" (subject-first, NOT "It is not [S0]...")
@@ -970,6 +908,9 @@ Constraints:
    - **Example (DEFINITION):** If Input has P0="X is Y", P1="X is not Z", then:
      - Skeleton: "[S0] is [S1], not [S2]"
      - slot_mapping: `{{"[S0]": [0], "[S1]": [1], "[S2]": [2]}}`
+   - **Example (DENSITY MISMATCH):** If Input has 5 propositions (P0-P4) but candidate has 2 slots:
+     - Skeleton: "[S0], but [S1]" (preserve candidate's 2-slot structure)
+     - slot_mapping: `{{"[S0]": [0, 1, 2], "[S1]": [3, 4]}}` (CLUSTER propositions into slots)
 
 5. **Fallback:**
    - If you absolutely cannot find a match, you may adapt a candidate, but you MUST maintain the **dense, archaic, or revolutionary tone** of the group.
@@ -1015,6 +956,22 @@ Constraints:
             # Parse slot_mapping (new format) - maps skeleton slots [S0], [S1] to input proposition indices
             slot_mapping = result.get('slot_mapping', {})
 
+            # Fallback: If slot_mapping is None or empty, extract from placeholders in revised_skeleton
+            if not slot_mapping and revised_skeleton:
+                import re
+                placeholders = re.findall(r'\[S(\d+)\]', revised_skeleton)
+                if placeholders:
+                    # Create default mapping: S0->P0, S1->P1, etc. (up to available propositions)
+                    slot_mapping = {}
+                    for placeholder in placeholders:
+                        slot_idx = int(placeholder)
+                        if slot_idx < len(propositions):
+                            slot_mapping[f"[S{slot_idx}]"] = [slot_idx]
+                    if verbose:
+                        print(f"     ⚠ No slot_mapping provided, extracted from placeholders: {len(slot_mapping)} slots")
+
+            architect_failed = False  # Architect succeeded - will return blueprint below
+
             if verbose:
                 print(f"     ✓ Assembler created skeleton: {revised_skeleton[:80]}...")
                 if rationale:
@@ -1024,6 +981,11 @@ Constraints:
                     if len(selected_source_indices) > 5:
                         indices_str += "..."
                     print(f"     Source candidate indices: [{indices_str}]")
+                    # Log which candidate was selected
+                    if candidates and len(selected_source_indices) > 0 and selected_source_indices[0] < len(candidates):
+                        selected_candidate = candidates[selected_source_indices[0]]
+                        candidate_text = selected_candidate.get('skeleton', '')[:60]
+                        print(f"     [DEBUG] 🏛️  Architect selected Candidate #{selected_source_indices[0]}: \"{candidate_text}...\"")
                 if original_donor_connectors:
                     connectors_str = ', '.join(original_donor_connectors[:3])
                     if len(original_donor_connectors) > 3:
@@ -1032,40 +994,46 @@ Constraints:
 
         except (json.JSONDecodeError, Exception) as e:
             if verbose:
-                print(f"     ⚠ Assembler LLM call failed: {e}, using fallback skeleton")
-            # Fallback: create simple skeleton with all propositions using [S0], [S1] format
-            revised_skeleton = " ".join([f"[S{i}]" for i in range(len(propositions))])
-            if len(propositions) > 1:
-                revised_skeleton = " ".join([f"[S{i}]" if i == 0 else f"and [S{i}]" for i in range(len(propositions))])
-            slot_mapping = {}  # No slot mapping in fallback
+                print(f"     ⚠ Assembler LLM call failed: {e}, will try graph-based fallback")
+            # Architect failed - will fall through to Priority 2 (Graph Traversal)
+            revised_skeleton = None
+            slot_mapping = {}
+            selected_source_indices = []
+            architect_failed = True
 
-        # Step C: Build node_mapping from slot_mapping
-        # If slot_mapping is provided, use it; otherwise fall back to naive 1:1 mapping
-        if slot_mapping:
-            # Convert slot_mapping format {"[S0]": [0, 1], "[S1]": [2]}
-            # to node_mapping format {"S0": "P0, P1", "S1": "P2"}
-            node_mapping = {}
-            for slot_key, prop_indices in slot_mapping.items():
-                # Remove brackets from slot key: "[S0]" -> "S0"
-                slot_name = slot_key.strip('[]')
-                # Convert indices to proposition keys: [0, 1] -> "P0, P1"
-                prop_keys = [f'P{i}' for i in prop_indices if isinstance(i, int) and 0 <= i < len(propositions)]
-                if prop_keys:
-                    node_mapping[slot_name] = ', '.join(prop_keys)
+        # Build node_mapping from slot_mapping (only if Architect succeeded)
+        if revised_skeleton:
+            if slot_mapping:
+                # Convert slot_mapping format {"[S0]": [0, 1], "[S1]": [2]}
+                # to node_mapping format {"S0": "P0, P1", "S1": "P2"}
+                node_mapping = {}
+                for slot_key, prop_indices in slot_mapping.items():
+                    # Validate prop_indices is a list
+                    if not isinstance(prop_indices, list):
+                        if verbose:
+                            print(f"     ⚠ Invalid slot_mapping entry: {slot_key} -> {prop_indices} (not a list), skipping")
+                        continue
 
-            if verbose:
-                print(f"     ✓ Built node_mapping from slot_mapping: {len(node_mapping)} slots")
-        else:
-            # Fallback: naive 1:1 mapping (backward compatibility)
-            # Check if skeleton uses [S0] format or [P0] format
-            import re
-            has_s_slots = re.search(r'\[S\d+\]', revised_skeleton)
-            if has_s_slots:
-                # New format: map S0->P0, S1->P1, etc.
-                node_mapping = {f'S{i}': f'P{i}' for i in range(len(propositions))}
+                    # Remove brackets from slot key: "[S0]" -> "S0"
+                    slot_name = slot_key.strip('[]')
+                    # Convert indices to proposition keys: [0, 1] -> "P0, P1"
+                    prop_keys = [f'P{i}' for i in prop_indices if isinstance(i, int) and 0 <= i < len(propositions)]
+                    if prop_keys:
+                        node_mapping[slot_name] = ', '.join(prop_keys)
+
+                if verbose:
+                    print(f"     ✓ Built node_mapping from slot_mapping: {len(node_mapping)} slots")
             else:
-                # Old format: map P0->P0, P1->P1, etc.
-                node_mapping = {f'P{i}': f'P{i}' for i in range(len(propositions))}
+                # Fallback: naive 1:1 mapping (backward compatibility)
+                # Check if skeleton uses [S0] format or [P0] format
+                import re
+                has_s_slots = re.search(r'\[S\d+\]', revised_skeleton)
+                if has_s_slots:
+                    # New format: map S0->P0, S1->P1, etc.
+                    node_mapping = {f'S{i}': f'P{i}' for i in range(len(propositions))}
+                else:
+                    # Old format: map P0->P0, P1->P1, etc.
+                    node_mapping = {f'P{i}': f'P{i}' for i in range(len(propositions))}
 
             if verbose:
                 print(f"     ⚠ No slot_mapping provided, using naive 1:1 mapping")
@@ -1082,28 +1050,177 @@ Constraints:
             valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
             connector_pool = list(set(valid_pool))  # UNIQUE list
 
-        blueprint = {
-            'style_metadata': {
-                'skeleton': revised_skeleton,
-                'node_count': len(propositions),
-                'edge_types': [],
-                'original_text': '',
-                'paragraph_role': target_role,
+        # Only create blueprint if Architect succeeded (revised_skeleton is not None)
+        if revised_skeleton:
+            blueprint = {
+                'style_metadata': {
+                    'skeleton': revised_skeleton,
+                    'node_count': len(propositions),
+                    'edge_types': [],
+                    'original_text': '',
+                    'paragraph_role': target_role,
+                    'intent': input_intent,
+                    'signature': final_signature  # Store effective signature
+                },
+                'node_mapping': node_mapping,
                 'intent': input_intent,
-                'signature': final_signature  # Store effective signature
-            },
-            'node_mapping': node_mapping,
-            'intent': input_intent,
-            'signature': final_signature,  # Also store at top level for easy access
-            'distance': 0.0,  # No distance for synthesized blueprints
-            'source_method': 'llm_grafting',  # Tag as LLM-based grafting
-            'connector_pool': connector_pool  # Store connector pool for style tracking
-        }
+                'signature': final_signature,  # Also store at top level for easy access
+                'distance': 0.0,  # No distance for synthesized blueprints
+                'source_method': 'llm_grafting',  # Tag as LLM-based grafting
+                'connector_pool': connector_pool,  # Store connector pool for style tracking
+                'selected_source_indices': selected_source_indices  # Store for logging
+            }
 
+            if verbose:
+                print(f"     ✓ Blueprint created with {len(node_mapping)} node mappings")
+                # Log which candidate was selected
+                if selected_source_indices and len(selected_source_indices) > 0 and selected_source_indices[0] < len(candidates):
+                    selected_candidate = candidates[selected_source_indices[0]]
+                    candidate_text = selected_candidate.get('skeleton', '')[:60]
+                    print(f"     [DEBUG] 🏛️  Architect selected Candidate #{selected_source_indices[0]}: \"{candidate_text}...\"")
+
+            return blueprint
+
+        # ====================================================================
+        # PRIORITY 2: GRAPH TRAVERSAL (Structure Walking) - RUNS IF ARCHITECT FAILED
+        # ====================================================================
+        if not revised_skeleton and input_graph and input_graph.get('mermaid'):
+            if verbose:
+                print(f"     [DEBUG] ⚠ Architect failed, attempting Graph Traversal (Priority 2)...")
+
+            # Harvest style vocabulary from candidates
+            style_vocab = self._harvest_style_vocab(candidates, verbose=verbose) if candidates else {}
+
+            # Extract connector_pool for style state tracking
+            raw_pool = style_vocab.get(input_signature, []) if style_vocab else []
+            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
+            connector_pool = list(set(valid_pool))  # UNIQUE list
+
+            # Build skeleton by traversing the input graph
+            graph_skeleton = self._build_skeleton_from_graph(
+                input_graph,
+                style_vocab,
+                len(propositions),
+                global_signature=input_signature,
+                input_intent=input_intent,
+                verbose=verbose
+            )
+
+            if graph_skeleton:
+                if verbose:
+                    print(f"     ✓ Built skeleton from graph: {graph_skeleton[:80]}...")
+                return {
+                    'style_metadata': {
+                        'mermaid': input_graph.get('mermaid', f"graph LR; {' '.join([f'P{i} --> P{i+1}' for i in range(len(propositions)-1)])}" if len(propositions) > 1 else f"graph LR; P0"),
+                        'skeleton': graph_skeleton,
+                        'intent': input_intent,
+                        'signature': input_signature,
+                        'node_count': len(propositions),
+                        'edge_types': ['graph_based'],
+                        'is_graph_based': True
+                    },
+                    'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
+                    'intent': input_intent,
+                    'signature': input_signature,
+                    'source_method': 'graph_traversal',
+                    'connector_pool': connector_pool
+                }
+
+        # ====================================================================
+        # PRIORITY 3: FALLBACKS (Safety Net) - RUNS IF BOTH ABOVE FAILED
+        # ====================================================================
+        if not revised_skeleton and not graph_skeleton:
+            if verbose:
+                print(f"     [DEBUG] ⚠ Both Architect and Graph Traversal failed, using fallback (Priority 3)...")
+
+            # Harvest style vocabulary for connector_pool extraction
+            style_vocab = self._harvest_style_vocab(candidates, verbose=verbose) if candidates else {}
+            raw_pool = style_vocab.get(input_signature, []) if style_vocab else []
+            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
+            connector_pool = list(set(valid_pool))  # UNIQUE list
+
+            # For NARRATIVE intent, use linear chain fallback
+            if input_intent == 'NARRATIVE':
+                if verbose:
+                    print(f"     Using linear chain fallback for NARRATIVE intent")
+                synthesized_skeleton = self._build_linear_chain_skeleton(len(propositions))
+                source_method = 'linear_chain_fallback'
+                edge_types = ['linear_chain']
+            else:
+                # Synthesize template from candidates using statistical analysis
+                synthesized_skeleton = self._synthesize_template_from_candidates(
+                    candidates=candidates,  # Pass the full list of 20 candidates
+                    input_signature=input_signature,
+                    num_propositions=len(propositions),
+                    input_intent=input_intent,
+                    verbose=verbose
+                )
+                source_method = 'statistical_synthesis'
+                edge_types = ['synthesized']
+
+            if synthesized_skeleton:
+                if verbose:
+                    if input_intent == 'NARRATIVE':
+                        print(f"     ✓ Built linear chain skeleton: {synthesized_skeleton[:80]}...")
+                    else:
+                        print(f"     ✓ Synthesized statistical template: {synthesized_skeleton[:80]}...")
+
+                return {
+                    'style_metadata': {
+                        'mermaid': f"graph LR; {' '.join([f'P{i} --> P{i+1}' for i in range(len(propositions)-1)])}" if len(propositions) > 1 else f"graph LR; P0",
+                        'skeleton': synthesized_skeleton,
+                        'intent': input_intent,
+                        'signature': input_signature,
+                        'node_count': len(propositions),
+                        'edge_types': edge_types,
+                        'is_synthesized': True
+                    },
+                    'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
+                    'intent': input_intent,
+                    'signature': input_signature,
+                    'source_method': source_method,
+                    'connector_pool': connector_pool  # Store connector pool for style tracking
+                }
+            else:
+                # Fallback to generic if synthesis fails
+                if verbose:
+                    print(f"     ⚠ Synthesis failed, falling back to generic template")
+                generic_skeleton = self._generate_generic_template(input_signature, len(propositions))
+                if generic_skeleton:
+                    return {
+                        'style_metadata': {
+                            'mermaid': f"graph LR; {' '.join([f'P{i} --> P{i+1}' for i in range(len(propositions)-1)])}" if len(propositions) > 1 else f"graph LR; P0",
+                            'skeleton': generic_skeleton,
+                            'intent': input_intent,
+                            'signature': input_signature,
+                            'node_count': len(propositions),
+                            'edge_types': ['generic'],
+                            'is_generic': True
+                        },
+                        'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
+                        'intent': input_intent,
+                        'signature': input_signature,
+                        'source_method': 'generic_template',  # Tag as generic fallback
+                        'connector_pool': connector_pool  # Store connector pool for style tracking
+                    }
+
+        # If all methods failed, return a minimal fallback
         if verbose:
-            print(f"     ✓ Blueprint created with {len(node_mapping)} node mappings")
-
-        return blueprint
+            print(f"     ⚠ All generation methods failed, returning minimal fallback")
+        return {
+            'style_metadata': {
+                'skeleton': " ".join([f"[P{i}]" for i in range(len(propositions))]),
+                'node_count': len(propositions),
+                'edge_types': ['fallback'],
+                'intent': input_intent,
+                'signature': input_signature or 'DEFINITION'
+            },
+            'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
+            'intent': input_intent,
+            'signature': input_signature or 'DEFINITION',
+            'source_method': 'minimal_fallback',
+            'connector_pool': []
+        }
 
     def _extract_candidates_from_results(self, results: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extract candidate dictionaries from ChromaDB query results.
@@ -1119,8 +1236,11 @@ Constraints:
         if not ids or not ids[0]:
             return candidates
 
-        distances = results.get('distances', [[]])[0] if results.get('distances') else [0.0] * len(ids[0])
-        metadatas = results.get('metadatas', [[]])[0] if results.get('metadatas') else [{}] * len(ids[0])
+        # Safely extract distances and metadatas, handling empty lists
+        distances_list = results.get('distances', [])
+        distances = distances_list[0] if distances_list and len(distances_list) > 0 and len(distances_list[0]) > 0 else [0.0] * len(ids[0])
+        metadatas_list = results.get('metadatas', [])
+        metadatas = metadatas_list[0] if metadatas_list and len(metadatas_list) > 0 and len(metadatas_list[0]) > 0 else [{}] * len(ids[0])
 
         for i, graph_id in enumerate(ids[0]):
             metadata = metadatas[i] if i < len(metadatas) else {}
@@ -1361,6 +1481,30 @@ Constraints:
 
         return True
 
+    def _build_linear_chain_skeleton(self, num_nodes: int) -> str:
+        """Builds a safe, sequential skeleton for narratives: [P0], and [P1], while [P2]...
+
+        Args:
+            num_nodes: Number of proposition nodes
+
+        Returns:
+            Linear chain skeleton string
+        """
+        if num_nodes == 0:
+            return ""
+        if num_nodes == 1:
+            return "[P0]."
+
+        # Safe narrative connectors that maintain subject-first flow
+        connectors = [", and ", ", while ", ", then ", "; meanwhile, ", ", as ", ", yet "]
+        parts = ["[P0]"]
+
+        for i in range(1, num_nodes):
+            conn = connectors[(i - 1) % len(connectors)]
+            parts.append(f"{conn}[P{i}]")
+
+        return "".join(parts) + "."
+
     def _harvest_style_vocab(self, candidates: List[Dict[str, Any]], verbose: bool = False) -> Dict[str, List[str]]:
         """Harvest style vocabulary from candidates, grouping connectors by logic type.
 
@@ -1544,6 +1688,17 @@ Constraints:
             all_nodes.add(source)
             all_nodes.add(target)
 
+        # RELAXED VALIDATION FOR NARRATIVES: Accept linear chains (edges >= nodes - 1)
+        # Narratives often have simple linear flows (A -> B -> C), not dense clusters
+        if input_intent == 'NARRATIVE':
+            if len(edges) >= len(all_nodes) - 1:
+                if verbose:
+                    print(f"     ✓ Narrative graph validation passed: {len(edges)} edges, {len(all_nodes)} nodes (linear chain accepted)")
+            else:
+                if verbose:
+                    print(f"     ⚠ Narrative graph validation: {len(edges)} edges, {len(all_nodes)} nodes (may be disconnected, but continuing)")
+        # For non-narratives, we still validate but don't reject based on density
+
         # FILTER: Only keep proposition nodes (P0, P1, P2, etc.)
         # Edge labels like CAUSALITY, PURPOSE, CONTRAST, ATTRIBUTION should NOT be nodes
         proposition_pattern = re.compile(r'^P\d+$')
@@ -1557,7 +1712,7 @@ Constraints:
         # Sort nodes by their numeric index (P0, P1, P2...)
         try:
             ordered_nodes = sorted(valid_nodes, key=lambda x: int(x[1:]) if x.startswith('P') and x[1:].isdigit() else 999)
-        except:
+        except Exception:
             # Fallback: just use the order they appear
             ordered_nodes = valid_nodes
 
@@ -1682,6 +1837,17 @@ Constraints:
                     for conn in connectors_for_logic:
                         # Check if connector is grammatically valid for this logic type
                         grammar_type = self._analyze_connector_grammar(conn)
+
+                        # NARRATIVE: Strictly exclude DEFINITION connectors (is, are, means, etc.)
+                        if input_intent == 'NARRATIVE':
+                            # For narratives, reject DEFINITION connectors entirely
+                            conn_lower = conn.lower()
+                            definition_keywords = [' is ', ' are ', ' means ', ' refers to ', ' constitutes ', ' defines ', ' represents ']
+                            if any(kw in conn_lower for kw in definition_keywords):
+                                if verbose:
+                                    print(f"     Rejecting DEFINITION connector '{conn[:30]}...' for NARRATIVE intent")
+                                continue
+
                         if edge_label == 'CONTRAST' and grammar_type == 'VERB':
                             continue  # Skip VERB connectors for CONTRAST
                         if edge_label == 'DEFINITION' and grammar_type != 'VERB':
@@ -1711,9 +1877,24 @@ Constraints:
 
                     # Ultimate fallback: Use default connector
                     if not selected_connector:
-                        selected_connector = self._select_connector(style_vocab, edge_label, verbose=False)
-                        if verbose:
-                            print(f"     Using fallback {edge_label} connector: '{selected_connector[:30]}...'")
+                        # For NARRATIVE, force SEQUENCE connectors as fallback (not DEFINITION)
+                        if input_intent == 'NARRATIVE' and edge_label == 'DEFINITION':
+                            # Override DEFINITION to SEQUENCE for narratives
+                            edge_label = 'SEQUENCE'
+                            connectors_for_logic = style_vocab.get('SEQUENCE', [])
+                            if connectors_for_logic:
+                                selected_connector = connectors_for_logic[0]
+                                if verbose:
+                                    print(f"     Forced SEQUENCE connector for NARRATIVE (rejecting DEFINITION): '{selected_connector[:30]}...'")
+                            else:
+                                # Ultimate fallback: use simple narrative connector
+                                selected_connector = ", and "
+                                if verbose:
+                                    print(f"     Using ultimate narrative fallback: ', and '")
+                        else:
+                            selected_connector = self._select_connector(style_vocab, edge_label, verbose=False)
+                            if verbose:
+                                print(f"     Using fallback {edge_label} connector: '{selected_connector[:30]}...'")
 
                 # Fix connector spacing to prevent run-on text like "[P0]but[P1]"
                 if selected_connector:
@@ -2503,9 +2684,13 @@ Output: Return ONLY the structural summary, no JSON, no explanation."""
 
         # Step A.3: Extract candidates with distances
         ids = results['ids'][0]
-        distances = results['distances'][0] if results.get('distances') else [0.0] * len(ids)
-        metadatas = results['metadatas'][0] if results.get('metadatas') else [{}] * len(ids)
-        documents = results['documents'][0] if results.get('documents') else [''] * len(ids)
+        # Safely extract distances, metadatas, and documents, handling empty lists
+        distances_list = results.get('distances', [])
+        distances = distances_list[0] if distances_list and len(distances_list) > 0 and len(distances_list[0]) > 0 else [0.0] * len(ids)
+        metadatas_list = results.get('metadatas', [])
+        metadatas = metadatas_list[0] if metadatas_list and len(metadatas_list) > 0 and len(metadatas_list[0]) > 0 else [{}] * len(ids)
+        documents_list = results.get('documents', [])
+        documents = documents_list[0] if documents_list and len(documents_list) > 0 and len(documents_list[0]) > 0 else [''] * len(ids)
 
         # Step A.4: Create candidate list and apply intent boosting
         candidates = []

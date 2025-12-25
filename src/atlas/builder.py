@@ -59,7 +59,7 @@ def clear_chromadb_collection(
             collection = client.get_collection(name=collection_name)
             client.delete_collection(name=collection_name)
             return True
-        except:
+        except Exception:
             # Collection doesn't exist
             return False
     except Exception as e:
@@ -551,7 +551,7 @@ def build_style_atlas(
                 metadata={"description": "Style Atlas for text style transfer"}
             )
         # If author_id is provided, keep existing collection to add to it
-    except:
+    except Exception:
         # Collection doesn't exist, create it
         collection = client.create_collection(
             name=collection_name,
@@ -883,7 +883,7 @@ def load_atlas(
         collection = client.get_collection(name=atlas.collection_name)
         atlas._client = client
         atlas._collection = collection
-    except:
+    except Exception:
         # Collection doesn't exist, will need to rebuild
         pass
 

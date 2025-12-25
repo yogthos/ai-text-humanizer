@@ -70,7 +70,8 @@ class RhetoricalClassifier:
         # IMPERATIVE: Commands, instructions (often start with verbs)
         imperative_starters = ("study", "learn", "consider", "remember", "note", "observe",
                               "understand", "recognize", "examine", "analyze", "think")
-        first_word = text.strip().split()[0].lower() if text.strip().split() else ""
+        words = text.strip().split()
+        first_word = words[0].lower() if words else ""
         if first_word in imperative_starters:
             return RhetoricalType.IMPERATIVE
 

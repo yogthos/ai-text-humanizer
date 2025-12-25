@@ -21,7 +21,7 @@ class LLMProvider:
             config_path: Path to configuration file.
             provider: Optional provider name to override config. If None, uses config value.
         """
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
 
         self.provider = provider or self.config.get("provider", "deepseek")
@@ -362,7 +362,7 @@ class LLMProvider:
                             raise RuntimeError(
                                 f"Ollama model '{model}' not found. Available models: {', '.join(available_models[:5])}"
                             )
-                    except:
+                    except Exception:
                         pass
                     raise RuntimeError(f"Ollama API 404: Model '{model}' not found or endpoint incorrect. Check model name and Ollama service.")
                 raise
