@@ -81,11 +81,18 @@ Task:
 **Rhetorical Logic (Flow of Argument):**
 - cause, contrast, support, sequence, elaboration
 
-**Semantic Dependencies (Unbreakable Facts - MUST be kept together):**
-- PURPOSE (X is for Y, X is used for Y) -> Connects Material/Tool to its Goal
-- ORIGIN (X comes from Y, X is from Y) -> Connects Entity to its Source
-- COMPOSITION (X includes Y, X consists of Y) -> Connects Whole to Parts
-- ATTRIBUTION (X is by Y, X is stated by Y) -> Connects Quote/Idea to Author
+**Semantic Dependencies (Narrative Flow: Subject -> Attribute):**
+- PURPOSE (X --PURPOSE--> Y) -> "Tool" is used for "Analysis"
+- ORIGIN (X --ORIGIN--> Y) -> "Concept" comes from "Source"
+- COMPOSITION (X --COMPOSITION--> Y) -> "Whole" consists of "Parts"
+- ATTRIBUTION (X --ATTRIBUTION--> Y) -> "Idea" is by "Author"
+
+**CRITICAL: DIRECTIONALITY RULE**
+- Arrows `-->` represent **NARRATIVE FLOW** (What comes first -> What comes next in the text).
+- For Semantic Dependencies, connect **Subject -> Attribute**.
+  - CORRECT: "Dialectics" (P3) --ATTRIBUTION--> "Marx" (P5)
+  - WRONG: "Marx" (P5) --ATTRIBUTION--> "Dialectics" (P3) (This forces Marx to be written before Dialectics)
+- If Proposition A introduces a topic and Proposition B explains it, use `A --elaboration--> B`.
 
 **CRITICAL:** If Proposition A depends on Proposition B to make sense (e.g., "It uses lithium" + "Lithium is from Chile"), you MUST link them with a Semantic Dependency.
 4. Write a 1-sentence description of the flow using rhetorical topology terms (causal, contrastive, conditional, enumeration, concession, definition).

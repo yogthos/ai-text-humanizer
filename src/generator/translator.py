@@ -28,6 +28,7 @@ from src.generator.llm_interface import clean_generated_text
 from src.critic.judge import LLMJudge
 from src.critic.scorer import SoftScorer
 from src.validator.semantic_critic import SemanticCritic
+from src.critic.style_critic import StyleCritic
 from src.generator.mutation_operators import (
     get_operator, OP_SEMANTIC_INJECTION, OP_GRAMMAR_REPAIR, OP_STYLE_POLISH, OP_DYNAMIC_STYLE, OP_STRUCTURAL_CLONE
 )
@@ -41,6 +42,8 @@ from src.generator.content_planner import ContentPlanner
 from src.generator.refiner import ParagraphRefiner
 from src.generator.graph_matcher import TopologicalMatcher
 from src.validator.statistical_critic import StatisticalCritic
+from src.planning.graph_planner import GraphPlanner
+from src.planning.sentence_plan import SentencePlan, SentenceNode
 from src.utils.nlp_manager import NLPManager
 from src.utils.text_processing import check_zipper_merge, parse_variants_from_response
 
@@ -5364,6 +5367,8 @@ Return JSON: {{"signature": "CONTRAST"}}"""
 
         # Reconstruct original context from propositions for Direct Synthesis
         original_context_repair = ' '.join(propositions) if propositions else None
+        # Get default_perspective from config
+        default_perspective = self.generation_config.get("default_perspective", "Third Person")
         repaired_blueprint = self.graph_matcher.synthesize_match(
             propositions,
             input_intent,
@@ -5376,6 +5381,8 @@ Return JSON: {{"signature": "CONTRAST"}}"""
             input_graph=None,  # Repair doesn't have input_graph, will generate structural_summary
             original_context=original_context_repair,  # Pass original context for Direct Synthesis
             style_tracker=self.style_tracker,  # Pass style tracker for state constraints
+            default_perspective=default_perspective,  # Pass default perspective from config
+            is_paragraph_start=False,  # Repair is always within the same paragraph
             verbose=verbose
         )
 
@@ -5592,10 +5599,60 @@ Return JSON: {{"signature": "CONTRAST"}}"""
         current_score = best_score
         current_critique = best_critique
 
+        # Defensive check: ensure current_text is not None or empty
+        if not current_text or not current_text.strip():
+            if verbose:
+                print(f"     ⚠ Warning: best_candidate text is empty, returning empty result")
+            return "", 0.0
+
         if verbose:
             print(f"     ✓ Selected {best_candidate['mode']} variant (score={best_score:.3f})")
 
-        # Phase 3: Surgical Repair Loop
+        # Phase 2.5: Style Validation (after semantic check passes)
+        # Load style profile and check style compliance
+        style_profile = self._load_style_profile(author_name)
+        style_critic = None
+        if style_profile:
+            style_critic = StyleCritic(style_profile=style_profile, tolerance=0.3)
+            is_style_valid, style_feedback, style_violations = style_critic.evaluate(current_text)
+
+            if not is_style_valid:
+                if verbose:
+                    print(f"     ⚠ Style Violation: {style_feedback}")
+
+                # Trigger style repair
+                try:
+                    style_repaired_text = self._style_repair(
+                        current_text,
+                        style_violations,
+                        author_name,
+                        previous_sentence,
+                        verbose
+                    )
+
+                    if style_repaired_text and style_repaired_text != current_text:
+                        # Re-verify both semantic and style after repair
+                        new_eval = self._evaluate_variant(style_repaired_text, chunk, verbose=False)
+                        new_score = new_eval.get('score', 0.0)
+
+                        # Check style again
+                        is_style_valid_after, _, _ = style_critic.evaluate(style_repaired_text)
+
+                        if new_score >= current_score and is_style_valid_after:
+                            current_text = style_repaired_text
+                            current_score = new_score
+                            current_critique = new_eval
+                            if verbose:
+                                print(f"     ✓ Style repair successful (score: {new_score:.3f})")
+                        elif verbose:
+                            print(f"     ⚠ Style repair did not improve compliance, keeping original")
+                    elif verbose:
+                        print(f"     ⚠ Style repair returned unchanged text")
+                except Exception as e:
+                    if verbose:
+                        print(f"     ⚠ Style repair failed: {e}")
+
+        # Phase 3: Surgical Repair Loop (for semantic issues)
         if current_score < 0.95 and max_repairs > 0:
             if verbose:
                 print(f"     🔧 Entering repair loop (current score={current_score:.3f} < 0.95)")
@@ -5867,6 +5924,199 @@ Insert the missing information into the current text. You may:
                 print(f"       ⚠ Surgical repair LLM call failed: {e}")
             return current_text
 
+    def _style_repair(
+        self,
+        current_text: str,
+        style_violations: List[str],
+        author_name: str,
+        previous_sentence: Optional[str],
+        verbose: bool = False
+    ) -> str:
+        """Perform style repair: Fix stylistic issues (sentence length, punctuation) without changing meaning.
+
+        Args:
+            current_text: Current draft text
+            style_violations: List of style violation messages
+            author_name: Target author name
+            previous_sentence: Previous sentence for context
+            verbose: Enable verbose logging
+
+        Returns:
+            Repaired text with style issues fixed
+        """
+        if not style_violations:
+            return current_text
+
+        # Load style profile
+        style_profile = self._load_style_profile(author_name)
+        style_description = ""
+        structural_dna = {}
+        if style_profile:
+            style_description = style_profile.get('description') or style_profile.get('style_description', '')
+            structural_dna = style_profile.get('structural_dna', {})
+
+        target_avg_len = structural_dna.get('avg_words_per_sentence', 25.0)
+        target_dashes = style_profile.get('dashes_per_100', 0.0) if style_profile else 0.0
+        target_semicolons = style_profile.get('semicolons_per_100', 0.0) if style_profile else 0.0
+
+        # Build violation summary
+        violation_summary = "\n".join([f"- {violation}" for violation in style_violations])
+
+        if verbose:
+            print(f"       [STYLE REPAIR DEBUG] Violations: {style_violations}")
+            print(f"       [STYLE REPAIR DEBUG] Target length: {target_avg_len:.1f} words, Dashes: {target_dashes:.1f}/100, Semicolons: {target_semicolons:.1f}/100")
+
+        system_prompt = f"""You are a Style Editor. Your task is to fix stylistic issues in the text WITHOUT changing the meaning or facts.
+
+**Target Author:** {author_name}
+**Style:** {style_description}
+
+**Target Style Metrics:**
+- Average sentence length: {target_avg_len:.1f} words
+- Em-dashes per 100 words: {target_dashes:.1f}
+- Semicolons per 100 words: {target_semicolons:.1f}
+
+**CRITICAL RULES:**
+1. Do NOT change the meaning or facts - preserve all information.
+2. Fix ONLY the stylistic issues listed below.
+3. If sentences are too long, split them into 2-3 shorter sentences (target: {target_avg_len:.1f} words each).
+4. If there are too many dashes, replace some with standard punctuation (commas, periods, or semicolons).
+5. If there are too many semicolons, replace some with periods or commas.
+6. Maintain the author's voice and tone.
+7. Preserve all key information and facts."""
+
+        user_prompt = f"""**Current Text:**
+{current_text}
+
+**Style Violations (must be fixed):**
+{violation_summary}
+
+**Previous Sentence (for context):**
+{previous_sentence if previous_sentence else "None"}
+
+**Task:**
+Fix the stylistic issues listed above. You may:
+- Split long sentences into shorter ones (aim for {target_avg_len:.1f} words per sentence)
+- Replace excessive dashes with appropriate punctuation
+- Replace excessive semicolons with periods or commas
+- Adjust sentence structure to match target length
+
+**CRITICAL:** Do NOT remove or change any facts. Only fix the style metrics.
+
+**Output:** Return ONLY the repaired text, no explanation."""
+
+        try:
+            if verbose:
+                print(f"       [STYLE REPAIR DEBUG] Calling LLM for style repair...")
+
+            response = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                require_json=False,
+                temperature=0.3,  # Slightly higher than semantic repair for style flexibility
+                max_tokens=800
+            )
+
+            if not response or not response.strip():
+                if verbose:
+                    print(f"       [STYLE REPAIR DEBUG] Empty response, returning original text")
+                return current_text
+
+            if verbose:
+                print(f"       [STYLE REPAIR DEBUG] Response length: {len(response)}")
+                print(f"       [STYLE REPAIR DEBUG] LLM output preview: {response[:100]}...")
+
+            # Clean up response
+            repaired = response.strip()
+            # Remove any markdown code blocks
+            import re
+            repaired = re.sub(r'```[^`]*```', '', repaired, flags=re.DOTALL)
+            repaired = repaired.strip()
+
+            if not repaired:
+                return current_text
+
+            return repaired
+
+        except Exception as e:
+            if verbose:
+                print(f"       [STYLE REPAIR DEBUG] Style repair failed: {e}")
+            return current_text
+
+    def _repair_sentence_style(
+        self,
+        sentence: str,
+        node: 'SentenceNode',
+        violations: List[str],
+        style_profile: Dict[str, Any],
+        author_name: str,
+        verbose: bool = False
+    ) -> str:
+        """Repair style issues for a single sentence.
+
+        Args:
+            sentence: Current sentence text
+            node: SentenceNode with target constraints
+            violations: List of style violation messages
+            style_profile: Style profile dictionary
+            author_name: Target author name
+            verbose: Enable verbose logging
+
+        Returns:
+            Repaired sentence text
+        """
+        if not violations:
+            return sentence
+
+        # Use existing _style_repair method
+        return self._style_repair(
+            current_text=sentence,
+            style_violations=violations,
+            author_name=author_name,
+            previous_sentence=None,  # Single sentence repair doesn't need previous
+            verbose=verbose
+        )
+
+    def _repair_sentence_semantic(
+        self,
+        sentence: str,
+        propositions: List[str],
+        author_name: str = "",
+        verbose: bool = False
+    ) -> str:
+        """Repair semantic issues for a single sentence.
+
+        Args:
+            sentence: Current sentence text
+            propositions: Target propositions that must be included
+            author_name: Target author name (optional, for style context)
+            verbose: Enable verbose logging
+
+        Returns:
+            Repaired sentence text
+        """
+        # Evaluate to find missing information
+        try:
+            eval_result = self._evaluate_variant(sentence, propositions, verbose=False)
+            missing_info = eval_result.get('missing_info', [])
+
+            if missing_info:
+                # Use existing _surgical_repair method
+                return self._surgical_repair(
+                    current_text=sentence,
+                    missing_info=missing_info,
+                    input_propositions=propositions,
+                    author_name=author_name or "Unknown",
+                    previous_sentence=None,
+                    verbose=verbose
+                )
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠ Semantic repair evaluation failed: {e}")
+
+        return sentence
+
     def translate_paragraph_propositions(
         self,
         paragraph: str,
@@ -6001,7 +6251,15 @@ Insert the missing information into the current text. You may:
                 print(f"  After deduplication: {len(propositions)} propositions")
 
             # Step 1.5: Create Global Graph BEFORE fracturing (to preserve semantic relationships)
-            prev_paragraph_summary = prev_paragraph_text[:200] + "..." if prev_paragraph_text and len(prev_paragraph_text) > 200 else prev_paragraph_text
+            # Check if prev_paragraph_text is a heading (short, no terminal punctuation) - if so, don't use it as context
+            prev_paragraph_summary = None
+            if prev_paragraph_text:
+                # Detect if previous paragraph was a heading
+                word_count = len(prev_paragraph_text.split())
+                is_prev_heading = word_count < 20 and not prev_paragraph_text.strip().endswith(('.', '!', '?'))
+                if not is_prev_heading:
+                    # Only use as context if it's not a heading
+                    prev_paragraph_summary = prev_paragraph_text[:200] + "..." if len(prev_paragraph_text) > 200 else prev_paragraph_text
             global_graph = None
             if len(propositions) > 0:
                 try:
@@ -6012,326 +6270,200 @@ Insert the missing information into the current text. You may:
                     if verbose:
                         print(f"  ⚠ Global graph creation failed: {e}, will use text-based fracturing")
 
-            # Step 2: Dynamic Fracturing - group propositions into logical clusters
-            graph_config = self.config.get("graph_pipeline", {})
-            fracturing_config = graph_config.get("fracturing", {})
-            fracturing_enabled = fracturing_config.get("enabled", True)
-            target_density = fracturing_config.get("target_density", 4)
-            max_density = fracturing_config.get("max_density", 6)
+            # Step 2: Graph Planning - create sentence plan from propositions
+            # Load style profile for planner
+            style_profile = self._load_style_profile(author_name)
 
-            if fracturing_enabled and len(propositions) > target_density:
+            # Get paragraph intent and signature from global graph
+            input_intent = global_graph.get('intent', 'ARGUMENT') if global_graph else 'ARGUMENT'
+            input_signature = global_graph.get('signature', 'DEFINITION') if global_graph else 'DEFINITION'
+
+            # Initialize GraphPlanner
+            try:
+                planner = GraphPlanner(style_profile)
+                plan = planner.create_plan(propositions, global_graph, input_intent, input_signature)
                 if verbose:
-                    print(f"  Using dynamic fracturing (target density: {target_density})")
-                # Use semantic fracturer with global graph
-                group_indices = self.fracturer.fracture(propositions, target_density, max_density, input_graph=global_graph)
-                chunks = [[propositions[i] for i in group] for group in group_indices]
-            else:
-                # Fallback to fixed chunking for small inputs or when disabled
-                chunk_size = target_density
-                chunks = []
-                for i in range(0, len(propositions), chunk_size):
-                    chunks.append(propositions[i:i + chunk_size])
+                    print(f"  Created sentence plan with {len(plan.nodes)} nodes")
+                    for node in plan.nodes:
+                        print(f"    {node.id}: {node.role}, {len(node.propositions)} props, target_length={node.target_length}")
+            except Exception as e:
+                if verbose:
+                    print(f"  ⚠ Planning failed: {e}, falling back to simple sequential plan")
+                # Fallback: create simple sequential plan
+                plan = SentencePlan(
+                    nodes=[
+                        SentenceNode(
+                            id=f"S{i}",
+                            propositions=[prop],
+                            role="Elaboration",
+                            transition_type="Flow" if i > 0 else "None",
+                            target_length=25,
+                            keywords=[],
+                            global_indices=[i]
+                        )
+                        for i, prop in enumerate(propositions)
+                    ],
+                    paragraph_intent=input_intent,
+                    paragraph_signature=input_signature
+                )
 
-            if verbose:
-                print(f"  Processing {len(chunks)} logical clusters")
-
-            # Step 3: Process each chunk
+            # Step 3: Process each sentence node
             generated_sentences = []
-            last_generated_sentence = None  # Initialize before loop
-            chunk_scores = []  # Track scores from repair loops
-            for chunk_idx, chunk in enumerate(chunks):
-                # Skip empty chunks
-                if not chunk:
+            previous_sentence = None
+            sentence_scores = []  # Track scores from repair loops
+            default_perspective = self.generation_config.get("default_perspective", "Third Person")
+
+            for node_idx, node in enumerate(plan.nodes):
+                # Skip empty nodes
+                if not node.propositions:
                     if verbose:
-                        print(f"  Skipping empty chunk {chunk_idx + 1}")
-                    chunk_scores.append(0.0)  # Track as failure
+                        print(f"  Skipping empty node {node.id}")
+                    sentence_scores.append(0.0)  # Track as failure
                     continue
 
                 try:
                     if verbose:
-                        print(f"  Processing chunk {chunk_idx + 1}/{len(chunks)}: {len(chunk)} propositions")
-
-                    # Use Architect pattern: synthesize blueprint directly from propositions
-                    if verbose:
-                        print(f"     Input propositions ({len(chunk)}):")
-                        for i, prop in enumerate(chunk[:3]):  # Show first 3
+                        print(f"  Processing node {node.id} ({node_idx + 1}/{len(plan.nodes)}): {len(node.propositions)} propositions, role={node.role}")
+                        print(f"     Propositions:")
+                        for i, prop in enumerate(node.propositions[:3]):  # Show first 3
                             print(f"       P{i}: {prop[:60]}...")
-                        if len(chunk) > 3:
-                            print(f"       ... and {len(chunk) - 3} more")
+                        if len(node.propositions) > 3:
+                            print(f"       ... and {len(node.propositions) - 3} more")
 
-                    # Extract per-chunk graph from global graph (if available)
-                    # Otherwise, create new graph for this chunk
-                    input_graph = None
-                    input_intent = 'ARGUMENT'  # Default
-                    input_signature = 'DEFINITION'  # Default
-                    input_role = None
-                    chunk_global_indices = []  # Track global indices for this chunk
-
-                    if global_graph and global_graph.get('mermaid'):
-                        # Extract subgraph for this chunk from global graph
-                        input_graph = self._extract_chunk_graph_from_global(global_graph, chunk, propositions, verbose=verbose)
-                        if input_graph:
-                            input_intent = input_graph.get('intent', global_graph.get('intent', 'ARGUMENT'))
-                            input_signature = input_graph.get('signature', global_graph.get('signature', 'DEFINITION'))
-                            input_role = input_graph.get('role', global_graph.get('role'))
-
-                            # Extract the global indices used in the subgraph
-                            # The _extract_chunk_graph_from_global method creates nodes like P6, P7, P8
-                            # We need to track which global indices these correspond to, in chunk order
-                            chunk_node_map = input_graph.get('node_map', {})
-                            if not chunk_node_map:
-                                if verbose:
-                                    print(f"     ⚠ chunk_node_map is empty, cannot extract global indices")
-                            else:
-                                # Extract global indices in the order they appear in the chunk
-                                # Match chunk propositions to node_map entries to preserve order
-                                for chunk_idx, chunk_prop in enumerate(chunk):
-                                    matched = False
-                                    for node_key, node_text in chunk_node_map.items():
-                                        if node_key.startswith('P') and node_key[1:].isdigit():
-                                            # Check if this node maps to the current chunk proposition
-                                            if node_text == chunk_prop:
-                                                global_idx = int(node_key[1:])
-                                                if global_idx not in chunk_global_indices:
-                                                    chunk_global_indices.append(global_idx)
-                                                matched = True
-                                                break
-                                    if not matched and verbose:
-                                        print(f"     ⚠ Could not find node_map match for chunk proposition {chunk_idx}: {chunk_prop[:60]}...")
-
-                    # Fallback: Create new graph for this chunk if extraction failed
-                    if not input_graph:
-                        prev_paragraph_summary = prev_paragraph_text[:200] + "..." if prev_paragraph_text and len(prev_paragraph_text) > 200 else prev_paragraph_text
-                        input_graph = self.input_mapper.map_propositions(chunk, prev_paragraph_summary=prev_paragraph_summary)
-                        if input_graph:
-                            input_intent = input_graph.get('intent', 'ARGUMENT')
-                            input_signature = input_graph.get('signature', 'DEFINITION')
-                            input_role = input_graph.get('role')
-                            # For new graphs, use local indices (0, 1, 2...)
-                            chunk_global_indices = list(range(len(chunk)))
-
-                    # Load style profile for style injection
-                    style_profile = self._load_style_profile(author_name)
-
-                    # Synthesize blueprint using Architect pattern
-                    # Use paragraph_index and total_paragraphs from parameters (Phase 5)
-                    global_idx = paragraph_index if paragraph_index is not None else (document_context.get('current_index') if document_context else None)
+                    # Generate sentence using synthesize_sentence_node
                     try:
-                        # Use original paragraph text for Direct Synthesis context
-                        # The paragraph parameter contains the full original text
-                        blueprint = self.graph_matcher.synthesize_match(
-                            chunk,
-                            input_intent,
-                            document_context,
-                            style_profile=style_profile,
-                            input_signature=input_signature,
-                            global_index=global_idx,
-                            input_role=input_role,
-                            prev_paragraph_summary=prev_paragraph_summary,
-                            input_graph=input_graph,  # Pass input_graph with structural_summary
-                            original_context=paragraph,  # Pass original paragraph text for Direct Synthesis
-                            style_tracker=self.style_tracker,  # Pass style tracker for state constraints
-                            verbose=verbose
+                        sentence = self.graph_matcher.synthesize_sentence_node(
+                            node,
+                            previous_sentence,
+                            style_profile,
+                            self.style_tracker,
+                            default_perspective,
+                            author_name,
+                            verbose
                         )
                     except Exception as e:
                         if verbose:
-                            print(f"  ⚠ Blueprint synthesis failed for chunk {chunk_idx + 1}: {e}, using fallback")
-                        fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                            print(f"  ⚠ Sentence generation failed for node {node.id}: {e}, using fallback")
+                        # Fallback: generate simple sentence from propositions
+                        fallback_text = " ".join(node.propositions)
                         if fallback_text:
                             generated_sentences.append(fallback_text)
-                            chunk_scores.append(0.5)  # Track fallback score
+                            sentence_scores.append(0.5)  # Conservative score for fallback
+                            previous_sentence = fallback_text
                         continue
 
-                    if not blueprint:
-                        if verbose:
-                            print(f"  ⚠ No blueprint synthesized for chunk {chunk_idx + 1}, using fallback")
-                        fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
-                        if fallback_text:
-                            generated_sentences.append(fallback_text)
-                            chunk_scores.append(0.5)  # Track fallback score
-                        continue
-
-                    # Phase 4: Validate blueprint signature
-                    # TRUST THE GRAPH: If skeleton is built from graph traversal, bypass validation
-                    # The Graph Builder is grounded in actual input logic, so it is authoritative
-                    source_method = blueprint.get('source_method', 'unknown')
-
-                    if source_method == 'graph_traversal':
-                        if verbose:
-                            print(f"     ✓ Graph-based skeleton accepted (skipping signature validation)")
-                    else:
-                        # Perform validation only for Statistical/Generic/LLM templates
-                        if not self._validate_blueprint(blueprint, input_signature, verbose=verbose):
-                            if verbose:
-                                print(f"  ⚠ Blueprint validation failed, attempting repair...")
-                            # Attempt repair (only once to avoid infinite loops)
-                            try:
-                                blueprint = self._repair_blueprint(
-                                    blueprint,
-                                    input_signature,
-                                    chunk,
-                                    input_intent,
-                                    document_context,
-                                    style_profile=style_profile,
-                                    global_index=global_idx,
-                                    input_role=input_role,
-                                    prev_paragraph_summary=prev_paragraph_summary,
-                                    verbose=verbose
-                                )
-                            except Exception as e:
-                                if verbose:
-                                    print(f"  ⚠ Repair failed: {e}, continuing with original blueprint")
-
-                    if verbose:
-                        style_meta = blueprint.get('style_metadata', {})
-                        print(f"     ✓ Synthesized blueprint:")
-                        print(f"        Intent: {style_meta.get('intent', 'UNKNOWN')}")
-                        skeleton = style_meta.get('skeleton', '')
-                        if skeleton:
-                            print(f"        Skeleton: {skeleton[:80]}...")
-
-                    # Create input_node_map using global indices if available, otherwise local indices
-                    # This ensures the graph's P6, P7, P8 references match the input_node_map keys
-                    if chunk_global_indices and len(chunk_global_indices) == len(chunk):
-                        input_node_map = {f'P{i}': prop for i, prop in zip(chunk_global_indices, chunk)}
-                        if verbose:
-                            print(f"     Using global indices for input_node_map: {chunk_global_indices}")
-                    elif chunk_global_indices and len(chunk_global_indices) > 0:
-                        # Partial mapping - use what we have, fallback for missing
-                        if verbose:
-                            print(f"     ⚠ Partial global mapping ({len(chunk_global_indices)}/{len(chunk)}), using hybrid mapping")
-                        input_node_map = {}
-
-                        # First, map matched propositions
-                        for i, prop in enumerate(chunk):
-                            if i < len(chunk_global_indices):
-                                input_node_map[f'P{chunk_global_indices[i]}'] = prop
-
-                        # Then, try to map remaining chunk propositions to remaining unmatched nodes in chunk_node_map
-                        if input_graph:
-                            chunk_node_map = input_graph.get('node_map', {})
-                            used_global_indices = set(chunk_global_indices)
-                            remaining_chunk_props = chunk[len(chunk_global_indices):]
-
-                            for chunk_idx, chunk_prop in enumerate(remaining_chunk_props, start=len(chunk_global_indices)):
-                                # Find an unmatched node in chunk_node_map that might correspond to this proposition
-                                matched_remaining = False
-                                for node_key, node_text in chunk_node_map.items():
-                                    if node_key.startswith('P') and node_key[1:].isdigit():
-                                        global_idx = int(node_key[1:])
-                                        if global_idx not in used_global_indices:
-                                            # Try to match (exact match for now)
-                                            if node_text == chunk_prop:
-                                                input_node_map[f'P{global_idx}'] = chunk_prop
-                                                used_global_indices.add(global_idx)
-                                                matched_remaining = True
-                                                if verbose:
-                                                    print(f"     ✓ Matched remaining chunk prop {chunk_idx} to node P{global_idx}")
-                                                break
-
-                                # If no match found, use local index as last resort
-                                if not matched_remaining:
-                                    input_node_map[f'P{chunk_idx}'] = chunk_prop
-                                    if verbose:
-                                        print(f"     ⚠ No graph node match for chunk prop {chunk_idx}, using local index P{chunk_idx}")
-                        else:
-                            # No input_graph, use local indices for remaining
-                            for i, prop in enumerate(chunk[len(chunk_global_indices):], start=len(chunk_global_indices)):
-                                input_node_map[f'P{i}'] = prop
-                    else:
-                        # Fallback to local indices if mapping fails
-                        input_node_map = {f'P{i}': prop for i, prop in enumerate(chunk)}
-                        if verbose:
-                            print(f"     ⚠ Using local indices for input_node_map (global mapping unavailable)")
-
-                    # Render from graph using repair loop
-                    if verbose:
-                        print(f"  [DEBUG] Calling _generate_with_repair_loop:")
-                        print(f"    - original_context length: {len(paragraph) if paragraph else 0} chars")
-                        print(f"    - chunk_graph: {'present' if input_graph else 'MISSING'}")
-                        if input_graph:
-                            print(f"    - chunk_graph mermaid: {bool(input_graph.get('mermaid'))}")
-
-                    sentence, sentence_score = self._generate_with_repair_loop(
-                        chunk,
-                        blueprint,
-                        input_node_map,
-                        author_name,
-                        verbose,
-                        previous_sentence=last_generated_sentence,
-                        original_context=paragraph,  # Pass original paragraph for context
-                        chunk_graph=input_graph  # Pass chunk graph for semantic topology
-                    )
-
-                    # Track score and sentence together to ensure consistency
+                    # Validate and repair
                     if sentence:
-                        generated_sentences.append(sentence)
-                        chunk_scores.append(sentence_score)  # Only append score if we have a sentence
-                        last_generated_sentence = sentence
-                        if verbose:
-                            print(f"  ✓ Generated sentence from graph: {sentence[:80]}...")
-
-                        # Register usage with style tracker to prevent repetition
+                        # Style validation (immediate)
                         try:
-                            used_connectors = self.style_tracker._extract_connectors_from_text(sentence)
-                            extracted_opener = self.style_tracker._extract_opener(sentence)
-
-                            if verbose:
-                                print(f"  [DEBUG] Registering usage:")
-                                print(f"    - Extracted opener: '{extracted_opener}'")
-                                print(f"    - Extracted connectors: {used_connectors}")
-                                print(f"    - Structure: {blueprint.get('signature') if blueprint else 'None'}")
-
-                            self.style_tracker.register_usage(
-                                text=sentence,
-                                connectors=used_connectors,
-                                structure=blueprint.get('signature') if blueprint else None
-                            )
-
-                            if verbose:
-                                print(f"  [DEBUG] After registration:")
-                                print(f"    - Phrase history: {list(self.style_tracker.phrase_history)}")
-                                print(f"    - Connector history: {list(self.style_tracker.connector_history)[-5:]}")
+                            style_critic = StyleCritic(style_profile, tolerance=0.3)
+                            is_valid, _, violations = style_critic.evaluate(sentence)
+                            if not is_valid:
+                                if verbose:
+                                    print(f"  ⚠ Style validation failed for {node.id}, attempting repair...")
+                                # Repair length/style
+                                sentence = self._repair_sentence_style(sentence, node, violations, style_profile, author_name, verbose)
                         except Exception as e:
                             if verbose:
-                                print(f"  ⚠ Style tracker registration failed: {e}")
+                                print(f"  ⚠ Style validation error: {e}, continuing")
 
-                        # Log graph match for debugging
-                        if self.telemetry and blueprint:
+                        # Semantic validation
+                        try:
+                            eval_result = self._evaluate_variant(sentence, node.propositions, verbose=False)
+                            score = eval_result.get('score', 0.0)
+                        except Exception:
+                            score = 0.5  # Default score if evaluation fails
+
+                        if score >= 0.85:  # Minimum threshold
+                            generated_sentences.append(sentence)
+                            sentence_scores.append(score)
+                            previous_sentence = sentence
+
+                            # Register usage
                             try:
-                                self.telemetry.log_match(
-                                    paragraph_index=document_context.get('current_index', 0) if document_context else 0,
-                                    input_graph=input_graph,
-                                    style_match=blueprint,
-                                    final_text=sentence
+                                used_connectors = self.style_tracker._extract_connectors_from_text(sentence)
+                                extracted_opener = self.style_tracker._extract_opener(sentence)
+                                key_phrases = self.style_tracker._extract_key_phrases(sentence)
+
+                                if verbose:
+                                    print(f"  [DEBUG] Registering usage:")
+                                    print(f"    - Extracted opener: '{extracted_opener}'")
+                                    print(f"    - Extracted connectors: {used_connectors}")
+                                    print(f"    - Extracted key phrases: {key_phrases}")
+                                    print(f"    - Structure: {node.role}")
+
+                                self.style_tracker.register_usage(
+                                    text=sentence,
+                                    connectors=used_connectors,
+                                    structure=node.role,
+                                    key_phrases=key_phrases
                                 )
                             except Exception as e:
                                 if verbose:
-                                    print(f"  ⚠ Telemetry logging failed: {e}")
+                                    print(f"  ⚠ Style tracker registration failed: {e}")
+                        else:
+                            # Repair semantic issues
+                            if verbose:
+                                print(f"  ⚠ Semantic score {score:.3f} < 0.85 for {node.id}, attempting repair...")
+                            try:
+                                sentence = self._repair_sentence_semantic(sentence, node.propositions, author_name, verbose)
+                                # Re-validate
+                                eval_result = self._evaluate_variant(sentence, node.propositions, verbose=False)
+                                score = eval_result.get('score', 0.0)
+                                if score >= 0.85:
+                                    generated_sentences.append(sentence)
+                                    sentence_scores.append(score)
+                                    previous_sentence = sentence
+                                    # Register usage
+                                    try:
+                                        used_connectors = self.style_tracker._extract_connectors_from_text(sentence)
+                                        extracted_opener = self.style_tracker._extract_opener(sentence)
+                                        key_phrases = self.style_tracker._extract_key_phrases(sentence)
+                                        self.style_tracker.register_usage(
+                                            text=sentence,
+                                            connectors=used_connectors,
+                                            structure=node.role,
+                                            key_phrases=key_phrases
+                                        )
+                                    except Exception:
+                                        pass
+                                else:
+                                    # Repair failed: Fallback to original propositions
+                                    if verbose:
+                                        print(f"  ⚠ Repair failed (score {score:.3f} < 0.85), using proposition fallback")
+                                    fallback_text = " ".join(node.propositions)
+                                    if fallback_text:
+                                        generated_sentences.append(fallback_text)
+                                        sentence_scores.append(0.5)  # Conservative score
+                                        previous_sentence = fallback_text
+                            except Exception as e:
+                                if verbose:
+                                    print(f"  ⚠ Semantic repair failed: {e}")
+                                # Exception in repair: Fallback to original propositions
+                                fallback_text = " ".join(node.propositions)
+                                if fallback_text:
+                                    generated_sentences.append(fallback_text)
+                                    sentence_scores.append(0.5)
+                                    previous_sentence = fallback_text
                     else:
                         # Generated empty sentence, try fallback
                         if verbose:
-                            print(f"  ⚠ Generated empty sentence for chunk {chunk_idx + 1}, using fallback")
-                        fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                            print(f"  ⚠ Generated empty sentence for node {node.id}, using fallback")
+                        fallback_text = " ".join(node.propositions)
                         if fallback_text:
                             generated_sentences.append(fallback_text)
-                            # Track fallback score (use a conservative score for fallbacks)
-                            chunk_scores.append(0.5)  # Conservative score for fallback
-                        else:
-                            # Fallback also failed, track as complete failure
-                            chunk_scores.append(0.0)
-                            if verbose:
-                                print(f"  ⚠ Fallback also failed for chunk {chunk_idx + 1}, tracking as 0.0 score")
+                            sentence_scores.append(0.5)  # Conservative score for fallback
+                            previous_sentence = fallback_text
 
                 except Exception as e:
                     if verbose:
-                        print(f"  ⚠ Error processing chunk {chunk_idx + 1}: {e}, using fallback")
-                    # Fallback for this chunk
-                    fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
+                        print(f"  ⚠ Error processing node {node.id}: {e}, using fallback")
+                    # Fallback for this node
+                    fallback_text = " ".join(node.propositions) if node.propositions else ""
                     if fallback_text:
                         generated_sentences.append(fallback_text)
-                        # Track fallback score (use a conservative score for fallbacks)
-                        chunk_scores.append(0.5)  # Conservative score for fallback
+                        sentence_scores.append(0.5)  # Conservative score for fallback
+                        previous_sentence = fallback_text
 
             # Step 4: Assembly and Validation
             if generated_sentences:
@@ -6339,14 +6471,14 @@ Insert the missing information into the current text. You may:
                 if verbose:
                     print(f"  ✓ Generated paragraph with {len(generated_sentences)} sentences")
 
-                # Use the best score from repair loops (average of chunk scores)
+                # Use the best score from repair loops (average of sentence scores)
                 # This ensures we use the REPAIRED scores, not initial failures
-                if chunk_scores:
-                    compliance_score = sum(chunk_scores) / len(chunk_scores)
+                if sentence_scores:
+                    compliance_score = sum(sentence_scores) / len(sentence_scores)
                     if verbose:
-                        print(f"  ✓ Paragraph Semantic Score: {compliance_score:.3f} (from {len(chunk_scores)} chunks)")
+                        print(f"  ✓ Paragraph Semantic Score: {compliance_score:.3f} (from {len(sentence_scores)} sentences)")
                 else:
-                    # Fallback: calculate if chunk scores not available
+                    # Fallback: calculate if sentence scores not available
                     compliance_score = self._calculate_semantic_score(result, propositions, verbose=verbose)
                     if verbose:
                         print(f"  ✓ Semantic compliance score (calculated): {compliance_score:.3f}")
@@ -7361,31 +7493,6 @@ Write in the style of {author_name}."""
 
         return best_text, target_arch_id, best_score
 
-    def _load_style_profile(self, author_name: str) -> Optional[Dict]:
-        """Load style profile JSON for vocabulary palette access.
-
-        Args:
-            author_name: Name of the author
-
-        Returns:
-            Style profile dictionary, or None if not found
-        """
-        try:
-            # Use lowercase author name for directory lookup
-            author_lower = author_name.lower()
-            style_profile_path = Path(self.atlas_path) / author_lower / "style_profile.json"
-
-            if not style_profile_path.exists():
-                # Fallback: try exact case
-                style_profile_path = Path(self.atlas_path) / author_name / "style_profile.json"
-                if not style_profile_path.exists():
-                    return None
-
-            with open(style_profile_path, 'r') as f:
-                profile = json.load(f)
-                return profile
-        except Exception:
-            return None
 
     def _build_style_constraints(self, author_name: str) -> str:
         """Build style constraints from forensic profile.

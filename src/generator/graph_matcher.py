@@ -465,6 +465,8 @@ class TopologicalMatcher:
         input_graph: Optional[Dict[str, Any]] = None,
         original_context: Optional[str] = None,
         style_tracker: Optional[Any] = None,
+        default_perspective: Optional[str] = None,
+        is_paragraph_start: bool = False,
         verbose: bool = False
     ) -> Dict[str, Any]:
         """Synthesize a custom blueprint from propositions using The Architect pattern.
@@ -478,6 +480,7 @@ class TopologicalMatcher:
             global_index: Paragraph index in document (0-based) for hard filtering.
             input_role: Narrative role (INTRO, ELABORATION, CONCLUSION) detected by mapper.
             prev_paragraph_summary: Optional summary of previous paragraph for context continuity.
+            is_paragraph_start: True if this is the first chunk of a new paragraph (chunk_idx == 0).
             verbose: Enable verbose logging.
 
         Returns:
@@ -808,22 +811,94 @@ class TopologicalMatcher:
 
         candidates_text = "\n\n".join(candidates_list)
 
+        # Build comprehensive Style DNA section from style_profile (MUST BE BEFORE system_prompt)
+        style_dna_section = ""
+        # Initialize defaults for variables used in prompts
+        avg_words_per_sentence = 25.0
+        max_sentence_length = 50
+        complexity_ratio = 0.5
+        rhythm_desc = 'Varied'
+        burstiness = 0.5
+
+        if style_profile:
+            # Extract structural DNA
+            structural_dna = style_profile.get('structural_dna', {})
+            avg_words_per_sentence = structural_dna.get('avg_words_per_sentence', 25.0)
+            complexity_ratio = structural_dna.get('complexity_ratio', 0.5)
+            rhythm_desc = style_profile.get('rhythm_desc', 'Varied')
+            burstiness = style_profile.get('burstiness', 0.5)
+
+            # Extract punctuation preferences (CRITICAL for style matching)
+            semicolons_per_100 = style_profile.get('semicolons_per_100', 0)
+            dashes_per_100 = style_profile.get('dashes_per_100', 0)
+            punctuation_preference = style_profile.get('punctuation_preference', 'Standard')
+
+            # Extract vocabulary data (get more keywords and openers for better coverage)
+            keywords = style_profile.get('keywords', [])
+            keywords_str = ', '.join(keywords[:15]) if keywords else 'N/A'  # Top 15 keywords
+            common_openers = style_profile.get('common_openers', [])
+            openers_str = ', '.join(common_openers[:8]) if common_openers else 'N/A'  # Top 8 openers
+
+            # Calculate max sentence length (1.5x average, but cap at 50)
+            max_sentence_length = min(int(avg_words_per_sentence * 1.5), 50)
+
+            # Build Style DNA section with MANDATORY language
+            style_dna_parts = []
+            style_dna_parts.append(f"**AUTHOR'S STYLE DNA (MANDATORY - TAKES PRECEDENCE):**")
+
+            # Add Perspective (from config or style_profile)
+            pov_to_use = default_perspective if default_perspective else style_profile.get('pov', 'Third Person')
+            style_dna_parts.append(f"- **Perspective (MANDATORY):** Write in **{pov_to_use}**.")
+
+            style_dna_parts.append(f"- **Sentence Length (MANDATORY):** Target average of {int(avg_words_per_sentence)} words per sentence. **CRITICAL:** Do NOT write sentences longer than {max_sentence_length} words. Split long thoughts into multiple sentences.")
+            style_dna_parts.append(f"- **Rhythm (MANDATORY):** {rhythm_desc} (Burstiness: {burstiness:.2f}). Mix short, punchy sentences (5-15 words) with longer, complex ones ({int(avg_words_per_sentence)}-{max_sentence_length} words) to create the characteristic rhythm.")
+
+            # Punctuation constraints (MANDATORY if frequencies are high)
+            if dashes_per_100 > 10:
+                # Calculate approximate words per dash for clearer instruction
+                words_per_dash = int(100 / dashes_per_100) if dashes_per_100 > 0 else 100
+                style_dna_parts.append(f"- **Punctuation (MANDATORY):** Use em-dashes (—) at a rate of approximately {dashes_per_100:.1f} per 100 words (about 1 dash per {words_per_dash} words). Do NOT use dashes in every sentence. Use them sparingly for emphasis and parenthetical thoughts only. This is a signature punctuation mark, but overuse dilutes its impact.")
+            if semicolons_per_100 > 5:
+                words_per_semicolon = int(100 / semicolons_per_100) if semicolons_per_100 > 0 else 100
+                style_dna_parts.append(f"- **Punctuation (MANDATORY):** Use semicolons (;) at a rate of approximately {semicolons_per_100:.1f} per 100 words (about 1 semicolon per {words_per_semicolon} words). Do NOT use semicolons in every sentence. Use them to connect related clauses only when appropriate.")
+            if punctuation_preference == 'Dashes':
+                style_dna_parts.append(f"- **Punctuation Style (MANDATORY):** Prefer dashes over commas for parenthetical thoughts and emphasis, but follow the frequency guidelines above.")
+
+            # Vocabulary (MANDATORY)
+            if keywords_str != 'N/A':
+                style_dna_parts.append(f"- **Vocabulary (MANDATORY):** You **MUST** incorporate 2-3 of these signature keywords naturally: {keywords_str}. These are the author's characteristic vocabulary.")
+
+            # Openers (MANDATORY)
+            if openers_str != 'N/A':
+                style_dna_parts.append(f"- **Sentence Openers (MANDATORY):** Prioritize these openers when appropriate: {openers_str}. At least 30% of sentences should start with these patterns.")
+
+            style_dna_parts.append(f"- **Complexity:** Target complexity ratio of {complexity_ratio:.2f} (ratio of complex to simple sentences).")
+
+            style_dna_section = "\n".join(style_dna_parts) + "\n\n"
+        elif default_perspective:
+            # If no style_profile but default_perspective is provided, create minimal Style DNA with just POV
+            style_dna_parts = []
+            style_dna_parts.append(f"**AUTHOR'S STYLE DNA (MANDATORY - TAKES PRECEDENCE):**")
+            style_dna_parts.append(f"- **Perspective (MANDATORY):** Write in **{default_perspective}**.")
+            style_dna_section = "\n".join(style_dna_parts) + "\n\n"
+
         system_prompt = f"""You are a ghostwriter mimicking a specific author's voice.
 Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1-3 sentences) that mimics the **Rhetorical Structure, Tone, and Syntax** of the Style Target.
 
 **CRITICAL INSTRUCTIONS:**
 1. **Analyze the Style Target:** Identify its rhetorical moves (e.g., "A is defined by B," "Contrast X with Y," "Passive voice attribution," "Complex dependent clauses," "Formal inversions").
-2. **Adapt, Don't Copy:** Use the Style Target's *structure* (clause depth, transition types, sentence complexity, formal tone), but **DO NOT** force specific metaphors (like "permeates", "blood", "war") if they don't fit the Input Facts.
+2. **Adapt, Don't Copy:** Use the Style Target's *structure* (clause depth, transition types, sentence complexity, formal tone), but **DO NOT** force specific metaphors (like "permeates", "blood", "war") if they don't fit the Input Facts semantically.
 3. **Merge Inputs:** If multiple propositions describe the same subject (e.g., "People hear", "People assume"), MERGE them into a single complex clause.
 4. **Preserve Meaning:** The Input Propositions are the Truth. The Style Target is just the Clothing.
 5. **Structural Emulation:** Copy the Style Target's sentence architecture (e.g., "Subject + Active Transitive Verb + Object + Scope"), not its specific vocabulary.
 6. **NO Run-On Chains:** Do NOT create structures like "X to Y by Z from A". Use the style target's clean grammatical structure.
 7. **CRITICAL:** You MUST include all key information from the Input Propositions. Do not hallucinate new facts.
 8. **OUTPUT DIRECT TEXT:** Write the final English text. Do NOT output a skeleton with placeholders like [S0] or [P0]. Write complete, grammatically correct sentences.
-9. **SENTENCE LENGTH & STRUCTURE:**
-   - **Dense Input Rule:** If the input has 4+ propositions, you MUST split the output into 2-3 distinct sentences. Do NOT create a single massive run-on sentence.
-   - **Target Length:** Aim for 30-50 words per sentence.
-   - **Transitions:** Use natural transitions (e.g., "Furthermore," "In contrast," "Consequently") to link the split sentences, mimicking the Author's flow.
+9. **SENTENCE SPLITTING (CRITICAL):**
+   - **If the input has 4+ propositions, you MUST SPLIT them into 2-3 distinct sentences.** Do NOT create a single massive run-on sentence.
+   - **If the input has 7+ propositions, split into 3-4 sentences.**
+   - **Maximum sentence length:** Respect the Style DNA constraints above (typically 40-50 words max).
+   - **Use proper transitions:** Connect split sentences with natural transitions (semicolons, "However", "In contrast", "Furthermore", "Consequently") to maintain flow while respecting the Author's preferred openers.
 
 **CRITICAL GRAMMAR RULE - MERGE REPETITIVE SUBJECTS:**
 - **Merge Repetitive Subjects:** If multiple input propositions share the same subject (e.g., "Many people hear...", "Many people assume..."), you MUST merge them into a single cohesive clause.
@@ -832,7 +907,7 @@ Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1
 - **Use the Style Candidate's structure**, but adapt the slots to fit the merged content while maintaining grammatical flow.
 - **Emulate the author's voice** by matching their sentence complexity and rhetorical patterns, not by copying exact words."""
 
-        # Build style guidance from style_profile if available
+        # Build legacy style_guidance for backward compatibility
         style_guidance = ""
         if style_profile:
             style_description = style_profile.get('description') or style_profile.get('style_description')
@@ -847,7 +922,38 @@ Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1
 
         # Build previous context section if available
         prev_context_section = ""
-        if prev_paragraph_summary:
+        if is_paragraph_start:
+            # This is the start of a new paragraph - add critical constraint about causal connectors
+            # This applies even if prev_paragraph_summary is None (first paragraph or after heading)
+            if prev_paragraph_summary:
+                prev_context_section = f"""
+**PREVIOUS PARAGRAPH CONTEXT:**
+{prev_paragraph_summary}
+
+**CRITICAL: PARAGRAPH BOUNDARY RULE (MANDATORY):**
+- **This is the START of a new paragraph.** You MUST NOT start with causal connectors like "Consequently", "Therefore", "Thus", "Hence", or "As a result" unless there is EXPLICIT logical continuity from the previous paragraph.
+- Causal connectors imply a direct consequence - only use them if the current paragraph directly follows from the previous one's conclusion.
+- **For paragraph starts, prefer:**
+  * Topic sentence openers that introduce the subject directly (e.g., "Most people...", "Dialectics teaches...", "To understand...")
+  * Neutral connectors like "Furthermore", "In addition", "To understand this", "Consider", or start directly with the subject
+  * Connectors that establish context rather than imply causation (e.g., "In this context", "To explore this", "When examining")
+- **DO NOT use "Building on this foundation" as it is overused and repetitive.**
+- **If the previous paragraph was a heading/title, ignore it completely and start fresh.**
+"""
+            else:
+                # First paragraph of document or paragraph after heading - no previous context, but still enforce paragraph start rule
+                prev_context_section = f"""
+**CRITICAL: PARAGRAPH START RULE (MANDATORY):**
+- **This is the START of a new paragraph.** You MUST NOT start with causal connectors like "Consequently", "Therefore", "Thus", "Hence", or "As a result".
+- Causal connectors imply a direct consequence from a previous statement - they are inappropriate at paragraph starts.
+- **For paragraph starts, prefer:**
+  * Topic sentence openers that introduce the subject directly (e.g., "Most people...", "Dialectics teaches...", "To understand...")
+  * Neutral connectors like "Furthermore", "In addition", "To understand this", "Consider", or start directly with the subject
+  * Connectors that establish context rather than imply causation (e.g., "In this context", "To explore this", "When examining")
+- **DO NOT use "Building on this foundation" as it is overused and repetitive.**
+"""
+        elif prev_paragraph_summary:
+            # This is a continuation within the same paragraph - can use causal connectors
             prev_context_section = f"""
 **PREVIOUS PARAGRAPH CONTEXT:**
 {prev_paragraph_summary}
@@ -868,16 +974,30 @@ Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1
         # Build state tracking constraints section
         state_constraints_section = ""
         forbidden_openers = []
+        forbidden_phrases = []
         if style_tracker:
             forbidden_openers = style_tracker.get_forbidden_openers()
-            if forbidden_openers:
-                forbidden_list = ', '.join([f'"{f}"' for f in forbidden_openers])
+            forbidden_phrases = style_tracker.get_forbidden_phrases()
+            if forbidden_openers or forbidden_phrases:
+                constraints_parts = []
+                if forbidden_openers:
+                    forbidden_list = ', '.join([f'"{f}"' for f in forbidden_openers])
+                    constraints_parts.append(f"- **FORBIDDEN OPENERS:** You MUST NOT start any sentence with these recently used phrases: {forbidden_list}")
+                if forbidden_phrases:
+                    # Filter out very short phrases and show top 10 most important
+                    important_phrases = [p for p in forbidden_phrases if len(p.split()) >= 2][:10]
+                    if important_phrases:
+                        phrases_list = ', '.join([f'"{p}"' for p in important_phrases])
+                        constraints_parts.append(f"- **FORBIDDEN PHRASES:** You MUST NOT repeat these key phrases/concepts that were recently used: {phrases_list}. Use synonyms, rephrasing, or refer to them indirectly to avoid repetition.")
+
+                constraints_parts.append("- **BANNED PHRASE:** Do NOT use \"Building on this foundation\" - it is overused and repetitive")
+                constraints_parts.append("- **ROLE CONSTRAINT:** If this is an INTRO paragraph (first paragraph), do NOT start with \"Thus\" or \"Therefore\" - these are conclusion connectors, not introduction connectors")
+                constraints_parts.append("- **VARIETY REQUIRED:** Use diverse connectors and openings. Avoid repeating the same phrase structure multiple times.")
+                constraints_parts.append("- **NO WORD SALAD:** Do not force abstract metaphors (e.g., \"permeates\", \"blood\", \"war\") if they make the sentence nonsensical or don't fit the Input Facts.")
+
                 state_constraints_section = f"""
 **NEGATIVE CONSTRAINTS (CRITICAL - MANDATORY):**
-- **FORBIDDEN OPENERS:** You MUST NOT start the sentence with any of these recently used phrases: {forbidden_list}
-- **DO NOT REPEAT:** Do NOT use "Building on this foundation" - it is overused and repetitive
-- **ROLE CONSTRAINT:** If this is an INTRO paragraph (first paragraph), do NOT start with "Thus" or "Therefore" - these are conclusion connectors, not introduction connectors
-- **VARIETY REQUIRED:** Use diverse connectors and openings. Avoid repeating the same phrase structure multiple times.
+{chr(10).join(constraints_parts)}
 
 """
 
@@ -887,10 +1007,17 @@ Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1
 **INPUT PROPOSITIONS (Factual Constraints):**
 {indexed_propositions_text}
 
-**STYLE TARGET (Mimic This Style):**
+{style_dna_section}**STYLE TARGET (Template Structure - Use for Logic Only):**
 {candidates_text}
 {style_guidance}{prev_context_section}{original_context_section}{graph_context}{state_constraints_section}
 **TASK:**
+
+**CRITICAL: STYLE DNA TAKES PRECEDENCE**
+- The **STYLE DNA (above)** defines the Author's Voice (sentence length, punctuation, vocabulary, openers). These are **MANDATORY constraints**.
+- The **STYLE TARGET (below)** defines only the rhetorical structure (contrast, definition, etc.) and logical flow.
+- You **MUST** follow the Style DNA constraints even if the Style Target suggests otherwise.
+- Adapt the Style Target's rhetorical structure to fit within the Style DNA constraints (length, punctuation, vocabulary).
+- **CRITICAL PUNCTUATION RULE:** Do NOT copy punctuation marks (dashes, semicolons, commas) from the Style Target candidates. The Style Target shows only the LOGICAL STRUCTURE and rhetorical pattern. You must apply your own punctuation following the Style DNA frequency rules above. If a candidate has many dashes, that does NOT mean you should use many dashes—follow the Style DNA frequency guidelines instead.
 
 **CRITICAL: PRESERVE INPUT LOGIC STRUCTURE**
 - You MUST preserve the logical structure of the input propositions
@@ -923,13 +1050,14 @@ Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1
 
 3. **Rewrite the Text:**
    - Rewrite the Input Propositions into a cohesive paragraph (typically 1-3 sentences, depending on the number of propositions) that mimics the Style Target's **rhetorical structure** and **sentence complexity**, not its exact words.
-   - **SENTENCE LENGTH CONSTRAINT (CRITICAL):**
-     * **If you have 3 or fewer propositions:** You may combine them into 1-2 sentences
-     * **If you have 4-6 propositions:** Split into 2-3 sentences (aim for ~30-50 words per sentence)
-     * **If you have 7+ propositions:** Split into 3-4 sentences (aim for ~30-50 words per sentence)
+   - **SENTENCE SPLITTING & LENGTH (CRITICAL - MUST FOLLOW STYLE DNA):**
+     * **If you have 3 or fewer propositions:** You may combine them into 1-2 sentences, but respect the maximum sentence length from Style DNA
+     * **If you have 4-6 propositions:** Split into 2-3 sentences. Each sentence should be 20-{max_sentence_length} words.
+     * **If you have 7+ propositions:** Split into 3-4 sentences. Each sentence should be 20-{max_sentence_length} words.
      * **Split at natural logical breaks:** After completing a thought, before introducing a new subject, at major transitions
      * **Each sentence must be grammatically complete and readable**
-     * **Use transitions:** Connect split sentences with natural transitions (e.g., "Furthermore," "In contrast," "Consequently," "Moreover") that match the Author's style
+     * **Use transitions:** Connect split sentences with natural transitions (e.g., "Furthermore," "In contrast," "Consequently," "Moreover") that match the Author's preferred openers from Style DNA
+     * **Respect Burstiness:** Mix sentence lengths - some short (5-15 words), some longer ({int(avg_words_per_sentence)}-{max_sentence_length} words) to create the characteristic rhythm
    - **CRITICAL:** Adapt the Style Target's structure to fit the Input Facts. For example:
      * If Style Target says "X permeates Y" (Structure: Subject + Active Transitive Verb + Object), and Input is "People assume Z", adapt to: "The assumption of Z pervades their understanding" (same structure, adapted verb).
      * If Style Target says "It is a fundamental error to view X as Y", and Input is "People misunderstand A", adapt to: "It is a fundamental error to view A as B" (same structure, adapted content).
@@ -951,7 +1079,7 @@ Your Goal: Rewrite the Input Propositions into a cohesive paragraph (typically 1
                 model_type="editor",
                 require_json=True,
                 temperature=0.3,
-                max_tokens=800
+                max_tokens=400  # Reduced to prevent run-on sentences and enforce concise, punchy style
             )
 
             # Strip markdown code blocks
@@ -1303,6 +1431,302 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
             'source_method': 'minimal_fallback',
             'connector_pool': []
         }
+
+    def synthesize_sentence_node(
+        self,
+        node: 'SentenceNode',
+        previous_text: Optional[str],
+        style_profile: Optional[Dict[str, Any]],
+        style_tracker: Optional[Any],
+        default_perspective: Optional[str],
+        author_name: str,
+        verbose: bool = False
+    ) -> str:
+        """Synthesize a single sentence from a SentenceNode using RAG and style constraints.
+
+        Args:
+            node: SentenceNode with propositions, role, transition_type, target_length, keywords
+            previous_text: Previous sentence text for context
+            style_profile: Style profile dictionary
+            style_tracker: Optional GlobalStyleTracker for forbidden openers/phrases
+            default_perspective: Default perspective (First Person, Third Person, etc.)
+            author_name: Author name for ChromaDB filtering
+            verbose: Enable verbose logging
+
+        Returns:
+            Generated sentence text
+        """
+        from src.planning.sentence_plan import SentenceNode
+
+        # Input validation
+        if not node.propositions:
+            if verbose:
+                print(f"     ⚠ SentenceNode {node.id} has no propositions, returning empty")
+            return ""
+
+        # ====================================================================
+        # RAG RETRIEVAL: Query ChromaDB for style candidate
+        # ====================================================================
+        style_template = None
+        if self.collection:
+            try:
+                # Create structural summary from node's propositions
+                structural_summary = f"{node.role} sentence with {len(node.propositions)} propositions"
+                if node.propositions:
+                    # Use first proposition to create query
+                    first_prop = node.propositions[0]
+                    structural_summary = f"{node.role}: {first_prop[:100]}"
+
+                # Map node role to signature
+                role_to_signature = {
+                    "Contrast": "CONTRAST",
+                    "Definition": "DEFINITION",
+                    "Thesis": "DEFINITION",
+                    "Elaboration": "CAUSALITY",
+                    "Narrative": "NARRATIVE",
+                    "Example": "LIST"
+                }
+                input_signature = role_to_signature.get(node.role, "DEFINITION")
+
+                # Map node role to narrative role (INTRO/BODY/CONCLUSION)
+                role_to_narrative = {
+                    "Thesis": "INTRO",
+                    "Conclusion": "CONCLUSION"
+                }
+                input_role = role_to_narrative.get(node.role, "BODY")
+
+                # Query ChromaDB
+                query_text = structural_summary
+                query_kwargs = {
+                    'query_texts': [query_text],
+                    'n_results': 3  # Get top 3 candidates
+                }
+
+                # Build where clause
+                conditions = []
+                if input_signature:
+                    conditions.append({"signature": input_signature})
+                if input_role:
+                    conditions.append({"role": input_role})
+
+                where_clause = self._build_where_clause(conditions)
+                if where_clause:
+                    query_kwargs['where'] = where_clause
+
+                # Query
+                results = self.collection.query(**query_kwargs)
+                if results and results.get('ids') and results['ids'][0]:
+                    candidates = self._extract_candidates_from_results(results)
+                    if candidates:
+                        # Select best candidate (first one with matching structure)
+                        best_candidate = candidates[0]
+                        style_template = best_candidate.get('original_text', '')
+                        if style_template and verbose:
+                            print(f"     ✓ Retrieved style template for {node.role} (length: {len(style_template)} chars)")
+            except Exception as e:
+                if verbose:
+                    print(f"     ⚠ RAG retrieval failed: {e}")
+
+        # Store template in node
+        if style_template:
+            node.style_template = style_template
+
+        # ====================================================================
+        # Build Style DNA section (extract from style_profile)
+        # ====================================================================
+        style_dna_section = ""
+        if style_profile:
+            structural_dna = style_profile.get('structural_dna', {})
+            avg_words = structural_dna.get('avg_words_per_sentence', 25.0)
+            max_words = min(int(avg_words * 1.5), 50)
+
+            # Extract punctuation
+            semicolons_per_100 = style_profile.get('semicolons_per_100', 0)
+            dashes_per_100 = style_profile.get('dashes_per_100', 0)
+
+            # Extract vocabulary
+            keywords = style_profile.get('keywords', [])
+            keywords_str = ', '.join(keywords[:15]) if keywords else 'N/A'
+
+            # Build style DNA
+            style_dna_parts = []
+            style_dna_parts.append("**AUTHOR'S STYLE DNA (MANDATORY):**")
+
+            pov_to_use = default_perspective if default_perspective else style_profile.get('pov', 'Third Person')
+            style_dna_parts.append(f"- **Perspective:** Write in **{pov_to_use}**.")
+            style_dna_parts.append(f"- **Sentence Length:** Target approximately {node.target_length} words. **CRITICAL:** Do NOT exceed {max_words} words.")
+
+            if dashes_per_100 > 10:
+                style_dna_parts.append(f"- **Punctuation:** Use em-dashes (—) at a rate of approximately {dashes_per_100:.1f} per 100 words.")
+            if semicolons_per_100 > 5:
+                style_dna_parts.append(f"- **Punctuation:** Use semicolons (;) at a rate of approximately {semicolons_per_100:.1f} per 100 words.")
+
+            if keywords_str != 'N/A' and node.keywords:
+                style_dna_parts.append(f"- **Vocabulary:** Use keywords: {', '.join(node.keywords)}")
+
+            style_dna_section = "\n".join(style_dna_parts) + "\n\n"
+
+        # ====================================================================
+        # Build Context Section
+        # ====================================================================
+        context_section = ""
+        if previous_text:
+            context_section = f"""**PREVIOUS SENTENCE:**
+{previous_text}
+
+"""
+
+        # Add transition instruction
+        transition_guidance = ""
+        if node.transition_type == "Causal":
+            transition_guidance = "Use a causal connector like 'Consequently', 'Therefore', or 'As a result' if appropriate."
+        elif node.transition_type == "Adversative":
+            transition_guidance = "Use an adversative connector like 'However', 'Yet', or 'In contrast' if appropriate."
+        elif node.transition_type == "Sequential":
+            transition_guidance = "Use a sequential connector like 'Furthermore', 'Next', or 'Then' if appropriate."
+        elif node.transition_type == "Semantic":
+            transition_guidance = "Use appropriate semantic connectors based on the relationship (e.g., 'serving to', 'attributed to', 'sourced from')."
+        else:
+            transition_guidance = "Flow naturally from the previous sentence."
+
+        # ====================================================================
+        # Build Content Section
+        # ====================================================================
+        content_section = "**CONTENT (Must Include):**\n"
+        for i, prop in enumerate(node.propositions):
+            content_section += f"P{i}: {prop}\n"
+
+        # ====================================================================
+        # Build Syntax Template Section (RAG)
+        # ====================================================================
+        syntax_template_section = ""
+        template_text = node.style_template or style_template
+        if template_text:
+            syntax_template_section = f"""
+**SYNTAX TEMPLATE (OPTIONAL INSPIRATION):**
+"{template_text}"
+
+**INSTRUCTION:** This is a sentence by the author that matches the structure we want. Use its grammatical structure (e.g., where clauses are placed, passive/active voice, inversion patterns) but write YOUR content from the propositions above. Do NOT copy the template's content—only mimic its syntax.
+
+"""
+
+        # ====================================================================
+        # Build State Constraints (forbidden openers/phrases)
+        # ====================================================================
+        state_constraints = ""
+        if style_tracker:
+            forbidden_openers = style_tracker.get_forbidden_openers()
+            forbidden_phrases = style_tracker.get_forbidden_phrases()
+            if forbidden_openers or forbidden_phrases:
+                constraints_parts = []
+                if forbidden_openers:
+                    constraints_parts.append(f"- **FORBIDDEN OPENERS:** Do not start with: {', '.join([f'\"{f}\"' for f in forbidden_openers])}")
+                if forbidden_phrases:
+                    important_phrases = [p for p in forbidden_phrases if len(p.split()) >= 2][:10]
+                    if important_phrases:
+                        constraints_parts.append(f"- **FORBIDDEN PHRASES:** Do not repeat: {', '.join([f'\"{p}\"' for p in important_phrases])}")
+                if constraints_parts:
+                    state_constraints = "**NEGATIVE CONSTRAINTS:**\n" + "\n".join(constraints_parts) + "\n\n"
+
+        # Add lexical diversity instructions
+        lexical_diversity_section = """
+**ANTI-REPETITION RULES:**
+1. **ANTI-ECHO:** Do NOT start with the same words as the Previous Sentence.
+2. **ANTI-SUFFIX:** Do NOT repeat the predicate or ending structure of the Previous Sentence.
+3. Use synonyms. If you used "dismissal" once, use "rejection" or "scorn" next time.
+
+"""
+
+        # ====================================================================
+        # Build Prompts
+        # ====================================================================
+        system_prompt = """You are a ghostwriter writing a single sentence in a specific author's voice.
+
+**CRITICAL INSTRUCTIONS:**
+1. Write ONE complete sentence only.
+2. Include all facts from the Content section.
+3. Follow the Style DNA constraints (length, punctuation, vocabulary).
+4. Use the Syntax Template's grammatical structure, not its content.
+5. Apply the transition guidance appropriately.
+6. Do NOT create run-on sentences or fragments.
+7. Output ONLY the sentence text, no explanation."""
+
+        user_prompt = f"""{context_section}{content_section}
+
+{style_dna_section}**ROLE:** {node.role}
+
+**TRANSITION:** {transition_guidance}
+
+{syntax_template_section}{state_constraints}{lexical_diversity_section}**TASK:**
+Write a single sentence that:
+- Contains all the facts from the Content section above
+- Follows the Style DNA constraints (length: ~{node.target_length} words, perspective, punctuation, vocabulary)
+- Uses the Syntax Template's grammatical structure (if provided) but with YOUR content
+- Applies the transition guidance appropriately
+- Respects all negative constraints (forbidden openers/phrases/endings)
+
+**OUTPUT:** Return ONLY the sentence text, no explanation or meta-commentary."""
+
+        # ====================================================================
+        # Call LLM
+        # ====================================================================
+        try:
+            response = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                require_json=False,
+                temperature=0.3,
+                max_tokens=min(node.target_length * 2, 200)  # Cap at 200
+            )
+
+            # Clean response
+            sentence = self._strip_markdown_code_blocks(response).strip()
+
+            # Validation: Check for broken endings
+            # Reject sentences ending with connectors that imply missing content
+            bad_endings = (
+                " to", " and", " but", " or", " of", " the", " a", " an", 
+                " in", " on", " at", " by", " for", " with", " from"
+            )
+            if sentence.lower().endswith(bad_endings):
+                if verbose:
+                    print(f"     ⚠ Rejected broken sentence (ends with connector): '{sentence}'")
+                return ""
+
+            # Validation: Suffix Check (The Repetition Guard)
+            if previous_text:
+                prev_words = previous_text.strip().split()
+                curr_words = sentence.strip().split()
+                # Check last 5 words
+                if len(prev_words) >= 5 and len(curr_words) >= 5:
+                    prev_suffix = " ".join(prev_words[-5:]).lower()
+                    curr_suffix = " ".join(curr_words[-5:]).lower()
+                    # Fuzzy match or exact match? Exact is fine for this specific bug.
+                    if prev_suffix == curr_suffix:
+                        if verbose:
+                            print(f"     ⚠ Rejected sentence (Suffix Repetition): '{sentence}'")
+                        return ""
+
+            # Validation: Check for length
+            if len(sentence) < 10:
+                if verbose:
+                    print(f"     ⚠ Rejected too short sentence: '{sentence}'")
+                return ""
+
+            # Enforce terminal punctuation
+            if sentence and not sentence.endswith(('.', '!', '?', '"', "'")):
+                sentence += '.'
+
+            if verbose:
+                print(f"     ✓ Generated sentence for {node.id}: {sentence[:80]}...")
+
+            return sentence
+
+        except Exception as e:
+            if verbose:
+                print(f"     ⚠ Sentence generation failed: {e}")
+            return ""
 
     def _extract_candidates_from_results(self, results: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Extract candidate dictionaries from ChromaDB query results.

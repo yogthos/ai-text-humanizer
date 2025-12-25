@@ -35,12 +35,15 @@ class GlobalStyleTracker:
         self.phrase_history: Deque[str] = collections.deque(maxlen=self.history_window)
         self.connector_history: Deque[str] = collections.deque(maxlen=self.history_window * 3)  # Track more connectors
         self.structure_history: Deque[str] = collections.deque(maxlen=self.history_window)
+        # Key phrases (noun phrases, proper nouns) to prevent repetition
+        self.key_phrases_history: Deque[str] = collections.deque(maxlen=self.history_window * 2)  # Track more phrases
 
-        # Load NLP for connector extraction (lightweight usage)
+        # Load NLP for connector extraction and phrase extraction (lightweight usage)
         self.nlp = None
         if SPACY_AVAILABLE:
             try:
-                self.nlp = spacy.load("en_core_web_sm", disable=["ner", "parser"])
+                # Enable NER for proper noun detection, but disable parser for speed
+                self.nlp = spacy.load("en_core_web_sm", disable=["parser"])
             except (OSError, IOError):
                 # spaCy model not available, will use fallback
                 self.nlp = None
@@ -50,13 +53,15 @@ class GlobalStyleTracker:
         self.phrase_history.clear()
         self.connector_history.clear()
         self.structure_history.clear()
+        self.key_phrases_history.clear()
 
     def register_usage(
         self,
         text: str,
         connectors: Optional[List[str]] = None,
         structure: Optional[str] = None,
-        opener: Optional[str] = None
+        opener: Optional[str] = None,
+        key_phrases: Optional[List[str]] = None
     ):
         """
         Register a generated sentence's style features into the history.
@@ -66,6 +71,7 @@ class GlobalStyleTracker:
             connectors: List of connectors used (if None, will extract from text)
             structure: Logical signature (CONTRAST, DEFINITION, etc.)
             opener: Opening phrase (if None, will extract from text)
+            key_phrases: List of key phrases to register (if None, will extract from text)
         """
         if not self.enabled:
             return
@@ -89,6 +95,25 @@ class GlobalStyleTracker:
         if connectors:
             for c in connectors:
                 self.connector_history.append(c.lower().strip())
+
+        # 4. Register Key Phrases (noun phrases, proper nouns)
+        if key_phrases is None and text:
+            try:
+                key_phrases = self._extract_key_phrases(text)
+            except Exception:
+                # If extraction fails, continue without key phrases
+                key_phrases = []
+
+        if key_phrases:
+            for phrase in key_phrases:
+                if phrase:  # Skip None or empty phrases
+                    try:
+                        normalized = self._normalize_phrase(phrase)
+                        if normalized:  # Only add non-empty normalized phrases
+                            self.key_phrases_history.append(normalized)
+                    except Exception:
+                        # Skip phrases that fail normalization
+                        continue
 
     def filter_available_connectors(self, candidates: List[str], signature: str) -> List[str]:
         """
@@ -127,6 +152,16 @@ class GlobalStyleTracker:
         if not self.enabled:
             return []
         return list(set(self.phrase_history))
+
+    def get_forbidden_phrases(self) -> List[str]:
+        """Return list of recently used key phrases (normalized).
+
+        Returns:
+            Unique list of recently used key phrases (normalized for variation matching)
+        """
+        if not self.enabled:
+            return []
+        return list(set(self.key_phrases_history))
 
     def _extract_opener(self, text: str) -> str:
         """
@@ -196,4 +231,162 @@ class GlobalStyleTracker:
                 found.append(conn)
 
         return found
+
+    def _extract_key_phrases(self, text: str) -> List[str]:
+        """
+        Extract key phrases (noun phrases, proper nouns) from text using spaCy.
+        Handles variations by normalizing phrases.
+
+        Args:
+            text: Text to extract phrases from
+
+        Returns:
+            List of key phrases (normalized)
+        """
+        if text is None or not text or not self.nlp:
+            # Fallback: extract capitalized phrases and common noun patterns
+            return self._extract_key_phrases_fallback(text or "")
+
+        try:
+            doc = self.nlp(text)
+            phrases = []
+
+            # 1. Extract proper nouns (PROPN) - these are often important concepts
+            proper_nouns = []
+            for token in doc:
+                if token.pos_ == "PROPN":
+                    proper_nouns.append(token.text)
+                elif token.ent_type_ and token.ent_type_ != "":  # Named entities
+                    proper_nouns.append(token.text)
+
+            # 2. Extract noun phrases (compound nouns, noun chunks)
+            noun_chunks = []
+            for chunk in doc.noun_chunks:
+                # Filter out very short chunks (1-2 words) unless they're proper nouns
+                if len(chunk) >= 2 or any(t.pos_ == "PROPN" for t in chunk):
+                    # Get the root noun and its modifiers
+                    chunk_text = chunk.text.strip()
+                    if len(chunk_text) > 2:  # Ignore very short chunks
+                        noun_chunks.append(chunk_text)
+
+            # 3. Extract important multi-word phrases (proper noun sequences)
+            # Look for sequences of proper nouns or capitalized words
+            proper_noun_phrases = []
+            i = 0
+            while i < len(doc):
+                if doc[i].pos_ == "PROPN" or (doc[i].is_title and doc[i].pos_ in ["NOUN", "PROPN"]):
+                    phrase_words = [doc[i].text]
+                    i += 1
+                    # Collect consecutive proper nouns/title words
+                    while i < len(doc) and (doc[i].pos_ == "PROPN" or
+                                          (doc[i].is_title and doc[i].pos_ in ["NOUN", "PROPN"]) or
+                                          (doc[i].pos_ == "DET" and i < len(doc) - 1)):
+                        if doc[i].pos_ == "DET":
+                            phrase_words.append(doc[i].text)
+                            i += 1
+                            if i < len(doc) and (doc[i].pos_ == "PROPN" or doc[i].is_title):
+                                phrase_words.append(doc[i].text)
+                                i += 1
+                            break
+                        else:
+                            phrase_words.append(doc[i].text)
+                            i += 1
+                    if len(phrase_words) >= 2:  # Multi-word proper noun phrases
+                        proper_noun_phrases.append(" ".join(phrase_words))
+                    continue
+                i += 1
+
+            # Combine all phrases
+            all_phrases = proper_noun_phrases + noun_chunks
+            # Add individual important proper nouns if they're significant
+            for pn in proper_nouns:
+                if len(pn) > 3:  # Only significant proper nouns
+                    all_phrases.append(pn)
+
+            # Normalize and deduplicate
+            normalized_phrases = []
+            seen = set()
+            for phrase in all_phrases:
+                normalized = self._normalize_phrase(phrase)
+                if normalized and normalized not in seen:
+                    normalized_phrases.append(normalized)
+                    seen.add(normalized)
+
+            return normalized_phrases
+
+        except Exception as e:
+            # Fallback if spaCy processing fails
+            return self._extract_key_phrases_fallback(text)
+
+    def _extract_key_phrases_fallback(self, text: str) -> List[str]:
+        """
+        Fallback method to extract key phrases without spaCy.
+        Uses regex to find capitalized phrases and proper noun patterns.
+
+        Args:
+            text: Text to extract phrases from
+
+        Returns:
+            List of key phrases (normalized)
+        """
+        if not text:
+            return []
+
+        phrases = []
+
+        # Pattern 1: Capitalized multi-word phrases (likely proper nouns or important concepts)
+        # Match sequences of capitalized words
+        pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b'
+        matches = re.findall(pattern, text)
+        for match in matches:
+            if len(match.split()) >= 2:  # Multi-word phrases
+                phrases.append(match)
+
+        # Pattern 2: Quoted phrases (often important concepts)
+        quoted_pattern = r'"([^"]+)"'
+        quoted = re.findall(quoted_pattern, text)
+        phrases.extend(quoted)
+
+        # Normalize and deduplicate
+        normalized_phrases = []
+        seen = set()
+        for phrase in phrases:
+            normalized = self._normalize_phrase(phrase)
+            if normalized and normalized not in seen:
+                normalized_phrases.append(normalized)
+                seen.add(normalized)
+
+        return normalized_phrases
+
+    def _normalize_phrase(self, phrase: str) -> str:
+        """
+        Normalize a phrase to handle variations (case, punctuation, articles).
+
+        Args:
+            phrase: Phrase to normalize
+
+        Returns:
+            Normalized phrase (lowercase, punctuation removed, articles handled)
+        """
+        if not phrase:
+            return ""
+
+        # Convert to lowercase
+        normalized = phrase.lower().strip()
+
+        # Remove leading articles (a, an, the) for better matching
+        # e.g., "the Dialectical Materialism" -> "dialectical materialism"
+        normalized = re.sub(r'^(a|an|the)\s+', '', normalized)
+
+        # Remove punctuation but keep spaces
+        normalized = re.sub(r'[^\w\s]', '', normalized)
+
+        # Normalize whitespace
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+        # Filter out very short phrases (less than 3 characters)
+        if len(normalized) < 3:
+            return ""
+
+        return normalized
 
