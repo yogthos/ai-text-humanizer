@@ -173,7 +173,7 @@ class StyleTranslator:
 
         # Initialize graph-based matching components
         self.input_mapper = InputLogicMapper(self.llm_provider)
-        self.graph_matcher = TopologicalMatcher(config_path=config_path)
+        self.graph_matcher = TopologicalMatcher(config_path=config_path, llm_provider=self.llm_provider)
         self.fracturer = SemanticFracturer(self.llm_provider)
 
         # Initialize graph telemetry logger
@@ -474,6 +474,76 @@ class StyleTranslator:
         union = len(tokens1 | tokens2)
 
         return intersection / union if union > 0 else 0.0
+
+    def _deduplicate_propositions(self, propositions: List[str]) -> List[str]:
+        """Deduplicate propositions by removing similar/redundant ones.
+
+        Args:
+            propositions: List of proposition strings.
+
+        Returns:
+            Deduplicated list of propositions.
+        """
+        if len(propositions) <= 1:
+            return propositions
+
+        from difflib import SequenceMatcher
+        import re
+
+        # Extract key words (proper nouns and verbs) from a proposition
+        def extract_key_words(text: str) -> set:
+            """Extract proper nouns and verbs as key words."""
+            # Simple heuristic: proper nouns (capitalized words) and common verbs
+            words = re.findall(r'\b[A-Z][a-z]+\b|\b\w+ed\b|\b\w+ing\b|\b(is|are|was|were|has|have|had|do|does|did|make|made|create|created|coined|coined)\b', text.lower())
+            return set(words)
+
+        deduplicated = []
+        seen_indices = set()
+
+        for i, prop1 in enumerate(propositions):
+            if i in seen_indices:
+                continue
+
+            is_duplicate = False
+            for j, prop2 in enumerate(propositions[i+1:], start=i+1):
+                if j in seen_indices:
+                    continue
+
+                # Calculate similarity using SequenceMatcher
+                similarity = SequenceMatcher(None, prop1.lower(), prop2.lower()).ratio()
+
+                # Check if >80% similar
+                if similarity > 0.8:
+                    # Remove the shorter one
+                    if len(prop1) < len(prop2):
+                        seen_indices.add(i)
+                        is_duplicate = True
+                        break
+                    else:
+                        seen_indices.add(j)
+                        continue
+
+                # Also check for shared key proper nouns + verbs
+                key_words1 = extract_key_words(prop1)
+                key_words2 = extract_key_words(prop2)
+
+                if key_words1 and key_words2:
+                    shared_key_words = key_words1 & key_words2
+                    # If they share significant key words and are somewhat similar
+                    if len(shared_key_words) >= 2 and similarity > 0.5:
+                        # Remove the shorter one
+                        if len(prop1) < len(prop2):
+                            seen_indices.add(i)
+                            is_duplicate = True
+                            break
+                        else:
+                            seen_indices.add(j)
+                            continue
+
+            if not is_duplicate:
+                deduplicated.append(prop1)
+
+        return deduplicated
 
     def _detect_voice(self, text: str) -> str:
         """Detect the voice/perspective of a text (1st, 2nd, 3rd person, or neutral).
@@ -4352,7 +4422,8 @@ Text: {text}"""
         blueprint: Dict,
         input_node_map: Dict[str, str],
         author_name: str,
-        verbose: bool = False
+        verbose: bool = False,
+        previous_sentence: Optional[str] = None
     ) -> str:
         """
         Generate text by traversing the style graph structure and filling it with mapped content.
@@ -4494,25 +4565,58 @@ Text: {text}"""
             # Prepare input propositions list
             input_node_list = list(input_node_map.values())
 
+            # Build content mapping string for clarity
+            content_mapping_str = "\n".join([
+                f"  [{node}]: {content}" if content else f"  [{node}]: [UNUSED - PRUNE THIS]"
+                for node, content in resolved_content.items()
+            ])
+
+            # Build previous sentence context if available
+            previous_context = ""
+            if previous_sentence:
+                previous_context = f"""**PREVIOUS SENTENCE:** '{previous_sentence}'
+**CONSTRAINT:** Do not repeat facts or names that were just mentioned in the previous sentence. Ensure a smooth transition.
+
+"""
+
             user_prompt = f"""**STYLE BLUEPRINT (Rhythm Target):**
 "{processed_skeleton}"
 
 **INTENT:** {intent}
 (This blueprint has rhetorical intent: {intent}. Match this intent in your output.)
 
+{previous_context}**CONTENT MAPPING:**
+{content_mapping_str}
+
 **INPUT PROPOSITIONS (Content):**
 {json.dumps(input_node_list, indent=2)}
 
 **INSTRUCTIONS:**
 1. **Mimic the Structure:** Write a single sentence (or linked sentences) that follows the grammatical depth and clause structure of the Blueprint.
-2. **Adapt Connectors:**
+2. **ADAPTIVE BRIDGE REPAIR (CRITICAL):**
+   - **Analyze Connectivity:** Look for words left "dangling" by missing content (e.g., "leads to", "develops into", "because of", "which is", "transforms into").
+   - **Repair Strategy:**
+     - **Option A (Adapt Verb):** If the skeleton says "X transforms into [MISSING]" or "X develops into [MISSING]", and you have content for X, change the verb to make X a complete thought (e.g., "X transforms into [MISSING]" -> "X evolves" or "X exists" or "X stands still").
+     - **Option B (Prune Connector):** If the connector is purely transitional (e.g., "On the other hand, [MISSING]" or "In addition, [MISSING]"), delete the connector entirely.
+   - **Grammar Integrity:** Ensure every sentence has a valid Subject-Verb-Object structure. Do NOT output fragments like "develops into ," or "leads to ,".
+   - **Example:**
+     - *Skeleton:* "The theory develops into [A], while [B] remains."
+     - *Input:* A is missing. B="Practice".
+     - *Bad Output:* "The theory develops into, while Practice remains."
+     - *Good Output:* "The theory stands still, while Practice remains." (Adapted verb)
+3. **PRUNING IS MANDATORY:**
+   - If a Graph Node (e.g., [P2], [CLAIM]) is marked as [UNUSED] or has no content in the Content Mapping, you MUST delete ALL structural words associated with it.
+   - Do NOT leave dangling connectors like 'and of', 'which is', 'that is', 'in and', 'or of' if the content they introduce is missing.
+   - Remove orphaned prepositions, conjunctions, and relative clauses that reference empty nodes.
+   - *Example:* If Blueprint has "[ROOT] is [CLAIM] and [QUALIFIER]" but [QUALIFIER] is UNUSED, output "[ROOT] is [CLAIM]" (remove "and").
+4. **Adapt Connectors:**
    - If the Blueprint's connectors (e.g., 'At such a time') fit the content, USE THEM.
    - If they contradict the content (e.g., Blueprint is Temporal, Content is Definition), **REPLACE THEM** with stylistically similar connectors that fit.
    - *Example:* Blueprint 'After the war...', Input 'The phone is...', Output 'In this context...' (Keeps the introductory prepositional phrase structure).
-3. **Merge Repetition:** Combine repetitive subjects naturally (e.g. 'The car is red and the car is fast' -> 'The car is red and fast').
-4. **Tone:** Maintain the formality and density of the Blueprint.
-5. **Author Voice:** Follow the Style Traits provided above. Match the voice and style characteristics of {author_name} as described.
-6. **Intent Alignment:** Ensure your output matches the rhetorical intent ({intent}) of the blueprint.
+5. **Merge Repetition:** Combine repetitive subjects naturally (e.g. 'The car is red and the car is fast' -> 'The car is red and fast').
+6. **Tone:** Maintain the formality and density of the Blueprint.
+7. **Author Voice:** Follow the Style Traits provided above. Match the voice and style characteristics of {author_name} as described.
+8. **Intent Alignment:** Ensure your output matches the rhetorical intent ({intent}) of the blueprint.
 
 Generate the text:"""
 
@@ -4524,13 +4628,22 @@ Generate the text:"""
 **Target Voice:** {author_name}
 **Style Traits:** {style_description}
 **Task:** Generate text by traversing the provided logical graph, matching the Voice of the Author."""
+
+            # Build previous sentence context if available
+            previous_context = ""
+            if previous_sentence:
+                previous_context = f"""**PREVIOUS SENTENCE:** '{previous_sentence}'
+**CONSTRAINT:** Do not repeat facts or names that were just mentioned in the previous sentence. Ensure a smooth transition.
+
+"""
+
             user_prompt = f"""Blueprint Graph (Mermaid):
 {style_mermaid}
 
 **INTENT:** {intent}
 (This blueprint has rhetorical intent: {intent}. Match this intent in your output.)
 
-Input Content (Style Node -> Actual Text):
+{previous_context}Input Content (Style Node -> Actual Text):
 {json.dumps(resolved_content, indent=2)}
 
 Instructions:
@@ -4601,6 +4714,11 @@ Generate text matching the author's voice:"""
             if verbose:
                 print(f"  Extracted {len(propositions)} propositions")
 
+            # Step 1.5: Deduplicate propositions before fracturing
+            propositions = self._deduplicate_propositions(propositions)
+            if verbose:
+                print(f"  After deduplication: {len(propositions)} propositions")
+
             # Step 2: Dynamic Fracturing - group propositions into logical clusters
             graph_config = self.config.get("graph_pipeline", {})
             fracturing_config = graph_config.get("fracturing", {})
@@ -4631,37 +4749,68 @@ Generate text matching the author's voice:"""
                     if verbose:
                         print(f"  Processing chunk {chunk_idx + 1}/{len(chunks)}: {len(chunk)} propositions")
 
-                    # Map propositions to input graph
+                    # Use Architect pattern: synthesize blueprint directly from propositions
+                    if verbose:
+                        print(f"     Input propositions ({len(chunk)}):")
+                        for i, prop in enumerate(chunk[:3]):  # Show first 3
+                            print(f"       P{i}: {prop[:60]}...")
+                        if len(chunk) > 3:
+                            print(f"       ... and {len(chunk) - 3} more")
+
+                    # Get intent from input mapper (for intent classification)
                     input_graph = self.input_mapper.map_propositions(chunk)
-                    if input_graph is None:
+                    input_intent = 'ARGUMENT'  # Default
+                    if input_graph:
+                        input_intent = input_graph.get('intent', 'ARGUMENT')
+
+                    # Synthesize blueprint using Architect pattern
+                    try:
+                        blueprint = self.graph_matcher.synthesize_match(
+                            chunk,
+                            input_intent,
+                            document_context,
+                            verbose=verbose
+                        )
+                    except Exception as e:
                         if verbose:
-                            print(f"  ⚠ Graph mapping failed for chunk {chunk_idx + 1}, using fallback")
-                        # Fallback for this chunk
+                            print(f"  ⚠ Blueprint synthesis failed for chunk {chunk_idx + 1}: {e}, using fallback")
                         fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
                         if fallback_text:
                             generated_sentences.append(fallback_text)
                         continue
 
-                    # Match to style graph
-                    blueprint = self.graph_matcher.get_best_match(input_graph, document_context)
                     if not blueprint:
                         if verbose:
-                            print(f"  ⚠ No style graph match for chunk {chunk_idx + 1}, using fallback")
+                            print(f"  ⚠ No blueprint synthesized for chunk {chunk_idx + 1}, using fallback")
                         fallback_text = self._fallback_simple_generation_chunk(chunk, author_name, verbose)
                         if fallback_text:
                             generated_sentences.append(fallback_text)
                         continue
+
+                    if verbose:
+                        style_meta = blueprint.get('style_metadata', {})
+                        print(f"     ✓ Synthesized blueprint:")
+                        print(f"        Intent: {style_meta.get('intent', 'UNKNOWN')}")
+                        skeleton = style_meta.get('skeleton', '')
+                        if skeleton:
+                            print(f"        Skeleton: {skeleton[:80]}...")
+
+                    # Create input_node_map from propositions (P0->proposition text)
+                    input_node_map = {f'P{i}': prop for i, prop in enumerate(chunk)}
 
                     # Render from graph
                     sentence = self._generate_from_graph(
                         blueprint,
-                        input_graph['node_map'],
+                        input_node_map,
                         author_name,
-                        verbose
+                        verbose,
+                        previous_sentence=last_generated_sentence
                     )
 
                     if sentence:
                         generated_sentences.append(sentence)
+                        last_generated_sentence = sentence
+                        last_generated_sentence = sentence
                         if verbose:
                             print(f"  ✓ Generated sentence from graph: {sentence[:80]}...")
 
@@ -6676,6 +6825,78 @@ Output only the corrected sentence.
         text = clean_generated_text(text)
 
         return text
+
+    def _repair_vocabulary(self, text: str, violations: List[Tuple[str, str]], verbose: bool = False) -> str:
+        """Repair vocabulary violations by removing forbidden words while preserving structure.
+
+        Args:
+            text: Text with vocabulary violations
+            violations: List of (word, reason) tuples for each violation
+            verbose: Enable verbose logging
+
+        Returns:
+            Repaired text with forbidden words removed/replaced
+        """
+        if not text or not violations:
+            return text
+
+        # Extract forbidden words
+        forbidden_words = [word for word, _ in violations]
+
+        if verbose:
+            print(f"  🔧 Repairing vocabulary violations: {forbidden_words}")
+
+        # Use LLM to rewrite the sentence, removing forbidden words while keeping structure
+        system_prompt = """You are a Text Repairer. Your task is to remove forbidden words from text while preserving the exact sentence structure and meaning."""
+
+        user_prompt = f"""Rewrite this sentence to remove these forbidden words: {', '.join(forbidden_words)}
+
+**CRITICAL RULES:**
+1. Keep the structure exactly the same (same clauses, same connectors, same punctuation).
+2. Replace forbidden words with synonyms or rephrase only the specific phrases containing them.
+3. Do NOT change the sentence structure, grammar, or logical flow.
+4. Do NOT add new content or remove non-forbidden content.
+
+**Original Text:**
+{text}
+
+**Rewritten Text (with forbidden words removed):**"""
+
+        try:
+            response = self.llm_provider.call(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model_type="editor",
+                temperature=0.2,
+                max_tokens=500
+            )
+
+            # Clean the response
+            repaired = clean_generated_text(response.strip())
+
+            # Verify forbidden words are gone
+            remaining_violations = [word for word in forbidden_words if word.lower() in repaired.lower()]
+            if remaining_violations:
+                if verbose:
+                    print(f"  ⚠ Some forbidden words still present: {remaining_violations}")
+                # Fallback: simple word replacement
+                for word in remaining_violations:
+                    # Try to remove the word and fix grammar
+                    repaired = re.sub(rf'\b{re.escape(word)}\b\s*', '', repaired, flags=re.IGNORECASE)
+                # Clean up double spaces
+                repaired = re.sub(r'\s+', ' ', repaired).strip()
+
+            return repaired
+
+        except Exception as e:
+            if verbose:
+                print(f"  ⚠ Vocabulary repair failed: {e}, using simple word removal")
+            # Fallback: simple word removal
+            repaired = text
+            for word, _ in violations:
+                repaired = re.sub(rf'\b{re.escape(word)}\b\s*', '', repaired, flags=re.IGNORECASE)
+            repaired = re.sub(r'\s+', ' ', repaired).strip()
+            return repaired
 
     def _translate_paragraph_holistic(
         self,

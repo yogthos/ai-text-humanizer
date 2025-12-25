@@ -571,24 +571,17 @@ def process_text(
             vocab_retry_count = 0
             max_vocab_retries = max_retries_before_force if max_retries_before_force is not None else 1
 
-            # If violations found and auto-regenerate enabled, trigger regeneration
-            if violations and auto_regenerate and vocab_retry_count < max_vocab_retries:
+            # If violations found, repair the text instead of falling back to statistical generation
+            if violations:
                 if verbose:
-                    print(f"  🔄 Regenerating paragraph due to vocabulary violations (attempt {vocab_retry_count + 1}/{max_vocab_retries})...")
-                # Regenerate with stricter constraints (vocabulary_budget will have updated forbidden list)
-                generated_paragraph, arch_id, compliance_score = translator.translate_paragraph_statistical(
-                    paragraph,
-                    author_name,
-                    prev_archetype_id=prev_archetype_id,
-                    perspective=perspective,
-                    verbose=verbose,
-                    vocabulary_budget=vocabulary_budget,
-                    global_context=global_context
+                    print(f"  🔧 Repairing vocabulary violations (preserving graph structure)...")
+                # Use vocabulary repair to fix violations while preserving graph structure
+                generated_paragraph = translator._repair_vocabulary(
+                    generated_paragraph,
+                    violations,
+                    verbose=verbose
                 )
-                prev_archetype_id = arch_id
-                vocab_retry_count += 1
-
-                # Re-check violations after regeneration
+                # Re-check violations after repair
                 found_words = vocabulary_budget.find_restricted_words(generated_paragraph)
                 violations = []
                 for word, position in found_words:
@@ -597,7 +590,7 @@ def process_text(
                     if not allowed:
                         violations.append((word, reason))
                         if verbose:
-                            print(f"  ⚠ Vocabulary violation persists: '{word}' - {reason}")
+                            print(f"  ⚠ Vocabulary violation persists after repair: '{word}' - {reason}")
 
             # Apply programmatic cleanup (sledgehammer) if violations persist and enabled
             # Apply if: force_programmatic_fix is enabled AND (violations exist AND (retries exhausted OR auto-regenerate disabled))

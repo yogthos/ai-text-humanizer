@@ -65,10 +65,11 @@ class InputLogicMapper:
 {propositions_text}
 
 Task:
-1. Create a Mermaid graph using IDs P0, P1, P2... corresponding to the list index.
-2. Label edges with logic (cause, contrast, support).
-3. Write a 1-sentence description of the flow using rhetorical topology terms (causal, contrastive, conditional, enumeration, concession, definition).
-4. Analyze the propositions. What is the primary rhetorical intent? Choose one: `DEFINITION`, `ARGUMENT`, `NARRATIVE`, `INTERROGATIVE`, `IMPERATIVE`.
+1. **CRITICAL: De-duplicate facts.** If the text repeats an idea (e.g., 'He made it' and 'It was created by him'), extract it ONLY ONCE. Remove redundant propositions before creating the graph.
+2. Create a Mermaid graph using IDs P0, P1, P2... corresponding to the list index (after deduplication).
+3. Label edges with logic (cause, contrast, support).
+4. Write a 1-sentence description of the flow using rhetorical topology terms (causal, contrastive, conditional, enumeration, concession, definition).
+5. Analyze the propositions. What is the primary rhetorical intent? Choose one: `DEFINITION`, `ARGUMENT`, `NARRATIVE`, `INTERROGATIVE`, `IMPERATIVE`.
    - `DEFINITION`: Explaining what something is (e.g., "The phone is a tool.").
    - `ARGUMENT`: Persuading or debating (e.g., "Therefore, we must reject...").
    - `NARRATIVE`: Telling a sequence of events (e.g., "At that time, the army moved...").

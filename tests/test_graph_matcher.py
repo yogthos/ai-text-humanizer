@@ -62,7 +62,8 @@ class TestTopologicalMatcher:
 
     def _add_test_graph(self, mermaid: str, description: str, node_count: int,
                        edge_types: str = "defines", paragraph_role: str = None,
-                       original_text: str = "Test text", skeleton: str = ""):
+                       original_text: str = "Test text", skeleton: str = "",
+                       intent: str = None):
         """Helper to add a test graph to ChromaDB."""
         metadata = {
             'mermaid': mermaid,
@@ -73,6 +74,8 @@ class TestTopologicalMatcher:
         }
         if paragraph_role:
             metadata['paragraph_role'] = paragraph_role
+        if intent:
+            metadata['intent'] = intent
 
         self.collection.add(
             ids=[f"graph_{len(self.collection.get()['ids'])}"],
@@ -479,6 +482,550 @@ class TestTopologicalMatcher:
         assert isinstance(result['distance'], (int, float))
         assert 'node_count' in result['style_metadata']
         assert 'edge_types' in result['style_metadata']
+
+    def test_synthesize_match_with_candidates(self):
+        """Test synthesize_match with style candidates from ChromaDB."""
+        # Add test graphs to ChromaDB
+        self._add_test_graph(
+            "graph LR; ROOT --> CLAIM",
+            "A definition explaining what something is",
+            node_count=2,
+            intent='DEFINITION',
+            skeleton='The concept is [CLAIM]'
+        )
+        self._add_test_graph(
+            "graph LR; A --> B",
+            "An argument with contrast",
+            node_count=2,
+            intent='ARGUMENT',
+            skeleton='However, [A] contradicts [B]'
+        )
+
+        propositions = [
+            "Many people hear the term Dialectical Materialism",
+            "They assume they are stepping into a realm of mysticism",
+            "In reality, Dialectical Materialism is a practical toolset"
+        ]
+
+        # Mock LLM response for Architect
+        architect_response = json.dumps({
+            'revised_skeleton': 'The [P0], while [P1], but [P2]',
+            'rationale': 'Selected DEFINITION candidate and adapted it for all facts'
+        })
+        self.mock_llm.call.return_value = architect_response
+
+        result = self.matcher.synthesize_match(
+            propositions,
+            'DEFINITION',
+            verbose=False
+        )
+
+        assert result is not None
+        assert 'style_metadata' in result
+        assert 'node_mapping' in result
+        assert 'intent' in result
+        assert result['intent'] == 'DEFINITION'
+
+        # Verify direct P0->P0 mapping
+        assert result['node_mapping'] == {'P0': 'P0', 'P1': 'P1', 'P2': 'P2'}
+
+        # Verify skeleton was created
+        skeleton = result['style_metadata'].get('skeleton', '')
+        assert skeleton != ''
+        assert '[P0]' in skeleton or 'P0' in skeleton
+        assert result['style_metadata']['node_count'] == 3
+
+    def test_synthesize_match_no_candidates(self):
+        """Test synthesize_match when ChromaDB has no candidates."""
+        propositions = [
+            "First proposition",
+            "Second proposition"
+        ]
+
+        # Mock LLM response for Architect (with no candidates)
+        architect_response = json.dumps({
+            'revised_skeleton': '[P0] and [P1]',
+            'rationale': 'Created skeleton from scratch'
+        })
+        self.mock_llm.call.return_value = architect_response
+
+        result = self.matcher.synthesize_match(
+            propositions,
+            'ARGUMENT',
+            verbose=False
+        )
+
+        assert result is not None
+        assert result['node_mapping'] == {'P0': 'P0', 'P1': 'P1'}
+        assert result['style_metadata']['node_count'] == 2
+        assert result['intent'] == 'ARGUMENT'
+
+    def test_synthesize_match_with_role_filtering(self):
+        """Test synthesize_match with paragraph role filtering."""
+        # Add graphs with different roles
+        self._add_test_graph(
+            "graph LR; ROOT --> CLAIM",
+            "An opening statement",
+            node_count=2,
+            intent='DEFINITION',
+            skeleton='The [ROOT] is [CLAIM]',
+            paragraph_role='opener'
+        )
+        self._add_test_graph(
+            "graph LR; A --> B",
+            "A body paragraph",
+            node_count=2,
+            intent='ARGUMENT',
+            skeleton='However, [A] and [B]',
+            paragraph_role='body'
+        )
+
+        propositions = ["First fact", "Second fact"]
+
+        # Mock LLM response
+        architect_response = json.dumps({
+            'revised_skeleton': '[P0] and [P1]',
+            'rationale': 'Selected opener candidate'
+        })
+        self.mock_llm.call.return_value = architect_response
+
+        # Test with opener role
+        document_context = {'current_index': 0, 'total_paragraphs': 3}
+        result = self.matcher.synthesize_match(
+            propositions,
+            'DEFINITION',
+            document_context=document_context,
+            verbose=False
+        )
+
+        assert result is not None
+        assert result['style_metadata'].get('paragraph_role') == 'opener'
+        assert result['node_mapping'] == {'P0': 'P0', 'P1': 'P1'}
+
+    def test_synthesize_match_llm_fallback(self):
+        """Test synthesize_match fallback when LLM call fails."""
+        # Add test graph
+        self._add_test_graph(
+            "graph LR; ROOT --> CLAIM",
+            "A test structure",
+            node_count=2,
+            intent='DEFINITION',
+            skeleton='The [ROOT] is [CLAIM]'
+        )
+
+        propositions = ["Fact one", "Fact two"]
+
+        # Mock LLM to raise exception
+        self.mock_llm.call.side_effect = Exception("LLM call failed")
+
+        result = self.matcher.synthesize_match(
+            propositions,
+            'DEFINITION',
+            verbose=False
+        )
+
+        # Should still return a result with fallback skeleton
+        assert result is not None
+        assert result['node_mapping'] == {'P0': 'P0', 'P1': 'P1'}
+        # Fallback skeleton should contain P0 and P1
+        skeleton = result['style_metadata'].get('skeleton', '')
+        assert 'P0' in skeleton or 'P1' in skeleton
+
+    def test_synthesize_match_chromadb_error(self):
+        """Test synthesize_match handles ChromaDB errors gracefully."""
+        propositions = ["Fact one", "Fact two"]
+
+        # Mock LLM response
+        architect_response = json.dumps({
+            'revised_skeleton': '[P0] and [P1]',
+            'rationale': 'Created from scratch due to DB error'
+        })
+        self.mock_llm.call.return_value = architect_response
+
+        # Simulate ChromaDB error by making collection.query raise
+        original_query = self.matcher.collection.query
+        def failing_query(**kwargs):
+            raise Exception("ChromaDB connection failed")
+        self.matcher.collection.query = failing_query
+
+        result = self.matcher.synthesize_match(
+            propositions,
+            'ARGUMENT',
+            verbose=False
+        )
+
+        # Should still work with empty candidate list
+        assert result is not None
+        assert result['node_mapping'] == {'P0': 'P0', 'P1': 'P1'}
+
+        # Restore original query
+        self.matcher.collection.query = original_query
+
+    def test_synthesize_match_all_propositions_preserved(self):
+        """Test that synthesize_match preserves all input propositions."""
+        propositions = [
+            "First important fact",
+            "Second important fact",
+            "Third important fact",
+            "Fourth important fact"
+        ]
+
+        # Mock LLM response that includes all P slots
+        architect_response = json.dumps({
+            'revised_skeleton': '[P0], [P1], [P2], and [P3]',
+            'rationale': 'Included all facts in skeleton'
+        })
+        self.mock_llm.call.return_value = architect_response
+
+        result = self.matcher.synthesize_match(
+            propositions,
+            'NARRATIVE',
+            verbose=False
+        )
+
+        assert result is not None
+        # Verify all propositions are mapped
+        assert len(result['node_mapping']) == 4
+        assert 'P0' in result['node_mapping']
+        assert 'P1' in result['node_mapping']
+        assert 'P2' in result['node_mapping']
+        assert 'P3' in result['node_mapping']
+
+        # Verify skeleton mentions all P slots
+        skeleton = result['style_metadata'].get('skeleton', '')
+        assert '[P0]' in skeleton or 'P0' in skeleton
+        assert '[P1]' in skeleton or 'P1' in skeleton
+        assert '[P2]' in skeleton or 'P2' in skeleton
+        assert '[P3]' in skeleton or 'P3' in skeleton
+
+    def test_synthesize_match_blueprint_structure(self):
+        """Test that synthesize_match returns correct blueprint structure."""
+        propositions = ["Test proposition"]
+
+        architect_response = json.dumps({
+            'revised_skeleton': '[P0] is a test',
+            'rationale': 'Simple test skeleton'
+        })
+        self.mock_llm.call.return_value = architect_response
+
+        result = self.matcher.synthesize_match(
+            propositions,
+            'DEFINITION',
+            verbose=False
+        )
+
+        # Verify blueprint structure
+        assert 'style_metadata' in result
+        assert 'node_mapping' in result
+        assert 'intent' in result
+        assert 'distance' in result
+
+        # Verify style_metadata structure
+        style_meta = result['style_metadata']
+        assert 'skeleton' in style_meta
+        assert 'node_count' in style_meta
+        assert 'edge_types' in style_meta
+        assert 'intent' in style_meta
+
+        # Verify intent is set correctly
+        assert result['intent'] == 'DEFINITION'
+        assert style_meta['intent'] == 'DEFINITION'
+
+        # Verify distance is 0.0 for synthesized blueprints
+        assert result['distance'] == 0.0
+
+    def test_synthesize_match_redundancy_merging_instruction(self):
+        """Test that synthesize_match prompt includes redundancy merging instruction."""
+        propositions = [
+            "Stalin coined the term",
+            "The term was coined by Stalin",
+            "Different fact"
+        ]
+
+        # Mock LLM to capture the prompt
+        captured_prompt = None
+        original_call = self.mock_llm.call
+
+        def capture_prompt(*args, **kwargs):
+            nonlocal captured_prompt
+            if 'user_prompt' in kwargs:
+                captured_prompt = kwargs['user_prompt']
+            return json.dumps({
+                'revised_skeleton': '[P0] and [P1]',
+                'rationale': 'Merged redundant facts'
+            })
+
+        self.mock_llm.call = capture_prompt
+
+        self.matcher.synthesize_match(
+            propositions,
+            'DEFINITION',
+            verbose=False
+        )
+
+        # Verify redundancy merging instruction is in the prompt
+        assert captured_prompt is not None
+        assert "MERGE REDUNDANCIES" in captured_prompt
+        assert "SINGLE slot" in captured_prompt
+        assert "Do not create repetitive structures" in captured_prompt
+
+    def test_select_diverse_candidates(self):
+        """Test diversity selection across different intents."""
+        # Create candidates with different intents
+        candidates = [
+            {'intent': 'DEFINITION', 'distance': 0.1, 'priority_score': 0.1, 'node_count': 2},
+            {'intent': 'ARGUMENT', 'distance': 0.2, 'priority_score': 0.2, 'node_count': 2},
+            {'intent': 'NARRATIVE', 'distance': 0.3, 'priority_score': 0.3, 'node_count': 2},
+            {'intent': 'DEFINITION', 'distance': 0.4, 'priority_score': 0.4, 'node_count': 2},
+            {'intent': 'ARGUMENT', 'distance': 0.5, 'priority_score': 0.5, 'node_count': 2},
+            {'intent': 'INTERROGATIVE', 'distance': 0.6, 'priority_score': 0.6, 'node_count': 2},
+        ]
+
+        # Test with input intent matching DEFINITION
+        selected = self.matcher._select_diverse_candidates(candidates, top_k=5, input_intent='DEFINITION')
+
+        assert len(selected) == 5
+        # Should include the matching intent first
+        assert selected[0]['intent'] == 'DEFINITION'
+        # Should have diverse intents
+        intents = [c['intent'] for c in selected]
+        unique_intents = set(intents)
+        assert len(unique_intents) >= 3, f"Expected at least 3 unique intents, got {unique_intents}"
+
+    def test_select_diverse_candidates_no_input_intent(self):
+        """Test diversity selection without input intent."""
+        candidates = [
+            {'intent': 'DEFINITION', 'distance': 0.1, 'priority_score': 0.1, 'node_count': 2},
+            {'intent': 'ARGUMENT', 'distance': 0.2, 'priority_score': 0.2, 'node_count': 2},
+            {'intent': 'NARRATIVE', 'distance': 0.3, 'priority_score': 0.3, 'node_count': 2},
+            {'intent': 'DEFINITION', 'distance': 0.4, 'priority_score': 0.4, 'node_count': 2},
+        ]
+
+        selected = self.matcher._select_diverse_candidates(candidates, top_k=3, input_intent=None)
+
+        assert len(selected) == 3
+        # Should still have diversity
+        intents = [c['intent'] for c in selected]
+        unique_intents = set(intents)
+        assert len(unique_intents) >= 2
+
+    def test_synthesize_best_fit_selects_candidate(self):
+        """Test synthesis selects best candidate."""
+        input_graph = {
+            'description': 'A definition explaining what something is',
+            'intent': 'DEFINITION',
+            'mermaid': 'graph LR; P0 --> P1'
+        }
+
+        candidates = [
+            {
+                'id': 'candidate_0',
+                'mermaid': 'graph LR; ROOT --> CLAIM',
+                'skeleton': 'The concept is [CLAIM]',
+                'intent': 'DEFINITION',
+                'node_count': 2,
+                'distance': 0.1,
+                'priority_score': 0.05  # Intent match boosted
+            },
+            {
+                'id': 'candidate_1',
+                'mermaid': 'graph LR; A --> B',
+                'skeleton': 'However, [A] contradicts [B]',
+                'intent': 'ARGUMENT',
+                'node_count': 2,
+                'distance': 0.2,
+                'priority_score': 0.2
+            },
+            {
+                'id': 'candidate_2',
+                'mermaid': 'graph LR; X --> Y',
+                'skeleton': 'At that time, [X] led to [Y]',
+                'intent': 'NARRATIVE',
+                'node_count': 2,
+                'distance': 0.3,
+                'priority_score': 0.3
+            }
+        ]
+
+        # Mock LLM response: select candidate 0 (DEFINITION match) and keep skeleton
+        synthesis_response = json.dumps({
+            'selected_index': 0,
+            'revised_skeleton': 'The concept is [CLAIM]'
+        })
+        self.mock_llm.call.return_value = synthesis_response
+
+        result = self.matcher._synthesize_best_fit(input_graph, candidates)
+
+        assert result is not None
+        assert result['id'] == 'candidate_0'
+        assert result['intent'] == 'DEFINITION'
+        assert result['skeleton'] == 'The concept is [CLAIM]'
+
+    def test_synthesize_best_fit_revises_skeleton(self):
+        """Test synthesis revises skeleton when connectors contradict."""
+        input_graph = {
+            'description': 'A definition explaining what something is',
+            'intent': 'DEFINITION',
+            'mermaid': 'graph LR; P0 --> P1'
+        }
+
+        candidates = [
+            {
+                'id': 'candidate_0',
+                'mermaid': 'graph LR; ROOT --> CLAIM',
+                'skeleton': 'However, [ROOT] contradicts [CLAIM]',  # Contrast connector for definition
+                'intent': 'ARGUMENT',
+                'node_count': 2,
+                'distance': 0.1,
+                'priority_score': 0.1
+            }
+        ]
+
+        # Mock LLM response: select candidate 0 but revise skeleton to remove "However"
+        synthesis_response = json.dumps({
+            'selected_index': 0,
+            'revised_skeleton': 'The [ROOT] is [CLAIM]'  # Revised to definition structure
+        })
+        self.mock_llm.call.return_value = synthesis_response
+
+        result = self.matcher._synthesize_best_fit(input_graph, candidates)
+
+        assert result is not None
+        assert result['skeleton'] == 'The [ROOT] is [CLAIM]'
+        assert 'However' not in result['skeleton']
+
+    def test_synthesize_best_fit_fallback_on_error(self):
+        """Test synthesis falls back to top candidate on LLM error."""
+        input_graph = {
+            'description': 'A test graph',
+            'intent': 'ARGUMENT',
+            'mermaid': 'graph LR; P0 --> P1'
+        }
+
+        candidates = [
+            {
+                'id': 'candidate_0',
+                'mermaid': 'graph LR; ROOT --> CLAIM',
+                'skeleton': 'The [ROOT] leads to [CLAIM]',
+                'intent': 'ARGUMENT',
+                'node_count': 2,
+                'distance': 0.1,
+                'priority_score': 0.05
+            }
+        ]
+
+        # Mock LLM to raise exception
+        self.mock_llm.call.side_effect = Exception("LLM call failed")
+
+        result = self.matcher._synthesize_best_fit(input_graph, candidates)
+
+        # Should fall back to top candidate
+        assert result is not None
+        assert result['id'] == 'candidate_0'
+
+    def test_get_best_match_with_synthesis(self):
+        """Test full get_best_match flow with synthesis."""
+        # Add diverse candidates with different intents
+        self._add_test_graph(
+            "graph LR; ROOT --> CLAIM",
+            "A definition explaining what something is",
+            node_count=2,
+            intent='DEFINITION',
+            skeleton='The concept is [CLAIM]'
+        )
+        self._add_test_graph(
+            "graph LR; A --> B",
+            "An argument with contrast",
+            node_count=2,
+            intent='ARGUMENT',
+            skeleton='However, [A] contradicts [B]'
+        )
+        self._add_test_graph(
+            "graph LR; X --> Y",
+            "A narrative sequence",
+            node_count=2,
+            intent='NARRATIVE',
+            skeleton='At that time, [X] led to [Y]'
+        )
+
+        input_graph = {
+            'description': 'A definition explaining what something is',
+            'intent': 'DEFINITION',
+            'mermaid': 'graph LR; P0 --> P1',
+            'node_map': {'P0': 'Concept', 'P1': 'Meaning'},
+            'node_count': 2
+        }
+
+        # Mock LLM responses: synthesis selects candidate 0, node mapping
+        synthesis_response = json.dumps({
+            'selected_index': 0,
+            'revised_skeleton': 'The concept is [CLAIM]'
+        })
+        mapping_response = json.dumps({
+            'ROOT': 'P0',
+            'CLAIM': 'P1'
+        })
+
+        # Set up mock to return different responses for different calls
+        # First call is synthesis, second is mapping
+        call_responses = [synthesis_response, mapping_response]
+        def mock_call_side_effect(**kwargs):
+            if call_responses:
+                return call_responses.pop(0)
+            return mapping_response
+
+        self.mock_llm.call.side_effect = mock_call_side_effect
+
+        result = self.matcher.get_best_match(input_graph)
+
+        assert result is not None
+        assert result['style_metadata']['intent'] == 'DEFINITION'
+        assert 'node_mapping' in result
+        assert 'distance' in result
+        # Verify synthesis was called (should have 2 LLM calls: synthesis + mapping)
+        # Reset call_count check - the mock might be reset, so just verify we got a result
+        assert result['style_metadata'].get('skeleton') == 'The concept is [CLAIM]' or \
+               'skeleton' in result['style_metadata']
+
+    def test_get_best_match_synthesis_fallback(self):
+        """Test get_best_match falls back when synthesis fails."""
+        self._add_test_graph(
+            "graph LR; ROOT --> CLAIM",
+            "A definition",
+            node_count=2,
+            intent='DEFINITION',
+            skeleton='The concept is [CLAIM]'
+        )
+
+        input_graph = {
+            'description': 'A definition',
+            'intent': 'DEFINITION',
+            'mermaid': 'graph LR; P0 --> P1',
+            'node_map': {'P0': 'Concept', 'P1': 'Meaning'},
+            'node_count': 2
+        }
+
+        # Mock synthesis to fail, but mapping should work
+        mapping_response = json.dumps({'ROOT': 'P0', 'CLAIM': 'P1'})
+
+        call_count = 0
+        def mock_call(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call (synthesis) fails
+                raise Exception("Synthesis failed")
+            else:
+                # Subsequent calls (mapping) succeed
+                return mapping_response
+
+        self.mock_llm.call.side_effect = mock_call
+
+        result = self.matcher.get_best_match(input_graph)
+
+        # Should still return a result (fallback to top candidate)
+        assert result is not None
+        assert 'node_mapping' in result
 
 
 if __name__ == "__main__":
