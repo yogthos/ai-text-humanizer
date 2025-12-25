@@ -10,7 +10,7 @@ import re
 import time
 import requests
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional, Set, TYPE_CHECKING
+from typing import List, Tuple, Dict, Optional, Set, TYPE_CHECKING, Any
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -178,6 +178,10 @@ class StyleTranslator:
         self.input_mapper = InputLogicMapper(self.llm_provider)
         self.graph_matcher = TopologicalMatcher(config_path=config_path, llm_provider=self.llm_provider)
         self.fracturer = SemanticFracturer(self.llm_provider)
+
+        # Initialize global style tracker for preventing repetitive phrasing
+        from src.processing.style_state import GlobalStyleTracker
+        self.style_tracker = GlobalStyleTracker(self.config)
 
         # Initialize graph telemetry logger
         graph_config = self.config.get("graph_pipeline", {})
@@ -477,6 +481,96 @@ class StyleTranslator:
         union = len(tokens1 | tokens2)
 
         return intersection / union if union > 0 else 0.0
+
+    def _extract_chunk_graph_from_global(
+        self,
+        global_graph: Dict[str, Any],
+        chunk: List[str],
+        all_propositions: List[str],
+        verbose: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Extract a subgraph from the global graph for a specific chunk.
+
+        Args:
+            global_graph: The global graph dictionary with 'mermaid' and 'node_map'
+            chunk: List of proposition strings in the current chunk
+            all_propositions: List of all propositions (to map chunk indices to global indices)
+            verbose: Enable verbose logging
+
+        Returns:
+            Dictionary with subgraph mermaid, node_map, and metadata, or None if extraction fails
+        """
+        if not global_graph or not global_graph.get('mermaid'):
+            return None
+
+        try:
+            import re
+            from src.generator.graph_matcher import TopologicalMatcher
+
+            # Find which global proposition indices correspond to this chunk
+            chunk_indices = []
+            for chunk_prop in chunk:
+                for i, global_prop in enumerate(all_propositions):
+                    if global_prop == chunk_prop:
+                        chunk_indices.append(i)
+                        break
+
+            if not chunk_indices:
+                if verbose:
+                    print(f"     ⚠ Could not map chunk propositions to global indices")
+                return None
+
+            # Parse global mermaid to extract edges
+            mermaid = global_graph.get('mermaid', '')
+            global_node_map = global_graph.get('node_map', {})
+
+            # Extract edges that connect nodes in this chunk
+            chunk_nodes = [f"P{i}" for i in chunk_indices]
+            chunk_node_set = set(chunk_nodes)
+
+            # Parse edges from mermaid
+            matcher = TopologicalMatcher(config_path=self.config_path, llm_provider=self.llm_provider)
+            all_edges = matcher._parse_mermaid_edges(mermaid)
+
+            # Filter edges to only those within the chunk
+            chunk_edges = []
+            for source, target, label in all_edges:
+                if source in chunk_node_set and target in chunk_node_set:
+                    chunk_edges.append((source, target, label))
+
+            # Build subgraph mermaid
+            if chunk_edges:
+                edge_strings = [f"{s} --{label}--> {t}" for s, t, label in chunk_edges]
+                subgraph_mermaid = f"graph LR; {'; '.join(edge_strings)}"
+            else:
+                # If no edges, create a simple chain
+                if len(chunk_nodes) > 1:
+                    edge_strings = [f"{chunk_nodes[i]} --> {chunk_nodes[i+1]}" for i in range(len(chunk_nodes)-1)]
+                    subgraph_mermaid = f"graph LR; {'; '.join(edge_strings)}"
+                else:
+                    subgraph_mermaid = f"graph LR; {chunk_nodes[0]}"
+
+            # Build subgraph node_map
+            subgraph_node_map = {node: global_node_map.get(node, "") for node in chunk_nodes if node in global_node_map}
+
+            # Create subgraph dictionary
+            subgraph = {
+                'mermaid': subgraph_mermaid,
+                'node_map': subgraph_node_map,
+                'node_count': len(chunk_nodes),
+                'intent': global_graph.get('intent', 'ARGUMENT'),
+                'signature': global_graph.get('signature', 'DEFINITION'),
+                'role': global_graph.get('role'),
+                'description': global_graph.get('description', ''),
+                'structural_summary': global_graph.get('structural_summary', '')
+            }
+
+            return subgraph
+
+        except Exception as e:
+            if verbose:
+                print(f"     ⚠ Failed to extract chunk graph from global: {e}")
+            return None
 
     def _deduplicate_propositions(self, propositions: List[str]) -> List[str]:
         """Deduplicate propositions by removing similar/redundant ones using LLM.
@@ -1394,11 +1488,11 @@ Return JSON list:"""
 
     def _run_arena(
         self,
-        candidates: List[Dict[str, any]],  # List of {"text": str, "skeleton": str, ...}
+        candidates: List[Dict[str, Any]],  # List of {"text": str, "skeleton": str, ...}
         blueprint: SemanticBlueprint,
-        style_dna_dict: Optional[Dict[str, any]] = None,
+        style_dna_dict: Optional[Dict[str, Any]] = None,
         verbose: bool = False
-    ) -> List[Dict[str, any]]:
+    ) -> List[Dict[str, Any]]:
         """Evaluate all candidates and return survivors.
 
         Filters:
@@ -1610,7 +1704,7 @@ Return JSON list:"""
 
     def _breed_children(
         self,
-        parents: List[Dict[str, any]],  # Top 5 parents from arena
+        parents: List[Dict[str, Any]],  # Top 5 parents from arena
         blueprint: SemanticBlueprint,
         author_name: str,
         style_dna: str,
@@ -1862,8 +1956,8 @@ Output PURE JSON. A single list of strings:
         candidate: str,
         blueprint: SemanticBlueprint,
         skeleton: str,
-        style_dna: Optional[Dict[str, any]] = None
-    ) -> Dict[str, any]:
+        style_dna: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Evaluate template candidate using composite scoring.
 
         Calculates semantic score, structural adherence score, and style density score.
@@ -2978,7 +3072,7 @@ Do NOT copy the text verbatim. Transform it into the target style while preservi
         initial_feedback: str,
         critic: 'SemanticCritic',
         verbose: bool = False,
-        style_dna_dict: Optional[Dict[str, any]] = None,
+        style_dna_dict: Optional[Dict[str, Any]] = None,
         examples: Optional[List[str]] = None,
         force_semantic_injection: bool = False
     ) -> Tuple[str, float]:
@@ -4489,7 +4583,9 @@ Text: {text}"""
         input_node_map: Dict[str, str],
         author_name: str,
         verbose: bool = False,
-        previous_sentence: Optional[str] = None
+        previous_sentence: Optional[str] = None,
+        original_context: Optional[str] = None,
+        input_graph: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Generate text by traversing the style graph structure and filling it with mapped content.
@@ -4692,14 +4788,136 @@ Preserve Key Subjects. If the input is 'This Essay serves as...', ensure 'This E
 
 """
 
-            user_prompt = f"""**STYLE BLUEPRINT (Rhythm Target):**
+            # Filter connectors and get forbidden openers for style orchestration
+            pool = blueprint.get('connector_pool', [])
+            preferred_connectors = self.style_tracker.filter_available_connectors(pool, signature)
+            forbidden_openers = self.style_tracker.get_forbidden_openers()
+
+            # DEBUG: Log style tracker state
+            if verbose:
+                print(f"     [DEBUG] Style Tracker State:")
+                print(f"       - Connector pool size: {len(pool)}")
+                print(f"       - Preferred connectors: {preferred_connectors[:3] if preferred_connectors else 'None'}")
+                print(f"       - Forbidden openers: {forbidden_openers}")
+                print(f"       - Phrase history: {list(self.style_tracker.phrase_history)}")
+
+            # Build style constraints section (moved to end of prompt for recency bias)
+            style_constraints = ""
+
+            # Build critical instructions section (will be placed at end of prompt)
+            critical_instructions = ""
+            if forbidden_openers:
+                forbidden_list = ', '.join([f'"{f}"' for f in forbidden_openers])
+                critical_instructions += f"""1. **FORBIDDEN OPENER (MANDATORY):** You MUST NOT start the sentence with any of these phrases: {forbidden_list}.
+   - If you planned to use one of these, you MUST use an alternative opening instead.
+   - Examples: Instead of "It is not...", use "Far from being...", "Unlike...", "Contrary to...", or "Rather than...".
+   - **You will be penalized if you ignore this constraint.**
+
+"""
+            if preferred_connectors:
+                connectors_list = ', '.join([f'"{c}"' for c in preferred_connectors[:6]])
+                critical_instructions += f"""2. **PREFERRED CONNECTORS:** Use these connectors when appropriate: {connectors_list}.
+
+"""
+            if critical_instructions:
+                critical_instructions += """3. **Grammar:** Use the grammatical wrappers provided in the skeleton structure.
+4. **Meaning:** Ensure ALL facts from the Input Propositions are present in your output.
+"""
+            else:
+                critical_instructions = """1. **Grammar:** Use the grammatical wrappers provided in the skeleton structure.
+2. **Meaning:** Ensure ALL facts from the Input Propositions are present in your output.
+"""
+
+            # Build Original Context section
+            context_block = ""
+            if original_context:
+                context_block = f"""
+**ORIGINAL CONTEXT (SOURCE MEANING):**
+"{original_context}"
+*Use this to resolve ambiguities and ensure the full meaning is preserved.*
+
+"""
+                if verbose:
+                    print(f"     [DEBUG] Original Context: {len(original_context)} chars, preview: {original_context[:80]}...")
+            else:
+                if verbose:
+                    print(f"     [DEBUG] ⚠ Original Context is MISSING (None or empty)")
+
+            # DEBUG: Log input_graph state
+            if verbose:
+                if input_graph:
+                    has_mermaid = bool(input_graph.get('mermaid'))
+                    node_count = input_graph.get('node_count', 0)
+                    print(f"     [DEBUG] Input Graph: has_mermaid={has_mermaid}, node_count={node_count}")
+                else:
+                    print(f"     [DEBUG] ⚠ Input Graph is MISSING (None)")
+
+            # Build Semantic Topology section from graph edges
+            semantic_block = ""
+            if input_graph and input_graph.get('mermaid'):
+                semantic_instructions = []
+                try:
+                    # Parse edges from mermaid using existing graph_matcher
+                    edges = self.graph_matcher._parse_mermaid_edges(input_graph.get('mermaid', ''))
+                    node_map = input_graph.get('node_map', {})
+
+                    # Extract semantic dependencies (PURPOSE, ATTRIBUTION, ORIGIN, COMPOSITION, DEFINITION)
+                    semantic_edge_types = {'PURPOSE', 'ATTRIBUTION', 'ORIGIN', 'COMPOSITION', 'DEFINITION'}
+
+                    for source, target, label in edges:
+                        label_upper = label.upper()
+                        if label_upper in semantic_edge_types:
+                            # Get proposition text snippets for clarity
+                            source_text = node_map.get(source, input_node_map.get(source, source))
+                            target_text = node_map.get(target, input_node_map.get(target, target))
+
+                            # Truncate for readability (first 6 words)
+                            source_words = source_text.split()[:6]
+                            target_words = target_text.split()[:6]
+                            source_short = " ".join(source_words) + ("..." if len(source_text.split()) > 6 else "")
+                            target_short = " ".join(target_words) + ("..." if len(target_text.split()) > 6 else "")
+
+                            # Create readable instruction with clearer relationship description
+                            relationship_desc = {
+                                'PURPOSE': 'provides the PURPOSE for',
+                                'ATTRIBUTION': 'is ATTRIBUTED to',
+                                'ORIGIN': 'comes from',
+                                'COMPOSITION': 'consists of',
+                                'DEFINITION': 'defines'
+                            }.get(label_upper, 'linked to')
+
+                            semantic_instructions.append(
+                                f"- [{source}] {relationship_desc} [{target}]"
+                            )
+
+                    if semantic_instructions:
+                        semantic_block = f"""
+**SEMANTIC TOPOLOGY (UNBREAKABLE BONDS):**
+These relationships MUST be preserved in your output. They represent factual dependencies that cannot be broken:
+{chr(10).join(semantic_instructions)}
+
+*CRITICAL: These semantic links (PURPOSE, ATTRIBUTION, ORIGIN, COMPOSITION) are factual bonds. When you map propositions to the skeleton, ensure these relationships are maintained.*
+
+"""
+                        if verbose:
+                            print(f"     [DEBUG] Semantic Topology: {len(semantic_instructions)} semantic edges found")
+                            for inst in semantic_instructions[:3]:
+                                print(f"       - {inst[:60]}...")
+                    else:
+                        if verbose:
+                            print(f"     [DEBUG] Semantic Topology: No semantic edges found (only rhetorical edges)")
+                except Exception as e:
+                    if verbose:
+                        print(f"     ⚠ Failed to extract semantic topology: {e}")
+
+            base_user_prompt = f"""**STYLE BLUEPRINT (Rhythm Target):**
 "{processed_skeleton}"
 
 **INTENT:** {intent}
 (This blueprint has rhetorical intent: {intent}. Match this intent in your output.)
 
 **LOGICAL SIGNATURE:** {signature}
-{signature_instructions}{previous_context}**CONTENT MAPPING:**
+{signature_instructions}{previous_context}{context_block}{semantic_block}**CONTENT MAPPING:**
 {content_mapping_str}
 
 **INPUT PROPOSITIONS (Content):**
@@ -4724,7 +4942,7 @@ Preserve Key Subjects. If the input is 'This Essay serves as...', ensure 'This E
    - Remove orphaned prepositions, conjunctions, and relative clauses that reference empty nodes.
    - *Example:* If Blueprint has "[ROOT] is [CLAIM] and [QUALIFIER]" but [QUALIFIER] is UNUSED, output "[ROOT] is [CLAIM]" (remove "and").
 4. **Adapt Connectors:**
-   - If the Blueprint's connectors (e.g., 'At such a time') fit the content, USE THEM.
+   - If the Blueprint's connectors (e.g., "At such a time") fit the content, USE THEM.
    - If they contradict the content (e.g., Blueprint is Temporal, Content is Definition), **REPLACE THEM** with stylistically similar connectors that fit.
    - *Example:* Blueprint 'After the war...', Input 'The phone is...', Output 'In this context...' (Keeps the introductory prepositional phrase structure).
 5. **Merge Repetition:** Combine repetitive subjects naturally (e.g. 'The car is red and the car is fast' -> 'The car is red and fast').
@@ -4741,7 +4959,26 @@ Preserve Key Subjects. If the input is 'This Essay serves as...', ensure 'This E
 - If the Skeleton forces you to add content that contradicts the Input, **IGNORE THE SKELETON** and write the truth from the Input Propositions.
 - Preserve ONLY the facts from the Input Propositions. Style is adaptation, not invention.
 
+**CRITICAL INSTRUCTIONS (MANDATORY - READ CAREFULLY):**
+{critical_instructions}
+
 Generate the text:"""
+
+            # DEBUG: Log prompt composition
+            if verbose:
+                print(f"     [DEBUG] Prompt Composition:")
+                print(f"       - style_constraints length: {len(style_constraints)} chars")
+                print(f"       - context_block length: {len(context_block)} chars")
+                print(f"       - semantic_block length: {len(semantic_block)} chars")
+                print(f"       - Total prompt length: {len(base_user_prompt)} chars")
+                if context_block:
+                    print(f"       - ✓ Original Context IS in prompt")
+                else:
+                    print(f"       - ⚠ Original Context MISSING from prompt")
+                if semantic_block:
+                    print(f"       - ✓ Semantic Topology IS in prompt")
+                else:
+                    print(f"       - ⚠ Semantic Topology MISSING from prompt")
 
         else:
             # --- FALLBACK: GRAPH WALKING ---
@@ -4805,14 +5042,77 @@ Preserve Key Subjects. If the input is 'This Essay serves as...', ensure 'This E
 
 """
 
-            user_prompt = f"""Blueprint Graph (Mermaid):
+            # Build Original Context section (same as skeleton mode)
+            context_block_graph = ""
+            if original_context:
+                context_block_graph = f"""
+**ORIGINAL CONTEXT (THE SOUL):**
+"{original_context}"
+*Use this context to understand the overall meaning and resolve ambiguities. Preserve the core message while adapting to the target style.*
+
+"""
+                if verbose:
+                    print(f"     [DEBUG] Graph-Walking: Original Context: {len(original_context)} chars")
+            else:
+                if verbose:
+                    print(f"     [DEBUG] Graph-Walking: ⚠ Original Context is MISSING")
+
+            # Build Semantic Topology section (same as skeleton mode)
+            semantic_block_graph = ""
+            if input_graph and input_graph.get('mermaid'):
+                semantic_instructions = []
+                try:
+                    # Parse edges from mermaid using existing graph_matcher
+                    edges = self.graph_matcher._parse_mermaid_edges(input_graph.get('mermaid', ''))
+                    node_map = input_graph.get('node_map', {})
+
+                    # Extract semantic dependencies (PURPOSE, ATTRIBUTION, ORIGIN, COMPOSITION, DEFINITION)
+                    semantic_edge_types = {'PURPOSE', 'ATTRIBUTION', 'ORIGIN', 'COMPOSITION', 'DEFINITION'}
+
+                    for source, target, label in edges:
+                        label_upper = label.upper()
+                        if label_upper in semantic_edge_types:
+                            # Get proposition text snippets for clarity
+                            source_text = node_map.get(source, input_node_map.get(source, source))
+                            target_text = node_map.get(target, input_node_map.get(target, target))
+
+                            # Truncate for readability (first 6 words)
+                            source_words = source_text.split()[:6]
+                            target_words = target_text.split()[:6]
+                            source_short = " ".join(source_words) + ("..." if len(source_text.split()) > 6 else "")
+                            target_short = " ".join(target_words) + ("..." if len(target_text.split()) > 6 else "")
+
+                            # Create readable instruction
+                            semantic_instructions.append(
+                                f"- **{label_upper}**: [{source}] ({source_short}) → [{target}] ({target_short})"
+                            )
+
+                    if semantic_instructions:
+                        semantic_block_graph = f"""
+**SEMANTIC TOPOLOGY (UNBREAKABLE BONDS):**
+These relationships MUST be preserved in your output. They represent factual dependencies that cannot be broken:
+{chr(10).join(semantic_instructions)}
+
+*CRITICAL: These semantic links (PURPOSE, ATTRIBUTION, ORIGIN, COMPOSITION) are factual bonds. When you traverse the graph, ensure these relationships are maintained.*
+
+"""
+                        if verbose:
+                            print(f"     [DEBUG] Graph-Walking: Semantic Topology: {len(semantic_instructions)} edges")
+                    else:
+                        if verbose:
+                            print(f"     [DEBUG] Graph-Walking: No semantic edges found")
+                except Exception as e:
+                    if verbose:
+                        print(f"     ⚠ Failed to extract semantic topology: {e}")
+
+            base_user_prompt = f"""Blueprint Graph (Mermaid):
 {style_mermaid}
 
 **INTENT:** {intent}
 (This blueprint has rhetorical intent: {intent}. Match this intent in your output.)
 
 **LOGICAL SIGNATURE:** {signature}
-{signature_instructions_graph}{previous_context}Input Content (Style Node -> Actual Text):
+{signature_instructions_graph}{previous_context}{context_block_graph}{semantic_block_graph}Input Content (Style Node -> Actual Text):
 {json.dumps(resolved_content, indent=2)}
 
 Instructions:
@@ -4822,30 +5122,77 @@ Instructions:
 4. **Style Enforcement:** Adhere to the sentence length and rhythm of {author_name}.
 5. **Author Voice:** Follow the Style Traits provided above. Match the voice and style characteristics of {author_name} as described.
 6. **Intent Alignment:** Ensure your output matches the rhetorical intent ({intent}) of the blueprint.
+7. **Preserve Semantic Bonds:** Maintain the semantic relationships (PURPOSE, ATTRIBUTION, ORIGIN, COMPOSITION) shown in the Semantic Topology section above.
 
 Generate text matching the author's voice:"""
 
-        # 3. Call LLM
-        try:
-            result = self.llm_provider.call(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                model_type="editor",
-                require_json=False,
-                temperature=0.7,
-                max_tokens=500
-            )
+        # 3. Call LLM with validation
+        # Extract propositions from input_node_map for validation
+        input_propositions = list(input_node_map.values()) if input_node_map else []
 
-            # 4. Post-Process Cleanup using repair method
-            text = result.strip() if result else ""
-            text = self._repair_generated_text(text, verbose=verbose)
+        max_retries = 2
+        min_meaning_score = 0.7  # Minimum recall score to accept
 
-            return text
+        for attempt in range(max_retries):
+            try:
+                # Modify prompt on retry to emphasize meaning preservation
+                current_user_prompt = base_user_prompt
+                if attempt > 0:
+                    current_user_prompt = base_user_prompt + "\n\n**CRITICAL: The previous attempt lost meaning. Ensure ALL facts and concepts from the input are preserved in the output. Do not omit any information.**"
 
-        except Exception as e:
-            if verbose:
-                print(f"Warning: Graph generation failed: {e}")
-            return ""
+                result = self.llm_provider.call(
+                    system_prompt=system_prompt,
+                    user_prompt=current_user_prompt,
+                    model_type="editor",
+                    require_json=False,
+                    temperature=0.7,
+                    max_tokens=500
+                )
+
+                # 4. Post-Process Cleanup using repair method
+                text = result.strip() if result else ""
+                text = self._repair_generated_text(text, verbose=verbose)
+
+                if not text:
+                    if verbose:
+                        print(f"     ⚠ Generation attempt {attempt + 1} produced empty text")
+                    continue
+
+                # 5. Validate meaning preservation
+                if input_propositions:
+                    meaning_score = self._calculate_semantic_score(text, input_propositions, verbose=verbose)
+
+                    if meaning_score >= min_meaning_score:
+                        if verbose:
+                            print(f"     ✓ Meaning validation passed (score: {meaning_score:.3f} >= {min_meaning_score})")
+                        return text
+                    else:
+                        if verbose:
+                            print(f"     ⚠ Meaning validation failed (score: {meaning_score:.3f} < {min_meaning_score})")
+                        if attempt < max_retries - 1:
+                            if verbose:
+                                print(f"     🔄 Retrying generation (attempt {attempt + 2}/{max_retries})...")
+                            continue
+                        else:
+                            if verbose:
+                                print(f"     ⚠ Max retries reached, returning text with low meaning score")
+                            # Return anyway but with warning
+                            return text
+                else:
+                    # No propositions available for validation, return as-is
+                    if verbose:
+                        print(f"     ⚠ No input propositions available for validation")
+                    return text
+
+            except Exception as e:
+                if verbose:
+                    print(f"Warning: Graph generation failed (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    return ""
+                continue
+
+        # Fallback if all retries exhausted
+        return ""
 
     def _audit_skeleton(self, skeleton: str) -> str:
         """Audit a skeleton to extract its logical signature.
@@ -5051,7 +5398,9 @@ Return JSON: {{"signature": "CONTRAST"}}"""
         verbose: bool = False,
         previous_sentence: Optional[str] = None,
         num_variants: int = 2,
-        max_repairs: int = 2
+        max_repairs: int = 2,
+        original_context: Optional[str] = None,
+        chunk_graph: Optional[Dict[str, Any]] = None
     ) -> tuple[str, float]:
         """Generate text with iterative repair loop: Generate variants, select best, repair.
 
@@ -5085,12 +5434,19 @@ Return JSON: {{"signature": "CONTRAST"}}"""
 
         # Variant A: Style-First (Using blueprint exactly as is - High Style)
         try:
+            if verbose:
+                print(f"     [DEBUG] Generating Variant A:")
+                print(f"       - original_context: {'present' if original_context else 'MISSING'}")
+                print(f"       - chunk_graph: {'present' if chunk_graph else 'MISSING'}")
+
             variant_a = self._generate_from_graph(
                 blueprint,
                 input_node_map,
                 author_name,
-                verbose=False,  # Reduce noise during variant generation
-                previous_sentence=previous_sentence
+                verbose=verbose,  # Enable verbose for debugging
+                previous_sentence=previous_sentence,
+                original_context=original_context,
+                input_graph=chunk_graph
             )
             if variant_a:
                 candidates.append({
@@ -5119,7 +5475,9 @@ Return JSON: {{"signature": "CONTRAST"}}"""
                     input_node_map,
                     author_name,
                     verbose=False,
-                    previous_sentence=previous_sentence
+                    previous_sentence=previous_sentence,
+                    original_context=original_context,
+                    input_graph=chunk_graph
                 )
                 if variant_b:
                     candidates.append({
@@ -5142,7 +5500,9 @@ Return JSON: {{"signature": "CONTRAST"}}"""
                 input_node_map,
                 author_name,
                 verbose,
-                previous_sentence=previous_sentence
+                previous_sentence=previous_sentence,
+                original_context=original_context,
+                input_graph=chunk_graph
             )
             # Calculate score for fallback
             fallback_score = 0.0
@@ -5284,7 +5644,7 @@ Return JSON: {{"signature": "CONTRAST"}}"""
         generated_text: str,
         input_propositions: List[str],
         verbose: bool = False
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """Evaluate a variant and return detailed critique.
 
         Args:
@@ -5483,7 +5843,7 @@ Insert the missing information into the current text. You may:
             Generated paragraph text.
         """
         if not paragraph or not paragraph.strip():
-            return ("", 0, 1.0)
+            return ("", 0, 0.0)  # Empty paragraph has no compliance
 
         # Retry loop with graceful degradation
         max_retries = 3
@@ -5591,6 +5951,18 @@ Insert the missing information into the current text. You may:
             if verbose:
                 print(f"  After deduplication: {len(propositions)} propositions")
 
+            # Step 1.5: Create Global Graph BEFORE fracturing (to preserve semantic relationships)
+            prev_paragraph_summary = prev_paragraph_text[:200] + "..." if prev_paragraph_text and len(prev_paragraph_text) > 200 else prev_paragraph_text
+            global_graph = None
+            if len(propositions) > 0:
+                try:
+                    global_graph = self.input_mapper.map_propositions(propositions, prev_paragraph_summary=prev_paragraph_summary)
+                    if verbose and global_graph:
+                        print(f"  Created global graph with {global_graph.get('node_count', 0)} nodes")
+                except Exception as e:
+                    if verbose:
+                        print(f"  ⚠ Global graph creation failed: {e}, will use text-based fracturing")
+
             # Step 2: Dynamic Fracturing - group propositions into logical clusters
             graph_config = self.config.get("graph_pipeline", {})
             fracturing_config = graph_config.get("fracturing", {})
@@ -5601,8 +5973,8 @@ Insert the missing information into the current text. You may:
             if fracturing_enabled and len(propositions) > target_density:
                 if verbose:
                     print(f"  Using dynamic fracturing (target density: {target_density})")
-                # Use semantic fracturer
-                group_indices = self.fracturer.fracture(propositions, target_density, max_density)
+                # Use semantic fracturer with global graph
+                group_indices = self.fracturer.fracture(propositions, target_density, max_density, input_graph=global_graph)
                 chunks = [[propositions[i] for i in group] for group in group_indices]
             else:
                 # Fallback to fixed chunking for small inputs or when disabled
@@ -5631,17 +6003,29 @@ Insert the missing information into the current text. You may:
                         if len(chunk) > 3:
                             print(f"       ... and {len(chunk) - 3} more")
 
-                    # Get intent, signature, and role from input mapper
-                    # Pass previous paragraph summary for context-aware role detection
-                    prev_paragraph_summary = prev_paragraph_text[:200] + "..." if prev_paragraph_text and len(prev_paragraph_text) > 200 else prev_paragraph_text
-                    input_graph = self.input_mapper.map_propositions(chunk, prev_paragraph_summary=prev_paragraph_summary)
+                    # Extract per-chunk graph from global graph (if available)
+                    # Otherwise, create new graph for this chunk
+                    input_graph = None
                     input_intent = 'ARGUMENT'  # Default
                     input_signature = 'DEFINITION'  # Default
                     input_role = None
-                    if input_graph:
-                        input_intent = input_graph.get('intent', 'ARGUMENT')
-                        input_signature = input_graph.get('signature', 'DEFINITION')
-                        input_role = input_graph.get('role')
+
+                    if global_graph and global_graph.get('mermaid'):
+                        # Extract subgraph for this chunk from global graph
+                        input_graph = self._extract_chunk_graph_from_global(global_graph, chunk, propositions, verbose=verbose)
+                        if input_graph:
+                            input_intent = input_graph.get('intent', global_graph.get('intent', 'ARGUMENT'))
+                            input_signature = input_graph.get('signature', global_graph.get('signature', 'DEFINITION'))
+                            input_role = input_graph.get('role', global_graph.get('role'))
+
+                    # Fallback: Create new graph for this chunk if extraction failed
+                    if not input_graph:
+                        prev_paragraph_summary = prev_paragraph_text[:200] + "..." if prev_paragraph_text and len(prev_paragraph_text) > 200 else prev_paragraph_text
+                        input_graph = self.input_mapper.map_propositions(chunk, prev_paragraph_summary=prev_paragraph_summary)
+                        if input_graph:
+                            input_intent = input_graph.get('intent', 'ARGUMENT')
+                            input_signature = input_graph.get('signature', 'DEFINITION')
+                            input_role = input_graph.get('role')
 
                     # Load style profile for style injection
                     style_profile = self._load_style_profile(author_name)
@@ -5721,13 +6105,22 @@ Insert the missing information into the current text. You may:
                     input_node_map = {f'P{i}': prop for i, prop in enumerate(chunk)}
 
                     # Render from graph using repair loop
+                    if verbose:
+                        print(f"  [DEBUG] Calling _generate_with_repair_loop:")
+                        print(f"    - original_context length: {len(paragraph) if paragraph else 0} chars")
+                        print(f"    - chunk_graph: {'present' if input_graph else 'MISSING'}")
+                        if input_graph:
+                            print(f"    - chunk_graph mermaid: {bool(input_graph.get('mermaid'))}")
+
                     sentence, sentence_score = self._generate_with_repair_loop(
                         chunk,
                         blueprint,
                         input_node_map,
                         author_name,
                         verbose,
-                        previous_sentence=last_generated_sentence
+                        previous_sentence=last_generated_sentence,
+                        original_context=paragraph,  # Pass original paragraph for context
+                        chunk_graph=input_graph  # Pass chunk graph for semantic topology
                     )
 
                     # Track score for this chunk
@@ -5738,6 +6131,31 @@ Insert the missing information into the current text. You may:
                         last_generated_sentence = sentence
                         if verbose:
                             print(f"  ✓ Generated sentence from graph: {sentence[:80]}...")
+
+                        # Register usage with style tracker to prevent repetition
+                        try:
+                            used_connectors = self.style_tracker._extract_connectors_from_text(sentence)
+                            extracted_opener = self.style_tracker._extract_opener(sentence)
+
+                            if verbose:
+                                print(f"  [DEBUG] Registering usage:")
+                                print(f"    - Extracted opener: '{extracted_opener}'")
+                                print(f"    - Extracted connectors: {used_connectors}")
+                                print(f"    - Structure: {blueprint.get('signature') if blueprint else 'None'}")
+
+                            self.style_tracker.register_usage(
+                                text=sentence,
+                                connectors=used_connectors,
+                                structure=blueprint.get('signature') if blueprint else None
+                            )
+
+                            if verbose:
+                                print(f"  [DEBUG] After registration:")
+                                print(f"    - Phrase history: {list(self.style_tracker.phrase_history)}")
+                                print(f"    - Connector history: {list(self.style_tracker.connector_history)[-5:]}")
+                        except Exception as e:
+                            if verbose:
+                                print(f"  ⚠ Style tracker registration failed: {e}")
 
                         # Log graph match for debugging
                         if self.telemetry and blueprint:
@@ -5901,12 +6319,25 @@ Write in the style of {author_name}."""
             if text and not text.endswith(('.', '!', '?')):
                 text += '.'
 
-            return (text, 0, 1.0)
+            # Calculate actual compliance score by extracting propositions from input
+            if text:
+                propositions = self._extract_propositions_from_text(paragraph)
+                if propositions:
+                    compliance_score = self._calculate_semantic_score(text, propositions, verbose=verbose)
+                else:
+                    # If we can't extract propositions, use a conservative score
+                    if verbose:
+                        print(f"  ⚠ Could not extract propositions for compliance check, defaulting to 0.5")
+                    compliance_score = 0.5
+            else:
+                compliance_score = 0.0
+
+            return (text, 0, compliance_score)
 
         except Exception as e:
             if verbose:
                 print(f"Warning: Fallback generation failed: {e}")
-            return ("", 0, 1.0)
+            return ("", 0, 0.0)  # Exception case has no compliance
 
     def translate_paragraph_statistical(
         self,
@@ -5935,7 +6366,7 @@ Write in the style of {author_name}."""
             Tuple of (generated_paragraph, archetype_id_used, compliance_score)
         """
         if not paragraph or not paragraph.strip():
-            return paragraph, 0, 1.0
+            return paragraph, 0, 0.0  # Empty paragraph has no compliance
 
         # Detect if this is a header (short text without terminal punctuation)
         # Headers should not be inflated or receive sensory grounding constraints

@@ -296,6 +296,72 @@ class TestGraphSkeletonBuilder:
         # Nodes should be sorted by numeric index (P0 before P1)
         assert skeleton.index('[P0]') < skeleton.index('[P1]')
 
+    def test_skeleton_filters_non_proposition_nodes(self):
+        """Test that skeleton building filters out edge labels (CAUSALITY, PURPOSE, etc.) from nodes."""
+        # Create a graph that might accidentally include edge labels as nodes
+        # This simulates the bug where CAUSALITY, PURPOSE, etc. were treated as nodes
+        mermaid = "graph LR; P0 --CAUSALITY--> P1; P1 --PURPOSE--> P2; P2 --CONTRAST--> P3"
+        input_graph = create_input_graph(mermaid)
+        style_vocab = {
+            'CAUSALITY': [' because '],
+            'PURPOSE': [' for '],
+            'CONTRAST': [' but ']
+        }
+
+        skeleton = self.matcher._build_skeleton_from_graph(
+            input_graph, style_vocab, 4, verbose=False
+        )
+
+        assert skeleton is not None
+        # Should only contain proposition nodes, not edge labels
+        assert '[P0]' in skeleton
+        assert '[P1]' in skeleton
+        assert '[P2]' in skeleton
+        assert '[P3]' in skeleton
+        # Edge labels should NOT appear as nodes
+        assert '[CAUSALITY]' not in skeleton
+        assert '[PURPOSE]' not in skeleton
+        assert '[CONTRAST]' not in skeleton
+        assert '[ATTRIBUTION]' not in skeleton
+
+    def test_skeleton_connector_spacing(self):
+        """Test that connectors have proper spacing to prevent run-on text."""
+        mermaid = "graph LR; P0 --> P1; P1 --> P2"
+        input_graph = create_input_graph(mermaid)
+        # Connectors without proper spacing (simulating the bug)
+        style_vocab = {
+            'SEQUENCE': ['but', ', but', 'because']  # Missing spaces
+        }
+
+        skeleton = self.matcher._build_skeleton_from_graph(
+            input_graph, style_vocab, 3, verbose=False
+        )
+
+        assert skeleton is not None
+        # Check that connectors have proper spacing
+        # Should not have "[P0]but[P1]" - should have "[P0] but [P1]"
+        assert '[P0]' in skeleton
+        assert '[P1]' in skeleton
+        assert '[P2]' in skeleton
+
+        # Find positions of nodes
+        p0_pos = skeleton.index('[P0]')
+        p1_pos = skeleton.index('[P1]')
+        p2_pos = skeleton.index('[P2]')
+
+        # Check spacing between P0 and P1
+        between_p0_p1 = skeleton[p0_pos + 4:p1_pos]
+        # Should have at least one space (either " but " or ", but ")
+        assert ' ' in between_p0_p1, f"Missing space between P0 and P1: '{between_p0_p1}'"
+
+        # Check spacing between P1 and P2
+        between_p1_p2 = skeleton[p1_pos + 4:p2_pos]
+        assert ' ' in between_p1_p2, f"Missing space between P1 and P2: '{between_p1_p2}'"
+
+        # Should not have run-on patterns like "]but[" or "]because["
+        assert ']but[' not in skeleton, "Found run-on connector ']but['"
+        assert ']because[' not in skeleton, "Found run-on connector ']because['"
+
     def test_nodes_sorted_with_multiple_edges(self):
         """Test node sorting with complex graph structure."""
         mermaid = "graph LR; P2 --> P0; P1 --> P2"

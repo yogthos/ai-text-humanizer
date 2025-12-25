@@ -2224,6 +2224,29 @@ Does the generated text align with the intent '{intent}'? Consider:
                     scores[f"{prop}_best_match"] = best_sentence[:100]  # First 100 chars
 
         recall = len(preserved) / len(propositions) if propositions else 0.0
+
+        # DEBUG: Log recall calculation details
+        if verbose:
+            print(f"\n        [CRITIC DEBUG] Recall Calculation:")
+            print(f"          Total Input Facts: {len(propositions)}")
+            print(f"          Preserved Facts: {len(preserved)}")
+            print(f"          Missing Facts: {len(missing)}")
+            print(f"          Recall Score: {recall:.3f}")
+            if missing:
+                print(f"          Missing Facts (first 3):")
+                for i, miss in enumerate(missing[:3]):
+                    print(f"            {i+1}. {miss[:60]}...")
+                    if miss in scores:
+                        print(f"               Best match similarity: {scores[miss]:.3f}")
+                        if f"{miss}_best_match" in scores:
+                            print(f"               Best match: {scores[f'{miss}_best_match']}")
+            if preserved:
+                print(f"          Preserved Facts (first 3):")
+                for i, pres in enumerate(preserved[:3]):
+                    print(f"            {i+1}. {pres[:60]}...")
+                    if pres in scores:
+                        print(f"               Similarity: {scores[pres]:.3f}")
+
         return recall, {"preserved": preserved, "missing": missing, "scores": scores}
 
     def _check_entailment(self, proposition: str, generated_sentence: str, verbose: bool = False) -> Tuple[bool, float]:

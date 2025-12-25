@@ -24,6 +24,14 @@ from src.generator.llm_provider import LLMProvider
 class TopologicalMatcher:
     """Matches input graphs to style graphs and maps nodes."""
 
+    # Semantic Wrappers: Rich connectors for semantic edges
+    SEMANTIC_WRAPPERS = {
+        'PURPOSE': [", serving to ", ", intended to ", ", used for ", ", essential to "],
+        'ATTRIBUTION': [", the work of ", ", coined by ", ", stated by ", ", attributed to "],
+        'ORIGIN': [", sourced from ", ", comes from ", ", derived from ", ", originating from "],
+        'COMPOSITION': [", including ", ", consisting of ", ", comprising ", ", made of "]
+    }
+
     def __init__(self, config_path: str = "config.json", chroma_path: Optional[str] = None, llm_provider: Optional[LLMProvider] = None):
         """Initialize the Topological Matcher.
 
@@ -168,7 +176,12 @@ class TopologicalMatcher:
                 'CONDITION': 'CONDITIONAL',
                 'CONDITIONAL': 'CONDITIONAL',
                 'LIST': 'LIST',
-                'ENUMERATION': 'LIST'
+                'ENUMERATION': 'LIST',
+                # Semantic edge types
+                'PURPOSE': 'PURPOSE',
+                'ORIGIN': 'ORIGIN',
+                'COMPOSITION': 'COMPOSITION',
+                'ATTRIBUTION': 'ATTRIBUTION'
             }
             normalized_label = label_map.get(label, label)
             edges.append((source, target, normalized_label))
@@ -238,6 +251,73 @@ class TopologicalMatcher:
                     selected.append(candidate)
 
         return selected[:top_k]
+
+    def query_by_structure(
+        self,
+        query_text: str,
+        target_structure: str,
+        n_results: int = 5,
+        additional_filters: Optional[dict] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Query ChromaDB for style samples matching both semantic meaning AND target structure.
+
+        Args:
+            query_text: Text to query for semantic similarity.
+            target_structure: Pipe-separated structure tags (e.g., "DEFINITION|CONTRAST").
+            n_results: Number of results to return.
+            additional_filters: Optional additional metadata filters.
+
+        Returns:
+            List of candidate dictionaries with matching structure.
+        """
+        # Query with semantic similarity first
+        query_kwargs = {
+            'query_texts': [query_text],
+            'n_results': n_results * 2  # Fetch more to filter by structure
+        }
+
+        # Add additional filters if provided
+        if additional_filters:
+            conditions = [additional_filters]
+            where_clause = self._build_where_clause(conditions)
+            if where_clause:
+                query_kwargs['where'] = where_clause
+
+        try:
+            results = self.collection.query(**query_kwargs)
+            if not results or not results.get('ids') or not results['ids'][0]:
+                return []
+
+            # Extract candidates
+            candidates = self._extract_candidates_from_results(results)
+
+            # Client-side filtering by structure
+            # Split target structure into tags
+            target_tags = set(target_structure.upper().split('|'))
+
+            # Filter candidates by structure overlap
+            filtered_candidates = []
+            for candidate in candidates:
+                candidate_structure = candidate.get('metadata', {}).get('logic_signature', '')
+                if not candidate_structure:
+                    # If no logic_signature, skip or use signature as fallback
+                    candidate_signature = candidate.get('metadata', {}).get('signature', '')
+                    if candidate_signature and candidate_signature.upper() in target_tags:
+                        filtered_candidates.append(candidate)
+                    continue
+
+                # Check if any tags in candidate structure match target
+                candidate_tags = set(candidate_structure.upper().split('|'))
+                if target_tags & candidate_tags:  # Intersection (any overlap)
+                    filtered_candidates.append(candidate)
+
+            # Return top n_results
+            return filtered_candidates[:n_results]
+
+        except Exception as e:
+            print(f"Warning: Structure query failed: {e}")
+            return []
 
     def _synthesize_best_fit(
         self,
@@ -581,6 +661,11 @@ class TopologicalMatcher:
             # Harvest style vocabulary from candidates
             style_vocab = self._harvest_style_vocab(candidates, verbose=verbose)
 
+            # Extract connector_pool for style state tracking
+            raw_pool = style_vocab.get(input_signature, [])
+            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
+            connector_pool = list(set(valid_pool))  # UNIQUE list
+
             # Build skeleton by traversing the input graph
             graph_skeleton = self._build_skeleton_from_graph(
                 input_graph,
@@ -606,12 +691,19 @@ class TopologicalMatcher:
                     'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
                     'intent': input_intent,
                     'signature': input_signature,
-                    'source_method': 'graph_traversal'  # Tag as graph-based
+                    'source_method': 'graph_traversal',  # Tag as graph-based
+                    'connector_pool': connector_pool  # Store connector pool for style tracking
                 }
 
         # Fallback: If graph-based building fails, use statistical synthesis
         STRUCTURAL_DISTANCE_THRESHOLD = 0.4  # If best match distance > 0.4, synthesize from candidates
         if candidates:
+            # Harvest style vocabulary for connector_pool extraction
+            style_vocab = self._harvest_style_vocab(candidates, verbose=verbose)
+            raw_pool = style_vocab.get(input_signature, [])
+            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
+            connector_pool = list(set(valid_pool))  # UNIQUE list
+
             best_distance = candidates[0].get('distance', float('inf'))
             if best_distance > STRUCTURAL_DISTANCE_THRESHOLD:
                 if verbose:
@@ -642,7 +734,8 @@ class TopologicalMatcher:
                         'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
                         'intent': input_intent,
                         'signature': input_signature,
-                        'source_method': 'statistical_synthesis'  # Tag as statistical synthesis
+                        'source_method': 'statistical_synthesis',  # Tag as statistical synthesis
+                        'connector_pool': connector_pool  # Store connector pool for style tracking
                     }
                 else:
                     # Fallback to generic if synthesis fails
@@ -663,7 +756,8 @@ class TopologicalMatcher:
                             'node_mapping': {f'P{i}': prop for i, prop in enumerate(propositions)},
                             'intent': input_intent,
                             'signature': input_signature,
-                            'source_method': 'generic_template'  # Tag as generic fallback
+                            'source_method': 'generic_template',  # Tag as generic fallback
+                            'connector_pool': connector_pool  # Store connector pool for style tracking
                         }
 
         # Step B: The Grafter - Call LLM to construct custom blueprint via topological grafting
@@ -691,14 +785,19 @@ class TopologicalMatcher:
 
         candidates_text = "\n\n".join(candidates_list)
 
-        system_prompt = f"""You are a Template Selector (NOT a Fiction Writer).
-Your Goal: Select the ONE candidate that BEST matches the Input Logic ({input_intent}, {input_signature}). Do NOT synthesize new skeletons.
+        system_prompt = f"""You are a Structural Mapper (NOT a Fiction Writer).
+Your Goal: Analyze the Input Logic flow (e.g., Purpose -> Contrast -> Attribution) and select the Style Candidate that BEST matches this structural pattern.
+
+**Core Principle:** Map the Input Logic structure onto the Candidate's grammatical structure. Do NOT create run-on chains.
+
 Constraints:
-1. DO NOT invent new skeletons. Only select from the provided Candidates.
-2. DO NOT write generic English (e.g., "In reality," "However").
-3. HARVEST the exact connectors and rhetorical structures from the Candidates.
-4. If no candidate matches well, you may SPLICE two candidates together, but ONLY use phrases that exist in the Candidates.
-5. **CRITICAL:** If the Input Logic does not match any candidate well, return a simple structure that preserves the Input Propositions without adding invented connectors."""
+1. **Structural Matching:** Analyze the Input Logic sequence (e.g., "Purpose -> Contrast"). Find the Candidate whose skeleton structure matches this flow.
+2. **DO NOT invent new skeletons.** Only select from the provided Candidates.
+3. **DO NOT write generic English** (e.g., "In reality," "However").
+4. **HARVEST exact connectors** from the Candidates. Use their grammatical structure.
+5. **NO Run-On Chains:** Do NOT create structures like "X to Y by Z from A". Use the candidate's clean grammatical structure.
+6. **Adapt Connector Slots:** If needed, adapt the candidate's connector slots to fit the input, but preserve its grammatical structure.
+7. **CRITICAL:** If the Input Logic does not match any candidate well, return a simple structure that preserves the Input Propositions without adding invented connectors."""
 
         # Build style guidance from style_profile if available
         style_guidance = ""
@@ -730,10 +829,27 @@ Constraints:
 {candidates_text}
 {style_guidance}{prev_context_section}
 **TASK:**
-1. **Select Best Matching Candidate:**
+
+**CRITICAL: PRESERVE INPUT LOGIC STRUCTURE**
+- The skeleton MUST preserve the logical structure of the input propositions
+- If input says "People assume X" and "People assume Y" (two separate assumptions),
+  the skeleton should say "[P0] and [P1]" or "[P0], while [P1]", NOT "For all [P0] and [P1] are interconnected"
+- Do NOT reinterpret or restructure the meaning
+- Do NOT force separate facts into unified systems unless the input explicitly states they are unified
+- Map propositions directly: P0 maps to first proposition, P1 to second, etc.
+- Preserve the original logical relationships (separate vs. unified, independent vs. dependent)
+- If input has no quotes, do NOT add quote structures like "when he said that..." or "as X stated..."
+- If input describes separate events/facts, keep them separate in the skeleton
+
+1. **Analyze Input Logic Flow:**
    - The Input Logic is: {input_intent} with signature {input_signature}.
-   - Find the candidate whose skeleton structure BEST matches this logic.
+   - Identify the logical sequence (e.g., "Definition -> Contrast" or "Purpose -> Attribution").
+   - **CRITICAL:** Identify whether propositions are SEPARATE/INDEPENDENT or UNIFIED/INTERCONNECTED in the input
+
+2. **Select Best Structural Match:**
+   - Find the candidate whose skeleton structure BEST matches this logical flow.
    - **CRITICAL:** Do NOT invent a new skeleton. If none match well, select the closest one and adapt minimally.
+   - **Structural Mapping:** Map the Input Logic pattern onto the candidate's grammatical structure.
    - **If NO candidate matches:** Return a simple structure like "[P0] and [P1]" that preserves facts without style.
 
 2. **Harvest Connectors (The Frankenstein Step):**
@@ -749,10 +865,19 @@ Constraints:
    - Example: If P0 and P1 are redundant, use `[P0]` for both and skip `[P1]` in the skeleton.
 
 4. **Construct the Skeleton:**
-   - Stitch these harvested phrases around the Input Slots `[P0]`, `[P1]`.
+   - Stitch these harvested phrases around the Skeleton Slots `[S0]`, `[S1]`, etc.
    - **CRITICAL:** You must use the **exact vocabulary** of the candidates (e.g., use "constitutes", "manifests as", "stem from" instead of "is").
    - If you must combine phrases from multiple candidates, SPLICE them together (e.g., Candidate 2's opening + Candidate 14's transition).
-   - **Constraint:** The final skeleton MUST consist of **Real Author Phrases** + `[P#]` slots.
+   - **Constraint:** The final skeleton MUST consist of **Real Author Phrases** + `[S#]` slots (NOT `[P#]` - those are input propositions).
+   - **PRESERVE LOGIC:** Do NOT add connectors that change the meaning (e.g., if input has two separate assumptions, do NOT say "For all [S0] and [S1] are interconnected" - use "[S0] and [S1]" or "[S0], while [S1]" instead).
+
+6. **Define Slot Mapping (CRITICAL):**
+   - For each Skeleton Slot `[S0]`, `[S1]`, etc., you MUST specify which Input Proposition Indices (0, 1, 2...) map to it.
+   - **Merging Rule:** If multiple input propositions should be merged into one slot (e.g., P0 and P1 are redundant), map them both: `"[S0]": [0, 1]`
+   - **Splitting Rule:** If one input proposition should be split across slots, you may reference it multiple times (rare).
+   - **Example:** If Input has P0="People assume X", P1="People assume Y" (redundant), and P2="Reality is Z", then:
+     - Skeleton: "It is not [S0], but [S1]"
+     - slot_mapping: `{{"[S0]": [0, 1], "[S1]": [2]}}` (merged P0 and P1 into S0)
 
 5. **Fallback:**
    - If you absolutely cannot find a match, you may adapt a candidate, but you MUST maintain the **dense, archaic, or revolutionary tone** of the group.
@@ -760,8 +885,13 @@ Constraints:
 **OUTPUT JSON:**
 {{
   "selected_source_indices": [2, 14],
-  "revised_skeleton": "It is a naive assumption among some to view [P0] as [P1]; on the contrary, the objective reality [P2]...",
-  "rationale": "Spliced Candidate 2 (Misconception Opening) with Candidate 14 (Dialectical Correction)."
+  "revised_skeleton": "It is a naive assumption among some to view [S0] as [S1]; on the contrary, the objective reality [S2]...",
+  "slot_mapping": {{
+    "[S0]": [0, 1],
+    "[S1]": [2],
+    "[S2]": [3]
+  }},
+  "rationale": "Spliced Candidate 2 (Misconception Opening) with Candidate 14 (Dialectical Correction). Merged P0 and P1 into S0 because they express the same misconception."
 }}"""
 
         try:
@@ -790,6 +920,9 @@ Constraints:
                     selected_source_indices = [selected_donor_index]
             original_donor_connectors = result.get('original_donor_connectors', [])
 
+            # Parse slot_mapping (new format) - maps skeleton slots [S0], [S1] to input proposition indices
+            slot_mapping = result.get('slot_mapping', {})
+
             if verbose:
                 print(f"     ✓ Assembler created skeleton: {revised_skeleton[:80]}...")
                 if rationale:
@@ -808,17 +941,54 @@ Constraints:
         except (json.JSONDecodeError, Exception) as e:
             if verbose:
                 print(f"     ⚠ Assembler LLM call failed: {e}, using fallback skeleton")
-            # Fallback: create simple skeleton with all propositions
-            revised_skeleton = " ".join([f"[P{i}]" for i in range(len(propositions))])
+            # Fallback: create simple skeleton with all propositions using [S0], [S1] format
+            revised_skeleton = " ".join([f"[S{i}]" for i in range(len(propositions))])
             if len(propositions) > 1:
-                revised_skeleton = " ".join([f"[P{i}]" if i == 0 else f"and [P{i}]" for i in range(len(propositions))])
+                revised_skeleton = " ".join([f"[S{i}]" if i == 0 else f"and [S{i}]" for i in range(len(propositions))])
+            slot_mapping = {}  # No slot mapping in fallback
 
-        # Step C: Create blueprint with direct P0->P0 mapping
-        node_mapping = {f'P{i}': f'P{i}' for i in range(len(propositions))}
+        # Step C: Build node_mapping from slot_mapping
+        # If slot_mapping is provided, use it; otherwise fall back to naive 1:1 mapping
+        if slot_mapping:
+            # Convert slot_mapping format {"[S0]": [0, 1], "[S1]": [2]}
+            # to node_mapping format {"S0": "P0, P1", "S1": "P2"}
+            node_mapping = {}
+            for slot_key, prop_indices in slot_mapping.items():
+                # Remove brackets from slot key: "[S0]" -> "S0"
+                slot_name = slot_key.strip('[]')
+                # Convert indices to proposition keys: [0, 1] -> "P0, P1"
+                prop_keys = [f'P{i}' for i in prop_indices if isinstance(i, int) and 0 <= i < len(propositions)]
+                if prop_keys:
+                    node_mapping[slot_name] = ', '.join(prop_keys)
+
+            if verbose:
+                print(f"     ✓ Built node_mapping from slot_mapping: {len(node_mapping)} slots")
+        else:
+            # Fallback: naive 1:1 mapping (backward compatibility)
+            # Check if skeleton uses [S0] format or [P0] format
+            import re
+            has_s_slots = re.search(r'\[S\d+\]', revised_skeleton)
+            if has_s_slots:
+                # New format: map S0->P0, S1->P1, etc.
+                node_mapping = {f'S{i}': f'P{i}' for i in range(len(propositions))}
+            else:
+                # Old format: map P0->P0, P1->P1, etc.
+                node_mapping = {f'P{i}': f'P{i}' for i in range(len(propositions))}
+
+            if verbose:
+                print(f"     ⚠ No slot_mapping provided, using naive 1:1 mapping")
 
         # Use effective_signature (may be different from input_signature if fallback was used)
         # Default to DEFINITION if effective_signature is None (emergency fallback)
         final_signature = effective_signature if effective_signature is not None else 'DEFINITION'
+
+        # Extract connector_pool for style state tracking (if candidates available)
+        connector_pool = []
+        if candidates:
+            style_vocab = self._harvest_style_vocab(candidates, verbose=verbose)
+            raw_pool = style_vocab.get(final_signature, [])
+            valid_pool = [c for c in raw_pool if self._is_valid_connector(c)]
+            connector_pool = list(set(valid_pool))  # UNIQUE list
 
         blueprint = {
             'style_metadata': {
@@ -834,7 +1004,8 @@ Constraints:
             'intent': input_intent,
             'signature': final_signature,  # Also store at top level for easy access
             'distance': 0.0,  # No distance for synthesized blueprints
-            'source_method': 'llm_grafting'  # Tag as LLM-based grafting
+            'source_method': 'llm_grafting',  # Tag as LLM-based grafting
+            'connector_pool': connector_pool  # Store connector pool for style tracking
         }
 
         if verbose:
@@ -913,6 +1084,136 @@ Constraints:
                 # If spaCy not available, mark as unavailable
                 self._nlp_cache = False
         return self._nlp_cache if self._nlp_cache is not False else None
+
+    def _extract_semantic_connector(
+        self,
+        edge_label: str,
+        source_text: str,
+        target_text: str,
+        verbose: bool = False
+    ) -> str:
+        """Extract semantic connector from proposition text using spaCy.
+
+        Analyzes the source and target proposition text to find the actual
+        preposition/connector used, rather than hardcoding it.
+
+        Args:
+            edge_label: Semantic edge type (PURPOSE, ORIGIN, COMPOSITION, ATTRIBUTION)
+            source_text: Text of source proposition
+            target_text: Text of target proposition
+            verbose: Enable verbose logging
+
+        Returns:
+            Extracted connector string (e.g., " for ", " from ", ", including ", ", by ")
+        """
+        nlp = self._get_nlp()
+        if nlp is None:
+            # Fallback to hardcoded values if spaCy unavailable
+            fallback_map = {
+                'PURPOSE': " for ",
+                'ORIGIN': " from ",
+                'COMPOSITION': ", including ",
+                'ATTRIBUTION': ", by "
+            }
+            return fallback_map.get(edge_label, " ")
+
+        # Define semantic patterns for each edge type
+        semantic_patterns = {
+            'PURPOSE': {
+                'prepositions': ['for', 'to', 'used for', 'essential to', 'needed for'],
+                'fallback': " for "
+            },
+            'ORIGIN': {
+                'prepositions': ['from', 'comes from', 'sourced from', 'originates from', 'derived from'],
+                'fallback': " from "
+            },
+            'COMPOSITION': {
+                'prepositions': ['including', 'consists of', 'comprises', 'contains', 'made of', 'composed of'],
+                'fallback': ", including "
+            },
+            'ATTRIBUTION': {
+                'prepositions': ['by', 'stated by', 'coined by', 'created by', 'written by', 'attributed to'],
+                'fallback': ", by "
+            }
+        }
+
+        patterns = semantic_patterns.get(edge_label, {'prepositions': [], 'fallback': " "})
+        fallback = patterns['fallback']
+
+        # Analyze both source and target text separately, then combined
+        # The connector might be at the start of target_text or end of source_text
+        texts_to_analyze = [
+            source_text.lower(),
+            target_text.lower(),
+            f"{source_text} {target_text}".lower()
+        ]
+
+        found_connector = None
+
+        for text_to_analyze in texts_to_analyze:
+            doc = nlp(text_to_analyze)
+
+            # Look for prepositions (POS tag: ADP) or specific words
+            for token in doc:
+                token_lower = token.text.lower()
+                # Check if this token matches any of our semantic patterns
+                for pattern in patterns['prepositions']:
+                    if pattern == token_lower or (len(pattern) > 1 and pattern in token_lower):
+                        # Found a match - extract the connector with context
+                        connector_parts = []
+
+                        # For multi-word patterns, check if we have a phrase
+                        if ' ' in pattern:
+                            # Look for the phrase in the text
+                            pattern_words = pattern.split()
+                            start_idx = None
+                            for i in range(len(doc) - len(pattern_words) + 1):
+                                if all(doc[i+j].text.lower() == pattern_words[j] for j in range(len(pattern_words))):
+                                    start_idx = i
+                                    break
+
+                            if start_idx is not None:
+                                # Extract the phrase and surrounding punctuation
+                                connector_parts = [doc[i].text_with_ws for i in range(start_idx, start_idx + len(pattern_words))]
+                                found_connector = ''.join(connector_parts)
+                                break
+                        else:
+                            # Single word pattern - check if it's a preposition
+                            if token.pos_ == 'ADP' or token_lower in patterns['prepositions']:
+                                # Get the token with its whitespace
+                                connector_parts = [token.text_with_ws]
+                                found_connector = ''.join(connector_parts)
+                                break
+
+                if found_connector:
+                    break
+
+            if found_connector:
+                break
+
+        # If we found a connector, normalize it
+        if found_connector:
+            # Ensure proper spacing
+            connector = found_connector.strip()
+            if edge_label in ['COMPOSITION', 'ATTRIBUTION']:
+                if not connector.startswith(','):
+                    connector = ", " + connector
+                if not connector.endswith(' '):
+                    connector = connector + " "
+            else:
+                if not connector.startswith(' '):
+                    connector = " " + connector
+                if not connector.endswith(' '):
+                    connector = connector + " "
+
+            if verbose:
+                print(f"     Extracted semantic connector ({edge_label}): '{connector}' from text")
+            return connector
+
+        # Fallback to hardcoded value if extraction failed
+        if verbose:
+            print(f"     Could not extract {edge_label} connector from text, using fallback: '{fallback}'")
+        return fallback
 
     def _is_valid_connector(self, text: str) -> bool:
         """Check if a text fragment is a valid connector using spaCy POS tagging.
@@ -1049,6 +1350,22 @@ Constraints:
                         elif grammar_type == 'PUNCT':
                             style_vocab['LIST'].append(clean_conn)
 
+        # Ensure connector variety: Add defaults if pool is too small
+        default_connectors = {
+            'CONTRAST': [", but ", "; however, ", ", yet ", ", unlike ", ", whereas ", ", instead, ", ", on the contrary, "],
+            'DEFINITION': [" is ", ", defined as ", " refers to ", " means ", " constitutes ", " represents "],
+            'SEQUENCE': [", and ", ", then ", "; subsequently, ", ", next ", ", after which, ", ", following this, "],
+            'CAUSALITY': [", because ", ", since ", "; therefore, ", ", thus ", ", as a result, ", ", consequently, "],
+            'LIST': [", ", "; ", ", and ", ", or ", ", as well as ", ", along with "]
+        }
+
+        for logic_type, defaults_list in default_connectors.items():
+            if len(style_vocab[logic_type]) < 5:
+                # Add defaults to ensure variety (increased threshold to 5 for better cycling)
+                style_vocab[logic_type].extend(defaults_list)
+                if verbose:
+                    print(f"     Added {len(defaults_list)} default connectors for {logic_type} (pool had {len(style_vocab[logic_type]) - len(defaults_list)} items, now {len(style_vocab[logic_type])})")
+
         if verbose:
             for logic_type, connectors in style_vocab.items():
                 if connectors:
@@ -1134,12 +1451,22 @@ Constraints:
             all_nodes.add(source)
             all_nodes.add(target)
 
+        # FILTER: Only keep proposition nodes (P0, P1, P2, etc.)
+        # Edge labels like CAUSALITY, PURPOSE, CONTRAST, ATTRIBUTION should NOT be nodes
+        proposition_pattern = re.compile(r'^P\d+$')
+        valid_nodes = [node for node in all_nodes if proposition_pattern.match(node)]
+
+        if not valid_nodes:
+            if verbose:
+                print(f"     ⚠ No valid proposition nodes found in graph")
+            return None
+
         # Sort nodes by their numeric index (P0, P1, P2...)
         try:
-            ordered_nodes = sorted(all_nodes, key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else 999)
+            ordered_nodes = sorted(valid_nodes, key=lambda x: int(x[1:]) if x.startswith('P') and x[1:].isdigit() else 999)
         except:
             # Fallback: just use the order they appear
-            ordered_nodes = list(all_nodes)
+            ordered_nodes = valid_nodes
 
         if verbose:
             print(f"     Graph traversal: {len(ordered_nodes)} nodes, {len(edges)} edges")
@@ -1148,6 +1475,7 @@ Constraints:
         # Build skeleton by walking the path
         parts = []
         used_connectors = set()  # Track used connectors to prevent repetition
+        contrast_used = False  # Track if we've already used a contrast connector in this chunk
 
         for i, current_node in enumerate(ordered_nodes):
             parts.append(f"[{current_node}]")
@@ -1156,63 +1484,122 @@ Constraints:
                 next_node = ordered_nodes[i + 1]
 
                 # Find edge between current and next node
-                edge_label = 'SEQUENCE'  # Default
+                local_label = 'SEQUENCE'  # Default
                 for source, target, label in edges:
                     if source == current_node and target == next_node:
-                        edge_label = label
+                        local_label = label
                         break
 
-                # CONTEXTUAL OVERRIDE: If paragraph is globally CONTRAST, treat generic SEQUENCE as CONTRAST
-                # A contrastive paragraph often structures propositions sequentially, but the logical
-                # connection should be adversarial ("but") rather than temporal ("then")
-                if global_signature == 'CONTRAST' and edge_label == 'SEQUENCE':
-                    if verbose:
-                        print(f"     Overriding SEQUENCE edge with CONTRAST (global signature: {global_signature})")
-                    edge_label = 'CONTRAST'
-
-                # CONNECTOR CYCLING: Prevent repetition by selecting unused connectors
-                connectors_for_logic = style_vocab.get(edge_label, [])
-
-                # Filter invalid connectors (e.g., VERBs in CONTRAST)
-                valid_connectors = []
-                for conn in connectors_for_logic:
-                    # Check if connector is grammatically valid for this logic type
-                    grammar_type = self._analyze_connector_grammar(conn)
-                    if edge_label == 'CONTRAST' and grammar_type == 'VERB':
-                        continue  # Skip VERB connectors for CONTRAST
-                    if edge_label == 'DEFINITION' and grammar_type != 'VERB':
-                        continue  # Only VERB connectors for DEFINITION
-                    valid_connectors.append(conn)
-
-                # SELECT WITH CYCLING: Pick first unused connector
+                # PRIORITY 1: Handle Semantic Edges FIRST (Never override these)
                 selected_connector = None
-                for conn in valid_connectors:
-                    if conn not in used_connectors:
-                        selected_connector = conn
-                        used_connectors.add(conn)  # Mark as used
+                if local_label in ['PURPOSE', 'ORIGIN', 'COMPOSITION', 'ATTRIBUTION']:
+                    # Semantic edges are unbreakable - use them directly, ignore global signature
+                    edge_label = local_label
+                    # Get source and target proposition text from node_map
+                    node_map = input_graph.get('node_map', {})
+                    source_text = node_map.get(current_node, "")
+                    target_text = node_map.get(next_node, "")
+
+                    # Try to extract connector from actual text using spaCy
+                    extracted_connector = self._extract_semantic_connector(
+                        edge_label,
+                        source_text,
+                        target_text,
+                        verbose=verbose
+                    )
+
+                    # Use extracted connector if it's rich (not just basic fallback)
+                    # Basic fallbacks are: " for ", " from ", ", including ", ", by "
+                    basic_fallbacks = {" for ", " from ", ", including ", ", by "}
+                    if extracted_connector and extracted_connector.strip() not in basic_fallbacks:
+                        selected_connector = extracted_connector
+                    else:
+                        # Fallback to SEMANTIC_WRAPPERS for richer connectors
+                        import random
+                        wrappers = self.SEMANTIC_WRAPPERS.get(edge_label, [])
+                        if wrappers:
+                            selected_connector = random.choice(wrappers)
+                            if verbose:
+                                print(f"     Using semantic wrapper ({edge_label}): '{selected_connector}'")
+                        else:
+                            # Ultimate fallback to extracted connector
+                            selected_connector = extracted_connector
+                else:
+                    # PRIORITY 2: Handle Rhetorical Edges (Apply global override only if appropriate)
+                    # Determine effective label for rhetorical edges
+                    effective_label = local_label
+
+                    # LIMITED CONTRAST OVERRIDE: Only override SEQUENCE to CONTRAST if:
+                    # 1. Global signature is CONTRAST
+                    # 2. Local edge is SEQUENCE (not already specific)
+                    # 3. We haven't used a contrast connector yet in this chunk
+                    if global_signature == 'CONTRAST' and local_label == 'SEQUENCE' and not contrast_used:
+                        effective_label = 'CONTRAST'
+                        contrast_used = True  # Mark that we've used contrast
                         if verbose:
-                            print(f"     Selected {edge_label} connector (cycling): '{conn[:30]}...'")
-                        break
-
-                # Fallback: If all valid connectors are used, reset history and pick the best one
-                if not selected_connector and valid_connectors:
-                    # Reset history for this logic type (allow reuse after all have been used)
-                    used_connectors = {c for c in used_connectors if c not in valid_connectors}
-                    if valid_connectors:
-                        from collections import Counter
-                        connector_counts = Counter(valid_connectors)
-                        selected_connector = connector_counts.most_common(1)[0][0]
-                        used_connectors.add(selected_connector)
+                            print(f"     Overriding first SEQUENCE edge with CONTRAST (global signature: {global_signature})")
+                    # If we've already used contrast, keep SEQUENCE as SEQUENCE
+                    elif global_signature == 'CONTRAST' and local_label == 'SEQUENCE' and contrast_used:
+                        effective_label = 'SEQUENCE'  # Keep as sequence for flow
                         if verbose:
-                            print(f"     All {edge_label} connectors used, resetting and selecting best: '{selected_connector[:30]}...'")
+                            print(f"     Keeping SEQUENCE edge (contrast already used, maintaining flow)")
 
-                # Ultimate fallback: Use default connector
-                if not selected_connector:
-                    selected_connector = self._select_connector(style_vocab, edge_label, verbose=False)
-                    if verbose:
-                        print(f"     Using fallback {edge_label} connector: '{selected_connector[:30]}...'")
+                    edge_label = effective_label
 
-                parts.append(selected_connector)
+                    # Handle Rhetorical Edges via Style Lookup
+                    connectors_for_logic = style_vocab.get(edge_label, [])
+
+                    # Filter invalid connectors (e.g., VERBs in CONTRAST)
+                    valid_connectors = []
+                    for conn in connectors_for_logic:
+                        # Check if connector is grammatically valid for this logic type
+                        grammar_type = self._analyze_connector_grammar(conn)
+                        if edge_label == 'CONTRAST' and grammar_type == 'VERB':
+                            continue  # Skip VERB connectors for CONTRAST
+                        if edge_label == 'DEFINITION' and grammar_type != 'VERB':
+                            continue  # Only VERB connectors for DEFINITION
+                        valid_connectors.append(conn)
+
+                    # SELECT WITH CYCLING: Pick first unused connector
+                    for conn in valid_connectors:
+                        if conn not in used_connectors:
+                            selected_connector = conn
+                            used_connectors.add(conn)  # Mark as used
+                            if verbose:
+                                print(f"     Selected {edge_label} connector (cycling): '{conn[:30]}...'")
+                            break
+
+                    # Fallback: If all valid connectors are used, reset history and pick the best one
+                    if not selected_connector and valid_connectors:
+                        # Reset history for this logic type (allow reuse after all have been used)
+                        used_connectors = {c for c in used_connectors if c not in valid_connectors}
+                        if valid_connectors:
+                            from collections import Counter
+                            connector_counts = Counter(valid_connectors)
+                            selected_connector = connector_counts.most_common(1)[0][0]
+                            used_connectors.add(selected_connector)
+                            if verbose:
+                                print(f"     All {edge_label} connectors used, resetting and selecting best: '{selected_connector[:30]}...'")
+
+                    # Ultimate fallback: Use default connector
+                    if not selected_connector:
+                        selected_connector = self._select_connector(style_vocab, edge_label, verbose=False)
+                        if verbose:
+                            print(f"     Using fallback {edge_label} connector: '{selected_connector[:30]}...'")
+
+                # Fix connector spacing to prevent run-on text like "[P0]but[P1]"
+                if selected_connector:
+                    clean_conn = selected_connector.strip()
+
+                    # Add leading space if needed (unless it starts with punctuation)
+                    if clean_conn and clean_conn[0] not in {',', '.', ';', ':', '?', '!'}:
+                        clean_conn = " " + clean_conn
+
+                    # Add trailing space if needed (almost always)
+                    if clean_conn and not clean_conn.endswith(" "):
+                        clean_conn = clean_conn + " "
+
+                    parts.append(clean_conn)
 
         skeleton = "".join(parts)
 

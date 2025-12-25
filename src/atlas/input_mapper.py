@@ -76,7 +76,18 @@ class InputLogicMapper:
 Task:
 1. **CRITICAL: De-duplicate facts.** If the text repeats an idea (e.g., 'He made it' and 'It was created by him'), extract it ONLY ONCE. Remove redundant propositions before creating the graph.
 2. Create a Mermaid graph using IDs P0, P1, P2... corresponding to the list index (after deduplication).
-3. Label edges with logic (cause, contrast, support).
+3. Label edges with logic types:
+
+**Rhetorical Logic (Flow of Argument):**
+- cause, contrast, support, sequence, elaboration
+
+**Semantic Dependencies (Unbreakable Facts - MUST be kept together):**
+- PURPOSE (X is for Y, X is used for Y) -> Connects Material/Tool to its Goal
+- ORIGIN (X comes from Y, X is from Y) -> Connects Entity to its Source
+- COMPOSITION (X includes Y, X consists of Y) -> Connects Whole to Parts
+- ATTRIBUTION (X is by Y, X is stated by Y) -> Connects Quote/Idea to Author
+
+**CRITICAL:** If Proposition A depends on Proposition B to make sense (e.g., "It uses lithium" + "Lithium is from Chile"), you MUST link them with a Semantic Dependency.
 4. Write a 1-sentence description of the flow using rhetorical topology terms (causal, contrastive, conditional, enumeration, concession, definition).
 5. **Generate Structural Summary (CRITICAL):** Describe the **Rhetorical Structure** of these propositions. Ignore specific names, topics, or entities. Use abstract terms like 'Contrast', 'Definition', 'Attribution', 'Conditional', 'Causality', 'Sequence', 'List'. Keep it under 15 words. Focus on the LOGICAL FORM, not the CONTENT.
    - Example: "A definition of a concept followed by its historical origin."

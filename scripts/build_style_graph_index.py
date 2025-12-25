@@ -64,6 +64,10 @@ class StyleGraphIndexer:
         print("Initializing LLM provider...")
         self.llm_provider = LLMProvider(config_path=config_path)
 
+        # Initialize Structure Analyzer for logical chain extraction
+        from src.ingestion.structure_analyzer import StructureAnalyzer
+        self.structure_analyzer = StructureAnalyzer(self.llm_provider)
+
         # Initialize ChromaDB client
         self.chroma_path = project_root / "atlas_cache" / "chroma"
         self.chroma_path.mkdir(parents=True, exist_ok=True)
@@ -725,6 +729,9 @@ Example: If input text is "Politics is war without bloodshed." and your Mermaid 
                         return {'type': 'duplicate', 'sentence_id': sentence_id, 'graph_id': graph_id}
                     existing_graph_ids.add(graph_id)
 
+                # Extract logical structure chain using StructureAnalyzer
+                logic_signature = self.structure_analyzer.analyze_structure(sentence)
+
                 # Prepare metadata
                 metadata = {
                     'mermaid': mermaid_string,
@@ -732,7 +739,8 @@ Example: If input text is "Politics is war without bloodshed." and your Mermaid 
                     'edge_types': ','.join(topology['edge_types']),
                     'skeleton': topology.get('skeleton', ''),
                     'intent': topology.get('intent', 'ARGUMENT'),
-                    'signature': topology.get('signature', 'DEFINITION'),  # Store signature
+                    'signature': topology.get('signature', 'DEFINITION'),  # Store signature (single tag)
+                    'logic_signature': logic_signature,  # Store logic chain (pipe-separated tags)
                     'role': topology.get('role', 'BODY'),  # Store narrative role (INTRO, BODY, CONCLUSION)
                     'structural_summary': topology.get('structural_summary', topology.get('description', '')),  # Store structural summary
                     'original_text': sentence,

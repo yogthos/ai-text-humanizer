@@ -256,6 +256,31 @@ class TestSemanticFracturer:
         assert result == expected
         assert self.mock_llm.call.called
 
+    def test_fracture_with_graph_parameter(self):
+        """Test that fracture() accepts optional input_graph parameter."""
+        propositions = [f"Prop {i}" for i in range(10)]
+
+        # Test with None graph (should use LLM)
+        llm_response = [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
+        self.mock_llm.call.return_value = json.dumps(llm_response)
+
+        result = self.fracturer.fracture(propositions, target_density=5, max_density=6, input_graph=None)
+        assert result == [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
+        assert self.mock_llm.call.called
+
+    def test_fracture_backward_compatibility(self):
+        """Test that fracture() works without input_graph parameter (backward compatibility)."""
+        propositions = [f"Prop {i}" for i in range(10)]
+
+        # Mock LLM response
+        llm_response = [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
+        self.mock_llm.call.return_value = json.dumps(llm_response)
+
+        # Call without input_graph parameter (should still work)
+        result = self.fracturer.fracture(propositions, target_density=5, max_density=6)
+        assert result == [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
+        assert self.mock_llm.call.called
+
 
 if __name__ == "__main__":
     import pytest
