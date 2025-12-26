@@ -1,0 +1,738 @@
+"""Evolutionary sentence generator with selection pressure.
+
+Uses genetic algorithm principles to evolve sentences toward target style:
+1. Generate diverse population of candidates
+2. Score with multi-objective fitness function
+3. Select best candidates
+4. Apply targeted mutations based on specific failures
+5. Iterate until convergence
+"""
+
+import random
+import re
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Callable, Tuple
+from collections import Counter
+import numpy as np
+
+from ..style.profile import AuthorStyleProfile
+from ..style.verifier import StyleVerifier
+from ..utils.nlp import get_nlp, split_into_sentences
+from ..utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class Candidate:
+    """A candidate sentence with fitness scores."""
+
+    text: str
+    generation: int = 0
+
+    # Fitness components (0-1, higher is better)
+    length_fitness: float = 0.0
+    transition_fitness: float = 0.0
+    vocabulary_fitness: float = 0.0
+    fluency_fitness: float = 0.0
+
+    # Diagnostic info
+    word_count: int = 0
+    target_length: int = 0
+    has_transition: bool = False
+    issues: List[str] = field(default_factory=list)
+
+    @property
+    def total_fitness(self) -> float:
+        """Weighted fitness score."""
+        return (
+            self.length_fitness * 0.45 +      # Increased from 0.35
+            self.transition_fitness * 0.20 +  # Decreased from 0.25
+            self.vocabulary_fitness * 0.20 +  # Decreased from 0.25
+            self.fluency_fitness * 0.15
+        )
+
+    def __lt__(self, other):
+        return self.total_fitness < other.total_fitness
+
+
+@dataclass
+class GenerationState:
+    """State maintained across sentence generation."""
+
+    previous_sentences: List[str] = field(default_factory=list)
+    previous_length_category: str = "medium"
+    used_transitions: Counter = field(default_factory=Counter)
+    paragraph_lengths: List[int] = field(default_factory=list)
+    target_burstiness: float = 0.5
+
+
+class EvolutionarySentenceGenerator:
+    """Generate sentences using evolutionary optimization.
+
+    Key features:
+    - Population-based search (not single-shot)
+    - Multi-objective fitness (length, transitions, vocabulary)
+    - Targeted mutations based on specific failures
+    - Selection pressure toward convergence
+    """
+
+    def __init__(
+        self,
+        profile: AuthorStyleProfile,
+        llm_generate: Callable[[str], str],
+        population_size: int = 5,
+        max_generations: int = 3,
+        elite_count: int = 2,
+        mutation_rate: float = 0.8,
+    ):
+        """Initialize evolutionary generator.
+
+        Args:
+            profile: Target author's style profile.
+            llm_generate: Function to call LLM.
+            population_size: Number of candidates per generation.
+            max_generations: Maximum evolution iterations.
+            elite_count: Number of top candidates to preserve.
+            mutation_rate: Probability of applying mutations.
+        """
+        self.profile = profile
+        self.llm_generate = llm_generate
+        self.population_size = population_size
+        self.max_generations = max_generations
+        self.elite_count = elite_count
+        self.mutation_rate = mutation_rate
+
+        self.verifier = StyleVerifier(profile)
+        self._nlp = None
+
+        # Extract vocabulary from profile for fitness scoring
+        self.target_vocabulary = set(profile.delta_profile.mfw_frequencies.keys())
+        self.transition_words = profile.transition_profile.get_all_transitions()
+
+        # Extract top content words (exclude function words) for vocabulary hints
+        function_words = {'the', 'of', 'and', 'in', 'to', 'is', 'a', 'it', 'that',
+                         'not', 'this', 'be', 'are', 'we', 'for', 'on', 'as', 'but',
+                         'from', 's', 'they', 'or', 'with', 'its', 'their', 'at',
+                         'one', 'all', 'into', 'only', 'by', 'have', 'our', 'can',
+                         'which', 'has', 'there', 'was', 'no', 'been', 'these', 'those',
+                         'an', 'if', 'so', 'such', 'what', 'who', 'would', 'should'}
+        mfw = profile.delta_profile.mfw_frequencies
+        self.vocab_hints = [w for w, _ in sorted(mfw.items(), key=lambda x: -x[1])[:100]
+                           if w.lower() not in function_words and len(w) > 3][:20]
+
+    @property
+    def nlp(self):
+        if self._nlp is None:
+            self._nlp = get_nlp()
+        return self._nlp
+
+    def select_target_length(self, state: GenerationState) -> int:
+        """Select target length using Markov chain."""
+        length_profile = self.profile.length_profile
+        transitions = length_profile.length_transitions
+
+        current_cat = state.previous_length_category
+        if current_cat not in transitions:
+            current_cat = "medium"
+
+        probs = transitions[current_cat]
+        categories = list(probs.keys())
+        weights = [probs[cat] for cat in categories]
+        next_category = random.choices(categories, weights=weights)[0]
+
+        percentiles = length_profile.percentiles
+
+        if next_category == "short":
+            min_len = percentiles.get(10, 5)
+            max_len = percentiles.get(25, 12)
+        elif next_category == "long":
+            min_len = percentiles.get(75, 25)
+            max_len = percentiles.get(90, 45)
+        else:
+            min_len = percentiles.get(25, 12)
+            max_len = percentiles.get(75, 25)
+
+        return random.randint(min_len, max_len), next_category
+
+    def should_use_transition(
+        self,
+        position: int,
+        state: GenerationState,
+    ) -> Tuple[bool, Optional[str]]:
+        """Decide if sentence should have a transition."""
+        trans_profile = self.profile.transition_profile
+
+        if position == 0:
+            return False, None
+
+        if random.random() < trans_profile.no_transition_ratio:
+            return False, None
+
+        # Select category
+        categories = [
+            ("causal", trans_profile.causal),
+            ("adversative", trans_profile.adversative),
+            ("additive", trans_profile.additive),
+        ]
+        categories = [(name, words) for name, words in categories if words]
+        if not categories:
+            return False, None
+
+        category_name, word_probs = random.choice(categories)
+
+        words = list(word_probs.keys())
+        weights = list(word_probs.values())
+
+        # Penalize overused transitions
+        adjusted_weights = []
+        for word, weight in zip(words, weights):
+            usage_count = state.used_transitions.get(word, 0)
+            penalty = 0.5 ** usage_count
+            adjusted_weights.append(weight * penalty)
+
+        if sum(adjusted_weights) == 0:
+            return False, None
+
+        selected = random.choices(words, weights=adjusted_weights)[0]
+        return True, selected
+
+    def generate_sentence(
+        self,
+        proposition: str,
+        state: GenerationState,
+        position: int,
+    ) -> Tuple[str, GenerationState]:
+        """Generate a sentence using evolutionary optimization.
+
+        Args:
+            proposition: What to express.
+            state: Current generation state.
+            position: Position in paragraph.
+
+        Returns:
+            Tuple of (best_sentence, updated_state).
+        """
+        # Determine targets
+        target_length, length_category = self.select_target_length(state)
+        use_transition, transition_word = self.should_use_transition(position, state)
+
+        # Check if we need more burstiness
+        need_length_variation = self._check_burstiness_pressure(state, target_length)
+        if need_length_variation:
+            # Force a different length category to increase burstiness
+            target_length = self._adjust_for_burstiness(state, target_length)
+
+        logger.debug(
+            f"Generating sentence: target_length={target_length}, "
+            f"transition={transition_word}, position={position}"
+        )
+
+        # Generate initial population
+        population = self._generate_initial_population(
+            proposition, state, target_length, transition_word
+        )
+
+        # Evolve population
+        best_candidate = self._evolve_population(
+            population, proposition, state, target_length, transition_word
+        )
+
+        # Update state
+        new_state = self._update_state(
+            state, best_candidate.text, length_category, transition_word
+        )
+
+        logger.debug(
+            f"Best candidate: fitness={best_candidate.total_fitness:.3f}, "
+            f"length={best_candidate.word_count}/{target_length}, "
+            f"generation={best_candidate.generation}"
+        )
+
+        return best_candidate.text, new_state
+
+    def _check_burstiness_pressure(
+        self,
+        state: GenerationState,
+        proposed_length: int
+    ) -> bool:
+        """Check if we need to adjust length for burstiness."""
+        if len(state.paragraph_lengths) < 2:
+            return False
+
+        # Calculate current burstiness
+        lengths = state.paragraph_lengths + [proposed_length]
+        mean = np.mean(lengths)
+        std = np.std(lengths)
+        current_burstiness = std / mean if mean > 0 else 0
+
+        target_burstiness = self.profile.length_profile.burstiness
+
+        # If we're significantly below target, apply pressure
+        return current_burstiness < target_burstiness * 0.7
+
+    def _adjust_for_burstiness(
+        self,
+        state: GenerationState,
+        current_target: int
+    ) -> int:
+        """Adjust target length to increase burstiness."""
+        if not state.paragraph_lengths:
+            return current_target
+
+        recent_mean = np.mean(state.paragraph_lengths[-3:])
+        percentiles = self.profile.length_profile.percentiles
+
+        # If recent sentences are medium/long, go short
+        if recent_mean > percentiles.get(50, 18):
+            return random.randint(
+                percentiles.get(10, 5),
+                percentiles.get(25, 12)
+            )
+        # If recent sentences are short, go long
+        else:
+            return random.randint(
+                percentiles.get(75, 25),
+                percentiles.get(90, 45)
+            )
+
+    def _generate_initial_population(
+        self,
+        proposition: str,
+        state: GenerationState,
+        target_length: int,
+        transition_word: Optional[str],
+    ) -> List[Candidate]:
+        """Generate initial population of diverse candidates."""
+        population = []
+
+        # Generate diverse prompts with different instructions
+        prompt_variants = self._create_prompt_variants(
+            proposition, state, target_length, transition_word
+        )
+
+        for i, prompt in enumerate(prompt_variants[:self.population_size]):
+            try:
+                response = self.llm_generate(prompt)
+                text = self._clean_sentence(response)
+
+                candidate = self._evaluate_candidate(
+                    text, target_length, transition_word
+                )
+                candidate.generation = 0
+                population.append(candidate)
+            except Exception as e:
+                logger.warning(f"Failed to generate candidate {i}: {e}")
+
+        return population
+
+    def _create_prompt_variants(
+        self,
+        proposition: str,
+        state: GenerationState,
+        target_length: int,
+        transition_word: Optional[str],
+    ) -> List[str]:
+        """Create diverse prompt variants for population diversity."""
+        variants = []
+
+        # Base context
+        context = ""
+        if state.previous_sentences:
+            context = f'Previous: "{state.previous_sentences[-1]}"\n'
+
+        # Variant 1: Standard prompt
+        variants.append(self._build_prompt(
+            proposition, target_length, transition_word, context,
+            style_hint="Write naturally and clearly."
+        ))
+
+        # Variant 2: Emphasize length
+        length_hint = f"The sentence MUST be exactly {target_length} words."
+        variants.append(self._build_prompt(
+            proposition, target_length, transition_word, context,
+            style_hint=length_hint
+        ))
+
+        # Variant 3: Shorter target (for diversity)
+        variants.append(self._build_prompt(
+            proposition, max(8, target_length - 8), transition_word, context,
+            style_hint="Be concise but complete."
+        ))
+
+        # Variant 4: Longer target (for diversity and better length coverage)
+        variants.append(self._build_prompt(
+            proposition, target_length + 10, transition_word, context,
+            style_hint="Develop the idea fully with concrete examples and qualifications."
+        ))
+
+        # Variant 6: Much longer (for high burstiness)
+        variants.append(self._build_prompt(
+            proposition, min(50, target_length + 20), transition_word, context,
+            style_hint="Write a complex sentence with multiple clauses and specific details."
+        ))
+
+        # Variant 5: Focus on vocabulary
+        vocab_hint = "Use direct, concrete language."
+        variants.append(self._build_prompt(
+            proposition, target_length, transition_word, context,
+            style_hint=vocab_hint
+        ))
+
+        return variants
+
+    def _build_prompt(
+        self,
+        proposition: str,
+        target_length: int,
+        transition_word: Optional[str],
+        context: str,
+        style_hint: str = "",
+    ) -> str:
+        """Build a generation prompt."""
+        parts = []
+
+        if context:
+            parts.append(context)
+
+        parts.append(f"Write ONE SINGLE sentence expressing: {proposition}")
+        parts.append(f"REQUIRED: The sentence must be {target_length} words (minimum {max(10, target_length - 5)} words)")
+
+        if transition_word:
+            parts.append(f"Start with: \"{transition_word.capitalize()}\"")
+        else:
+            parts.append("Do NOT start with a transition word (but, however, so, etc.)")
+
+        # Add vocabulary guidance
+        if self.vocab_hints:
+            sample = random.sample(self.vocab_hints, min(5, len(self.vocab_hints)))
+            parts.append(f"Use plain vocabulary like: {', '.join(sample)}")
+
+        if style_hint:
+            parts.append(style_hint)
+
+        parts.append("Output ONLY the single sentence (no explanation, no multiple sentences):")
+
+        return "\n".join(parts)
+
+    def _evolve_population(
+        self,
+        population: List[Candidate],
+        proposition: str,
+        state: GenerationState,
+        target_length: int,
+        transition_word: Optional[str],
+    ) -> Candidate:
+        """Evolve population through selection and mutation."""
+        if not population:
+            # Fallback: generate a single candidate
+            prompt = self._build_prompt(
+                proposition, target_length, transition_word,
+                state.previous_sentences[-1] if state.previous_sentences else "",
+                ""
+            )
+            text = self._clean_sentence(self.llm_generate(prompt))
+            return self._evaluate_candidate(text, target_length, transition_word)
+
+        for gen in range(self.max_generations):
+            # Sort by fitness
+            population.sort(reverse=True)
+
+            # Check for convergence
+            best = population[0]
+            if best.total_fitness > 0.85:
+                logger.debug(f"Converged at generation {gen}")
+                break
+
+            # Selection: keep elite
+            elite = population[:self.elite_count]
+
+            # Generate new candidates through mutation
+            new_candidates = []
+            for candidate in elite:
+                if random.random() < self.mutation_rate:
+                    mutated = self._mutate_candidate(
+                        candidate, proposition, target_length,
+                        transition_word, state
+                    )
+                    if mutated:
+                        mutated.generation = gen + 1
+                        new_candidates.append(mutated)
+
+            # Combine elite with mutants
+            population = elite + new_candidates
+
+            # Fill remaining slots with new random candidates if needed
+            while len(population) < self.population_size:
+                prompt = random.choice(self._create_prompt_variants(
+                    proposition, state, target_length, transition_word
+                ))
+                try:
+                    text = self._clean_sentence(self.llm_generate(prompt))
+                    candidate = self._evaluate_candidate(
+                        text, target_length, transition_word
+                    )
+                    candidate.generation = gen + 1
+                    population.append(candidate)
+                except:
+                    break
+
+        # Return best
+        population.sort(reverse=True)
+        return population[0]
+
+    def _mutate_candidate(
+        self,
+        candidate: Candidate,
+        proposition: str,
+        target_length: int,
+        transition_word: Optional[str],
+        state: GenerationState,
+    ) -> Optional[Candidate]:
+        """Apply targeted mutation based on candidate's weaknesses."""
+        # Identify the main issue
+        issues = candidate.issues
+
+        mutation_prompt = None
+
+        if candidate.length_fitness < 0.7:
+            # Length is off - request specific adjustment
+            length_diff = candidate.word_count - target_length
+            if length_diff > 0:
+                mutation_prompt = (
+                    f'Shorten this sentence to exactly {target_length} words '
+                    f'(currently {candidate.word_count} words):\n'
+                    f'"{candidate.text}"\n'
+                    f'Keep the core meaning. Write ONLY the shortened sentence:'
+                )
+            else:
+                # Sentence is too short - expand it with concrete details
+                mutation_prompt = (
+                    f'This sentence is too short ({candidate.word_count} words). '
+                    f'Expand it to EXACTLY {target_length} words by adding:\n'
+                    f'- Specific examples or details\n'
+                    f'- Qualifications or context\n'
+                    f'- Related consequences or implications\n\n'
+                    f'Original: "{candidate.text}"\n\n'
+                    f'Write ONLY the expanded {target_length}-word sentence:'
+                )
+
+        elif candidate.transition_fitness < 0.7:
+            # Transition issue
+            if transition_word and not candidate.has_transition:
+                mutation_prompt = (
+                    f'Rewrite this sentence to start with "{transition_word.capitalize()}":\n'
+                    f'"{candidate.text}"\n'
+                    f'Write ONLY the rewritten sentence:'
+                )
+            elif not transition_word and candidate.has_transition:
+                mutation_prompt = (
+                    f'Rewrite this sentence WITHOUT any transition word at the start:\n'
+                    f'"{candidate.text}"\n'
+                    f'Start directly with content. Write ONLY the rewritten sentence:'
+                )
+
+        elif candidate.vocabulary_fitness < 0.6:
+            # Vocabulary doesn't match - simplify
+            mutation_prompt = (
+                f'Rewrite using simpler, more direct words:\n'
+                f'"{candidate.text}"\n'
+                f'Avoid fancy vocabulary. Write ONLY the rewritten sentence:'
+            )
+
+        else:
+            # General improvement
+            mutation_prompt = (
+                f'Improve this sentence while keeping its meaning:\n'
+                f'"{candidate.text}"\n'
+                f'Target: {target_length} words. Write ONLY the improved sentence:'
+            )
+
+        if mutation_prompt:
+            try:
+                response = self.llm_generate(mutation_prompt)
+                text = self._clean_sentence(response)
+                return self._evaluate_candidate(text, target_length, transition_word)
+            except Exception as e:
+                logger.warning(f"Mutation failed: {e}")
+
+        return None
+
+    def _evaluate_candidate(
+        self,
+        text: str,
+        target_length: int,
+        transition_word: Optional[str],
+    ) -> Candidate:
+        """Evaluate a candidate sentence on multiple fitness dimensions."""
+        candidate = Candidate(text=text)
+
+        # Word count
+        words = text.split()
+        candidate.word_count = len(words)
+        candidate.target_length = target_length
+
+        # Length fitness (gaussian around target, tighter sigma)
+        length_diff = abs(candidate.word_count - target_length)
+        # Sigma of 3 means: 3 words off = 0.61 fitness, 6 words off = 0.14 fitness
+        candidate.length_fitness = np.exp(-0.5 * (length_diff / 3) ** 2)
+        if length_diff > target_length * 0.2:
+            candidate.issues.append("length_deviation")
+
+        # Transition fitness
+        first_words = " ".join(words[:3]).lower() if words else ""
+        has_any_transition = any(t in first_words for t in self.transition_words)
+        candidate.has_transition = has_any_transition
+
+        if transition_word:
+            # Should have specific transition
+            if transition_word.lower() in first_words:
+                candidate.transition_fitness = 1.0
+            elif has_any_transition:
+                candidate.transition_fitness = 0.5  # Has a transition, but wrong one
+                candidate.issues.append("wrong_transition")
+            else:
+                candidate.transition_fitness = 0.2
+                candidate.issues.append("missing_transition")
+        else:
+            # Should NOT have transition
+            if has_any_transition:
+                candidate.transition_fitness = 0.3
+                candidate.issues.append("unwanted_transition")
+            else:
+                candidate.transition_fitness = 1.0
+
+        # Vocabulary fitness (overlap with author's MFW)
+        text_words = set(w.lower() for w in re.findall(r'\b[a-z]+\b', text.lower()))
+        if text_words and self.target_vocabulary:
+            overlap = len(text_words & self.target_vocabulary)
+            candidate.vocabulary_fitness = min(1.0, overlap / max(5, len(text_words) * 0.3))
+        else:
+            candidate.vocabulary_fitness = 0.5
+
+        # Fluency fitness (basic checks)
+        candidate.fluency_fitness = 1.0
+        if not text.strip():
+            candidate.fluency_fitness = 0.0
+        elif text[-1] not in '.!?':
+            candidate.fluency_fitness *= 0.8
+        elif text.count('"') % 2 != 0:
+            candidate.fluency_fitness *= 0.9
+
+        return candidate
+
+    def _clean_sentence(self, text: str) -> str:
+        """Clean LLM response to get a single sentence."""
+        text = text.strip()
+
+        # Remove common prefixes
+        prefixes = ["Here's", "Here is", "Sentence:", "Output:", "Result:", "Sure:"]
+        for prefix in prefixes:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+                if text.startswith(":"):
+                    text = text[1:].strip()
+
+        # Remove quotes
+        if text.startswith('"') and text.endswith('"'):
+            text = text[1:-1]
+        if text.startswith("'") and text.endswith("'"):
+            text = text[1:-1]
+
+        # Remove newlines
+        text = ' '.join(text.split())
+
+        # Keep only the first sentence if multiple were returned
+        # Look for sentence boundaries but be careful with abbreviations
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+        if len(sentences) > 1:
+            # Take the longest sentence (likely the main content)
+            text = max(sentences, key=len)
+
+        # Ensure punctuation
+        if text and text[-1] not in '.!?':
+            text += '.'
+
+        return text
+
+    def _update_state(
+        self,
+        state: GenerationState,
+        sentence: str,
+        length_category: str,
+        transition_word: Optional[str],
+    ) -> GenerationState:
+        """Update generation state after producing a sentence."""
+        new_state = GenerationState(
+            previous_sentences=state.previous_sentences + [sentence],
+            previous_length_category=length_category,
+            used_transitions=state.used_transitions.copy(),
+            paragraph_lengths=state.paragraph_lengths + [len(sentence.split())],
+            target_burstiness=state.target_burstiness,
+        )
+
+        if transition_word:
+            new_state.used_transitions[transition_word] += 1
+
+        return new_state
+
+
+class EvolutionaryParagraphGenerator:
+    """Generate paragraphs using evolutionary sentence generation."""
+
+    def __init__(
+        self,
+        profile: AuthorStyleProfile,
+        llm_generate: Callable[[str], str],
+        population_size: int = 5,
+        max_generations: int = 3,
+    ):
+        """Initialize paragraph generator."""
+        self.generator = EvolutionarySentenceGenerator(
+            profile=profile,
+            llm_generate=llm_generate,
+            population_size=population_size,
+            max_generations=max_generations,
+        )
+        self.profile = profile
+        self.verifier = StyleVerifier(profile)
+
+    def generate_paragraph(
+        self,
+        propositions: List[str],
+    ) -> str:
+        """Generate a paragraph from propositions.
+
+        Args:
+            propositions: List of propositions to express.
+
+        Returns:
+            Generated paragraph text.
+        """
+        if not propositions:
+            return ""
+
+        state = GenerationState(
+            target_burstiness=self.profile.length_profile.burstiness
+        )
+        sentences = []
+
+        for i, proposition in enumerate(propositions):
+            sentence, state = self.generator.generate_sentence(
+                proposition=proposition,
+                state=state,
+                position=i,
+            )
+            sentences.append(sentence)
+
+        paragraph = " ".join(sentences)
+
+        # Verify and log
+        verification = self.verifier.verify_paragraph(paragraph)
+        if not verification.is_acceptable:
+            logger.warning(
+                f"Paragraph verification: score={verification.overall_score:.2f}, "
+                f"issues={verification.issues}"
+            )
+
+        return paragraph
