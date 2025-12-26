@@ -1,18 +1,4 @@
-"""Planning module for sentence structure planning."""
+"""Planning module - integrated into data-driven generation pipeline."""
 
-from .graph_matcher import GraphMatcher, MatchedStyleGraph, FallbackMatcher
-from .rhythm_planner import RhythmPlanner, RhythmPattern
-from .sentence_planner import SentencePlanner, PropositionClusterer
-
-__all__ = [
-    # Graph matching
-    "GraphMatcher",
-    "MatchedStyleGraph",
-    "FallbackMatcher",
-    # Rhythm planning
-    "RhythmPlanner",
-    "RhythmPattern",
-    # Sentence planning
-    "SentencePlanner",
-    "PropositionClusterer",
-]
+# Planning is now handled by the sentence-by-sentence generator
+# using Markov chains and statistical constraints from the style profile.

@@ -1,16 +1,15 @@
-"""Corpus ingestion and indexing module."""
+"""Corpus loading and preprocessing."""
 
-from .loader import CorpusLoader
-from .preprocessor import TextPreprocessor
-from .analyzer import StatisticalAnalyzer, FeatureVector
-from .profiler import StyleProfiler
-from .indexer import CorpusIndexer
+from .loader import CorpusLoader, Corpus, Document
+from .preprocessor import TextPreprocessor, ProcessedDocument, ProcessedParagraph
+from .analyzer import StatisticalAnalyzer
 
 __all__ = [
     "CorpusLoader",
+    "Corpus",
+    "Document",
     "TextPreprocessor",
+    "ProcessedDocument",
+    "ProcessedParagraph",
     "StatisticalAnalyzer",
-    "FeatureVector",
-    "StyleProfiler",
-    "CorpusIndexer",
 ]

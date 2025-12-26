@@ -1,22 +1,9 @@
-"""Semantic ingestion and graph construction module."""
+"""Ingestion module for text processing."""
 
-from .proposition_extractor import PropositionExtractor, SVOTriple
-from .relationship_detector import RelationshipDetector, RELATIONSHIP_MARKERS
-from .graph_builder import SemanticGraphBuilder, DocumentGraphBuilder
-from .context_analyzer import GlobalContextAnalyzer, GlobalContext, ParagraphContext
+from .proposition_extractor import PropositionExtractor, SVOTriple, PropositionNode
 
 __all__ = [
-    # Proposition extraction
     "PropositionExtractor",
+    "PropositionNode",
     "SVOTriple",
-    # Relationship detection
-    "RelationshipDetector",
-    "RELATIONSHIP_MARKERS",
-    # Graph building
-    "SemanticGraphBuilder",
-    "DocumentGraphBuilder",
-    # Context analysis
-    "GlobalContextAnalyzer",
-    "GlobalContext",
-    "ParagraphContext",
 ]

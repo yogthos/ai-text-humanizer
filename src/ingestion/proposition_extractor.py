@@ -1,11 +1,10 @@
 """Proposition extraction from text using spaCy and LLM."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import uuid
 
-from ..models.graph import PropositionNode
 from ..utils.nlp import get_nlp, split_into_sentences, extract_citations
 from ..utils.logging import get_logger
 
@@ -19,6 +18,23 @@ class SVOTriple:
     verb: str
     object: Optional[str]
     full_text: str
+
+
+@dataclass
+class PropositionNode:
+    """A node representing an atomic proposition in a semantic graph."""
+
+    id: str
+    text: str  # The proposition text
+    subject: str = ""
+    verb: str = ""
+    object: Optional[str] = None
+    entities: List[str] = field(default_factory=list)
+    keywords: List[str] = field(default_factory=list)
+    source_sentence_idx: int = 0
+    is_citation: bool = False
+    is_quotation: bool = False
+    attached_citations: List[str] = field(default_factory=list)
 
 
 class PropositionExtractor:
