@@ -262,6 +262,116 @@ class TestMultiSentencePromptBuilder:
         assert "This is an exemplar sentence" in prompt.user_prompt
 
 
+class TestPunctuationTracking:
+    """Test punctuation pattern tracking."""
+
+    @pytest.fixture
+    def global_context(self):
+        """Create a sample global context."""
+        return GlobalContext(
+            thesis="Main argument.",
+            intent="inform",
+            keywords=["key"],
+            perspective="third_person",
+            style_dna="Direct style.",
+            author_name="Author",
+            target_burstiness=0.2,
+            target_sentence_length=12.0,
+            top_vocabulary=["word"],
+            total_paragraphs=1,
+            processed_paragraphs=0
+        )
+
+    @pytest.fixture
+    def builder(self, global_context):
+        """Create a prompt builder."""
+        return PromptBuilder(global_context)
+
+    def test_punctuation_tracking(self, builder):
+        """Test that punctuation is tracked in generated sentences."""
+        builder.register_generated_sentence("This is a test; with semicolons.")
+        builder.register_generated_sentence("This has (parentheses), commas, lots of them.")
+
+        assert builder._used_punctuation["semicolons"] == 1
+        assert builder._used_punctuation["parentheticals"] == 1
+        assert builder._used_punctuation["commas"] >= 2
+
+    def test_punctuation_reset(self, builder):
+        """Test that punctuation tracking resets properly."""
+        builder.register_generated_sentence("Test; semicolon.")
+        builder.reset_tracking()
+
+        assert builder._used_punctuation["semicolons"] == 0
+
+    def test_em_dash_tracking(self, builder):
+        """Test em-dash detection (both types)."""
+        builder.register_generated_sentence("This—has an em-dash.")
+        builder.register_generated_sentence("This--has double hyphens.")
+
+        assert builder._used_punctuation["em_dashes"] == 2
+
+
+class TestIntentClassification:
+    """Test sentence intent and signature classification."""
+
+    @pytest.fixture
+    def global_context(self):
+        """Create a sample global context."""
+        return GlobalContext(
+            thesis="Main argument.",
+            intent="inform",
+            keywords=["key"],
+            perspective="third_person",
+            style_dna="Direct style.",
+            author_name="Author",
+            target_burstiness=0.2,
+            target_sentence_length=12.0,
+            top_vocabulary=["word"],
+            total_paragraphs=1,
+            processed_paragraphs=0
+        )
+
+    @pytest.fixture
+    def builder(self, global_context):
+        """Create a prompt builder."""
+        return PromptBuilder(global_context)
+
+    def test_classify_interrogative(self, builder):
+        """Test interrogative intent classification."""
+        intent, _ = builder._classify_sentence_intent("What causes this effect?")
+        assert intent == "INTERROGATIVE"
+
+    def test_classify_argument(self, builder):
+        """Test argument intent using semantic similarity."""
+        # Use a sentence that is semantically closer to "arguing a point with support"
+        intent, _ = builder._classify_sentence_intent(
+            "I argue that this reasoning demonstrates my point with supporting evidence."
+        )
+        assert intent == "ARGUMENT"
+
+    def test_classify_causality_signature(self, builder):
+        """Test causality signature classification."""
+        _, signature = builder._classify_sentence_intent(
+            "The cause leads directly to this effect and consequence."
+        )
+        assert signature == "CAUSALITY"
+
+    def test_classify_contrast_signature(self, builder):
+        """Test contrast signature classification."""
+        # Use a sentence semantically closer to "showing opposition"
+        _, signature = builder._classify_sentence_intent(
+            "These opposing views contradict and differ from each other."
+        )
+        assert signature == "CONTRAST"
+
+    def test_classify_sequence_default(self, builder):
+        """Test sequence signature for continuation."""
+        _, signature = builder._classify_sentence_intent(
+            "Next in the progression, we continue building on previous points."
+        )
+        assert signature == "SEQUENCE"
+
+
 class TestTransitionWords:
     """Test transition word mappings."""
 

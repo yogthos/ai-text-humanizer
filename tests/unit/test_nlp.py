@@ -13,6 +13,8 @@ from src.utils.nlp import (
     get_pos_distribution,
     get_dependency_depth,
     detect_perspective,
+    compute_semantic_similarity,
+    classify_by_similarity,
 )
 
 
@@ -296,3 +298,83 @@ class TestPerspectiveDetection:
         text = "The sun rises in the east. Mountains stand tall."
         perspective = detect_perspective(text)
         assert perspective == "third_person"
+
+
+class TestSemanticSimilarity:
+    """Test semantic similarity computation."""
+
+    def test_similar_texts_high_score(self):
+        """Test that similar texts have high similarity."""
+        text1 = "The cat sat on the mat."
+        text2 = "A cat is sitting on the rug."
+        similarity = compute_semantic_similarity(text1, text2)
+        # Similar sentences should have reasonable similarity
+        assert similarity > 0.5
+
+    def test_different_texts_lower_score(self):
+        """Test that different texts have lower similarity."""
+        text1 = "The cat sat on the mat."
+        text2 = "Financial markets crashed today."
+        similarity = compute_semantic_similarity(text1, text2)
+        # Unrelated sentences should have lower similarity
+        assert similarity < 0.7
+
+    def test_identical_texts_high_score(self):
+        """Test that identical texts have high similarity."""
+        text = "The quick brown fox jumps."
+        similarity = compute_semantic_similarity(text, text)
+        # Identical texts should have similarity close to 1
+        assert similarity > 0.99
+
+    def test_empty_text_returns_zero(self):
+        """Test that empty text returns zero similarity."""
+        similarity = compute_semantic_similarity("", "Some text")
+        assert similarity == 0.0
+
+
+class TestClassifyBySimilarity:
+    """Test classification by semantic similarity."""
+
+    def test_classify_question(self):
+        """Test classifying a question-like sentence."""
+        prototypes = {
+            "QUESTION": ["asking a question", "inquiring about something", "wondering why"],
+            "STATEMENT": ["making a claim", "stating a fact"]
+        }
+        # Use a sentence with strong question semantics
+        text = "I am asking why this happens and inquiring about the reason."
+        category, score = classify_by_similarity(text, prototypes)
+        # Should match QUESTION due to semantic similarity
+        assert category == "QUESTION"
+        assert score > 0.3
+
+    def test_classify_statement(self):
+        """Test classifying a factual statement."""
+        prototypes = {
+            "QUESTION": ["asking a question", "inquiring about something"],
+            "STATEMENT": ["stating a fact", "making a factual claim"]
+        }
+        text = "The earth revolves around the sun."
+        category, score = classify_by_similarity(text, prototypes)
+        assert category == "STATEMENT"
+
+    def test_default_to_first_category_below_threshold(self):
+        """Test that below threshold, returns first category."""
+        prototypes = {
+            "CAT_A": ["completely unrelated prototype"],
+            "CAT_B": ["another unrelated prototype"]
+        }
+        text = "This is about something entirely different."
+        category, score = classify_by_similarity(text, prototypes, threshold=0.9)
+        # Should default to first category if all scores below threshold
+        assert category == "CAT_A"
+
+    def test_empty_text_returns_first_category(self):
+        """Test empty text returns first category with zero score."""
+        prototypes = {
+            "FIRST": ["some prototype"],
+            "SECOND": ["another prototype"]
+        }
+        category, score = classify_by_similarity("", prototypes)
+        assert category == "FIRST"
+        assert score == 0.0

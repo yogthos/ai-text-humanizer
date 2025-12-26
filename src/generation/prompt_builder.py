@@ -10,6 +10,7 @@ from ..models.graph import SemanticGraph
 from ..models.style import StyleProfile
 from ..ingestion.context_analyzer import GlobalContext, ParagraphContext
 from ..utils.logging import get_logger
+from ..utils.nlp import classify_by_similarity
 
 if TYPE_CHECKING:
     from ..corpus.indexer import CorpusIndexer
@@ -93,9 +94,11 @@ class PromptBuilder:
         self._introduced_entities: set = set()  # Entities already introduced in output
         self._used_transitions: Counter = Counter()  # Track transition word usage
         self._used_openers: Counter = Counter()  # Track sentence opener usage
+        self._used_punctuation: Counter = Counter()  # Track punctuation usage
         self._sentence_lengths: List[int] = []  # Track sentence lengths for burstiness
         self._total_sentences: int = 0  # Track sentence count for frequency calculations
         self._author_transition_dist = self._build_author_transition_distribution()
+        self._author_punctuation_targets = self._build_punctuation_targets()
 
     def _build_author_transition_distribution(self) -> Dict[str, Dict[str, float]]:
         """Build normalized transition distribution from author's profile.
@@ -131,11 +134,34 @@ class PromptBuilder:
 
         return distribution
 
+    def _build_punctuation_targets(self) -> Dict[str, float]:
+        """Build target punctuation usage per sentence from author's profile.
+
+        Returns:
+            Dict mapping punctuation type to target per-sentence frequency.
+        """
+        if not self.style_profile or not self.style_profile.primary_author:
+            return {}
+
+        author = self.style_profile.primary_author
+        targets = {}
+
+        # Extract per-sentence targets from punctuation_patterns
+        for punc_type, stats in author.punctuation_patterns.items():
+            if isinstance(stats, dict) and "per_sentence" in stats:
+                targets[punc_type] = stats["per_sentence"]
+            elif isinstance(stats, (int, float)):
+                # Legacy format: direct frequency
+                targets[punc_type] = float(stats)
+
+        return targets
+
     def reset_tracking(self) -> None:
         """Reset all tracking for a new document."""
         self._introduced_entities = set()
         self._used_transitions = Counter()
         self._used_openers = Counter()
+        self._used_punctuation = Counter()
         self._sentence_lengths = []
         self._total_sentences = 0
 
@@ -184,7 +210,7 @@ class PromptBuilder:
         )
 
     def register_generated_sentence(self, sentence: str) -> None:
-        """Register a generated sentence to track transitions, openers, and lengths.
+        """Register a generated sentence to track transitions, openers, punctuation, and lengths.
 
         Args:
             sentence: The generated sentence text.
@@ -200,6 +226,15 @@ class PromptBuilder:
         if words:
             opener = words[0].strip('"\'"(')
             self._used_openers[opener] += 1
+
+        # Track punctuation usage
+        self._used_punctuation["semicolons"] += sentence.count(";")
+        self._used_punctuation["colons"] += sentence.count(":")
+        self._used_punctuation["em_dashes"] += sentence.count("—") + sentence.count("--")
+        self._used_punctuation["parentheticals"] += sentence.count("(")
+        self._used_punctuation["commas"] += sentence.count(",")
+        self._used_punctuation["questions"] += sentence.count("?")
+        self._used_punctuation["exclamations"] += sentence.count("!")
 
         # Check for transition words in all categories
         sentence_lower = sentence.lower()
@@ -309,6 +344,53 @@ class PromptBuilder:
 
         return ""
 
+    def get_punctuation_guidance(self) -> str:
+        """Get guidance on punctuation usage based on author's patterns.
+
+        Compares current punctuation usage against author's target frequencies
+        and suggests under-used or over-used patterns.
+
+        Returns:
+            Guidance string for punctuation, empty if balanced or no targets.
+        """
+        if not self._author_punctuation_targets or self._total_sentences < 2:
+            return ""
+
+        guidance_parts = []
+
+        # Map internal keys to readable names
+        punc_names = {
+            "semicolons": "semicolons",
+            "colons": "colons",
+            "em_dashes": "em-dashes",
+            "parentheticals": "parentheses",
+            "commas": "commas",
+            "questions": "questions",
+            "exclamations": "exclamations"
+        }
+
+        for punc_type, target_per_sentence in self._author_punctuation_targets.items():
+            if target_per_sentence < 0.05:  # Skip very rare punctuation
+                continue
+
+            current_count = self._used_punctuation.get(punc_type, 0)
+            current_per_sentence = current_count / self._total_sentences
+
+            readable_name = punc_names.get(punc_type, punc_type)
+
+            # Under-using by more than 50%
+            if target_per_sentence > 0.1 and current_per_sentence < target_per_sentence * 0.5:
+                guidance_parts.append(f"consider using {readable_name}")
+
+            # Over-using by more than 100%
+            elif current_per_sentence > target_per_sentence * 2 and current_count > 3:
+                guidance_parts.append(f"vary from {readable_name}")
+
+        if not guidance_parts:
+            return ""
+
+        return f"(Punctuation: {'; '.join(guidance_parts[:2])})"
+
     def get_vocabulary_guidance(self, n_words: int = 10) -> str:
         """Get vocabulary guidance from author's profile.
 
@@ -326,20 +408,130 @@ class PromptBuilder:
         # that cause mechanical stuffing
         return ""
 
+    # Prototype phrases for intent classification using semantic similarity
+    INTENT_PROTOTYPES = {
+        "ARGUMENT": [
+            "making a logical claim",
+            "presenting evidence and reasoning",
+            "arguing a point with support",
+            "demonstrating through analysis",
+            "proving through logic"
+        ],
+        "INTERROGATIVE": [
+            "asking a question",
+            "inquiring about something",
+            "seeking an answer",
+            "wondering why or how",
+            "questioning the nature of"
+        ],
+        "DEFINITION": [
+            "defining what something means",
+            "explaining the meaning of a term",
+            "describing what something is",
+            "clarifying the concept of",
+            "specifying the nature of"
+        ],
+        "NARRATIVE": [
+            "telling a story",
+            "describing events over time",
+            "recounting what happened",
+            "narrating a sequence of events",
+            "relating a historical account"
+        ],
+        "IMPERATIVE": [
+            "commanding action",
+            "instructing to do something",
+            "directing behavior",
+            "ordering a specific action",
+            "urging immediate response"
+        ]
+    }
+
+    # Prototype phrases for signature classification using semantic similarity
+    SIGNATURE_PROTOTYPES = {
+        "SEQUENCE": [
+            "continuing in order",
+            "following a progression",
+            "moving to the next point",
+            "proceeding logically",
+            "building upon previous ideas"
+        ],
+        "CONTRAST": [
+            "showing opposition",
+            "presenting a different view",
+            "contradicting the previous point",
+            "highlighting differences",
+            "opposing perspectives clash"
+        ],
+        "CAUSALITY": [
+            "explaining cause and effect",
+            "showing what leads to what",
+            "demonstrating consequences",
+            "tracing reasons and results",
+            "linking cause to outcome"
+        ],
+        "ELABORATION": [
+            "providing specific examples",
+            "illustrating with details",
+            "expanding on the point",
+            "giving concrete instances",
+            "clarifying through specifics"
+        ]
+    }
+
+    def _classify_sentence_intent(self, text: str) -> Tuple[str, str]:
+        """Classify the intent and signature of a sentence/proposition.
+
+        Uses spaCy word vectors to compute semantic similarity against
+        prototype phrases, making classification scalable and language-aware.
+
+        Args:
+            text: The sentence or proposition text to classify.
+
+        Returns:
+            Tuple of (intent, signature) classifications.
+        """
+        # Quick check for explicit question marks (high confidence signal)
+        if "?" in text:
+            intent = "INTERROGATIVE"
+        else:
+            # Use semantic similarity for intent classification
+            intent, _ = classify_by_similarity(
+                text,
+                self.INTENT_PROTOTYPES,
+                threshold=0.4
+            )
+
+        # Use semantic similarity for signature classification
+        signature, _ = classify_by_similarity(
+            text,
+            self.SIGNATURE_PROTOTYPES,
+            threshold=0.4
+        )
+
+        return intent, signature
+
     def get_style_examples(
         self,
         query_text: str,
         role: Optional[str] = None,
         target_length: Optional[int] = None,
-        n_examples: int = 3
+        n_examples: int = 3,
+        intent: Optional[str] = None,
+        signature: Optional[str] = None
     ) -> str:
         """Retrieve style examples from corpus to include in prompts.
+
+        Uses contextual matching to find examples with similar intent and
+        logical structure to the sentence being generated.
 
         Args:
             query_text: Text to search for similar examples.
             role: Optional paragraph role filter (INTRO, BODY, CONCLUSION).
             target_length: Optional target sentence length for filtering.
             n_examples: Number of examples to retrieve.
+            intent: Optional intent filter (ARGUMENT, NARRATIVE, etc.).
+            signature: Optional signature filter (CONTRAST, CAUSALITY, etc.).
 
         Returns:
             Formatted string with style examples, or empty if unavailable.
@@ -349,21 +541,50 @@ class PromptBuilder:
 
         try:
             author_name = self.style_profile.get_author_name()
-            results = self.indexer.query_fragments(
+
+            # Auto-classify if intent/signature not provided
+            if not intent or not signature:
+                auto_intent, auto_signature = self._classify_sentence_intent(query_text)
+                intent = intent or auto_intent
+                signature = signature or auto_signature
+
+            # Try graphs collection first (has intent/signature metadata)
+            results = self.indexer.query_graphs(
                 query_text=query_text,
                 author=author_name,
-                role=role,
-                n_results=n_examples * 2  # Fetch extra to allow filtering
+                intent=intent,
+                signature=signature,
+                n_results=n_examples * 2
             )
+
+            # Fall back to fragments if no graph matches
+            if not results:
+                results = self.indexer.query_graphs(
+                    query_text=query_text,
+                    author=author_name,
+                    intent=intent,  # Try just intent match
+                    n_results=n_examples * 2
+                )
+
+            # Final fallback: fragments collection (no intent/signature)
+            if not results:
+                results = self.indexer.query_fragments(
+                    query_text=query_text,
+                    author=author_name,
+                    role=role,
+                    n_results=n_examples * 2
+                )
 
             if not results:
                 return ""
 
             # Filter by approximate length if specified
             if target_length:
+                # Check both avg_sentence_length (fragments) and burstiness (graphs)
                 results = [
                     r for r in results
-                    if abs(r.get("metadata", {}).get("avg_sentence_length", 0) - target_length) < target_length * 0.5
+                    if (not r.get("metadata", {}).get("avg_sentence_length") or
+                        abs(r.get("metadata", {}).get("avg_sentence_length", target_length) - target_length) < target_length * 0.5)
                 ]
 
             # Take top n_examples
@@ -611,6 +832,9 @@ OUTPUT FORMAT: Write only the paragraph text, one sentence per line."""
         # Get opener diversity guidance (avoid repetitive sentence starts)
         opener_guidance = self.get_opener_diversity_guidance()
 
+        # Get punctuation guidance (match author's patterns)
+        punctuation_guidance = self.get_punctuation_guidance()
+
         # Get style examples from corpus (RAG) - these are PRIMARY guidance
         query_text = sentence_node.get_proposition_text() if hasattr(sentence_node, 'get_proposition_text') else ""
         style_examples = self.get_style_examples(
@@ -628,6 +852,8 @@ OUTPUT FORMAT: Write only the paragraph text, one sentence per line."""
             guidance += reference_guidance
         if opener_guidance:
             guidance += f"\n{opener_guidance}"
+        if punctuation_guidance:
+            guidance += f"\n{punctuation_guidance}"
 
         # Build the prompt - EXAMPLE-DRIVEN, not prescriptive
         skeleton_hint = self._get_skeleton_hint(sentence_node)

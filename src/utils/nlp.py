@@ -300,6 +300,70 @@ def setup_nltk() -> None:
         logger.warning("NLTK not installed, some features may be limited")
 
 
+def compute_semantic_similarity(text1: str, text2: str) -> float:
+    """Compute semantic similarity between two texts using spaCy word vectors.
+
+    Args:
+        text1: First text.
+        text2: Second text.
+
+    Returns:
+        Similarity score between 0 and 1.
+    """
+    nlp = get_nlp()
+    doc1 = nlp(text1)
+    doc2 = nlp(text2)
+
+    # If either doc has no vector, return 0
+    if not doc1.has_vector or not doc2.has_vector:
+        return 0.0
+
+    return doc1.similarity(doc2)
+
+
+def classify_by_similarity(
+    text: str,
+    prototypes: dict,
+    threshold: float = 0.3
+) -> Tuple[str, float]:
+    """Classify text by computing similarity against prototype phrases.
+
+    Uses spaCy word vectors to find the most similar prototype category.
+
+    Args:
+        text: Text to classify.
+        prototypes: Dict mapping category names to list of prototype phrases.
+        threshold: Minimum similarity to consider a match.
+
+    Returns:
+        Tuple of (best_category, similarity_score).
+    """
+    nlp = get_nlp()
+    doc = nlp(text)
+
+    if not doc.has_vector:
+        # Fall back to first category if no vectors available
+        return list(prototypes.keys())[0], 0.0
+
+    best_category = list(prototypes.keys())[0]  # Default
+    best_score = 0.0
+
+    for category, phrases in prototypes.items():
+        for phrase in phrases:
+            phrase_doc = nlp(phrase)
+            if phrase_doc.has_vector:
+                score = doc.similarity(phrase_doc)
+                if score > best_score:
+                    best_score = score
+                    best_category = category
+
+    # Only return match if above threshold
+    if best_score < threshold:
+        return list(prototypes.keys())[0], best_score
+
+    return best_category, best_score
+
+
 class NLPManager:
     """Manager class for NLP operations.
 
@@ -405,3 +469,33 @@ class NLPManager:
             Perspective string.
         """
         return detect_perspective(text)
+
+    def compute_similarity(self, text1: str, text2: str) -> float:
+        """Compute semantic similarity between two texts.
+
+        Args:
+            text1: First text.
+            text2: Second text.
+
+        Returns:
+            Similarity score between 0 and 1.
+        """
+        return compute_semantic_similarity(text1, text2)
+
+    def classify_by_similarity(
+        self,
+        text: str,
+        prototypes: dict,
+        threshold: float = 0.3
+    ) -> Tuple[str, float]:
+        """Classify text by semantic similarity to prototype phrases.
+
+        Args:
+            text: Text to classify.
+            prototypes: Dict mapping category names to prototype phrases.
+            threshold: Minimum similarity threshold.
+
+        Returns:
+            Tuple of (category, score).
+        """
+        return classify_by_similarity(text, prototypes, threshold)
