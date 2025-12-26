@@ -186,6 +186,9 @@ class StyleTranslator:
         from src.processing.style_state import GlobalStyleTracker
         self.style_tracker = GlobalStyleTracker(self.config)
 
+        # Initialize refiner for holistic refinement
+        self.refiner = ParagraphRefiner(config_path=config_path)
+
         # Initialize graph telemetry logger
         graph_config = self.config.get("graph_pipeline", {})
         if graph_config.get("telemetry", {}).get("enabled", True):
@@ -6125,6 +6128,7 @@ Fix the stylistic issues listed above. You may:
         paragraph_index: Optional[int] = None,
         total_paragraphs: Optional[int] = None,
         prev_paragraph_text: Optional[str] = None,
+        global_context: Optional[Dict] = None,
         verbose: bool = False
     ) -> tuple[str, int, float]:
         """Generate text from propositions using the graph-based pipeline.
@@ -6136,6 +6140,7 @@ Fix the stylistic issues listed above. You may:
             paragraph_index: Paragraph index in document (0-based) for role filtering.
             total_paragraphs: Total number of paragraphs in document.
             prev_paragraph_text: Previous paragraph text for context continuity.
+            global_context: Optional document context.
             verbose: Enable verbose logging.
 
         Returns:
@@ -6162,7 +6167,8 @@ Fix the stylistic issues listed above. You may:
                     paragraph_index,
                     total_paragraphs,
                     prev_paragraph_text,
-                    verbose,
+                    global_context=global_context,
+                    verbose=verbose,
                     attempt=attempt
                 )
 
@@ -6212,6 +6218,7 @@ Fix the stylistic issues listed above. You may:
         paragraph_index: Optional[int] = None,
         total_paragraphs: Optional[int] = None,
         prev_paragraph_text: Optional[str] = None,
+        global_context: Optional[Dict] = None,
         verbose: bool = False,
         attempt: int = 0
     ) -> tuple[str, int, float]:
@@ -6224,6 +6231,7 @@ Fix the stylistic issues listed above. You may:
             paragraph_index: Paragraph index in document (0-based).
             total_paragraphs: Total number of paragraphs in document.
             prev_paragraph_text: Previous paragraph text for context continuity.
+            global_context: Optional document context.
             verbose: Enable verbose logging.
             attempt: Retry attempt number (0 = High Style, 1 = Generic Template, 2 = Literal).
 
@@ -6330,6 +6338,14 @@ Fix the stylistic issues listed above. You may:
                         if len(node.propositions) > 3:
                             print(f"       ... and {len(node.propositions) - 3} more")
 
+                    # Map transition_type to edge_type for strong enforcement
+                    edge_map = {
+                        "Causal": "CAUSALITY",
+                        "Adversative": "CONTRAST",
+                        "Sequential": "SEQUENCE"
+                    }
+                    edge_type = edge_map.get(node.transition_type, "Flow")
+
                     # Generate sentence using synthesize_sentence_node
                     try:
                         sentence = self.graph_matcher.synthesize_sentence_node(
@@ -6339,7 +6355,8 @@ Fix the stylistic issues listed above. You may:
                             self.style_tracker,
                             default_perspective,
                             author_name,
-                            verbose
+                            edge_type=edge_type,  # Pass the edge type
+                            verbose=verbose
                         )
                     except Exception as e:
                         if verbose:
@@ -6467,9 +6484,26 @@ Fix the stylistic issues listed above. You may:
 
             # Step 4: Assembly and Validation
             if generated_sentences:
-                result = " ".join(generated_sentences)
+                # Phase 2: Holistic Refinement (Critic-Editor Loop)
                 if verbose:
-                    print(f"  ✓ Generated paragraph with {len(generated_sentences)} sentences")
+                    print(f"  Refining paragraph structure and flow...")
+                
+                # Load style profile for refiner
+                style_profile = self._load_style_profile(author_name)
+                
+                # Run iterative refinement
+                refined_sentences = self.refiner.refine_paragraph(
+                    generated_sentences,
+                    global_context=global_context or {},
+                    style_tracker=self.style_tracker,
+                    author_profile=style_profile,
+                    original_propositions=propositions,
+                    verbose=verbose
+                )
+                
+                result = " ".join(refined_sentences)
+                if verbose:
+                    print(f"  ✓ Generated paragraph with {len(refined_sentences)} sentences (refined)")
 
                 # Use the best score from repair loops (average of sentence scores)
                 # This ensures we use the REPAIRED scores, not initial failures

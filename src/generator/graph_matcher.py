@@ -1440,6 +1440,7 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
         style_tracker: Optional[Any],
         default_perspective: Optional[str],
         author_name: str,
+        edge_type: str = "Flow",
         verbose: bool = False
     ) -> str:
         """Synthesize a single sentence from a SentenceNode using RAG and style constraints.
@@ -1451,6 +1452,7 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
             style_tracker: Optional GlobalStyleTracker for forbidden openers/phrases
             default_perspective: Default perspective (First Person, Third Person, etc.)
             author_name: Author name for ChromaDB filtering
+            edge_type: Logical edge type connecting from previous node (e.g. "CONTRAST")
             verbose: Enable verbose logging
 
         Returns:
@@ -1544,9 +1546,34 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
             semicolons_per_100 = style_profile.get('semicolons_per_100', 0)
             dashes_per_100 = style_profile.get('dashes_per_100', 0)
 
-            # Extract vocabulary
-            keywords = style_profile.get('keywords', [])
-            keywords_str = ', '.join(keywords[:15]) if keywords else 'N/A'
+            # Extract vocabulary with DYNAMIC ROTATION
+            # 1. Get base keywords from node (assigned by planner) or profile
+            base_keywords = node.keywords if node.keywords else style_profile.get('keywords', [])
+            
+            # 2. Filter out recently used keywords (if tracker available)
+            forbidden_phrases = []
+            if style_tracker:
+                forbidden_phrases = style_tracker.get_forbidden_phrases()
+            
+            # Case-insensitive filtering
+            forbidden_lower = {p.lower() for p in forbidden_phrases}
+            available_keywords = [
+                k for k in base_keywords 
+                if k.lower() not in forbidden_lower
+            ]
+            
+            # 3. Select a small subset (3-5) to avoid stuffing
+            import random
+            if len(available_keywords) > 5:
+                selected_keywords = random.sample(available_keywords, 5)
+            else:
+                selected_keywords = available_keywords
+            
+            keywords_str = ', '.join(selected_keywords) if selected_keywords else 'None'
+
+            # Extract Tone/Voice
+            tone_markers = style_profile.get('tone_markers', [])
+            tone_str = ', '.join(tone_markers[:5]) if tone_markers else "Authoritative, Distinctive"
 
             # Build style DNA
             style_dna_parts = []
@@ -1555,14 +1582,15 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
             pov_to_use = default_perspective if default_perspective else style_profile.get('pov', 'Third Person')
             style_dna_parts.append(f"- **Perspective:** Write in **{pov_to_use}**.")
             style_dna_parts.append(f"- **Sentence Length:** Target approximately {node.target_length} words. **CRITICAL:** Do NOT exceed {max_words} words.")
+            style_dna_parts.append(f"- **Tone/Voice:** {tone_str}. Write with this attitude.")
 
             if dashes_per_100 > 10:
                 style_dna_parts.append(f"- **Punctuation:** Use em-dashes (—) at a rate of approximately {dashes_per_100:.1f} per 100 words.")
             if semicolons_per_100 > 5:
                 style_dna_parts.append(f"- **Punctuation:** Use semicolons (;) at a rate of approximately {semicolons_per_100:.1f} per 100 words.")
 
-            if keywords_str != 'N/A' and node.keywords:
-                style_dna_parts.append(f"- **Vocabulary:** Use keywords: {', '.join(node.keywords)}")
+            if keywords_str != 'None':
+                style_dna_parts.append(f"- **Vocabulary Palette (Use if natural):** {keywords_str}")
 
             style_dna_section = "\n".join(style_dna_parts) + "\n\n"
 
@@ -1576,9 +1604,19 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
 
 """
 
-        # Add transition instruction
+        # Add transition instruction based on GRAPH EDGE TYPE
         transition_guidance = ""
-        if node.transition_type == "Causal":
+        
+        # 1. Strong Graph Logic Enforcement
+        if edge_type == "CONTRAST":
+             transition_guidance = "**MANDATORY TRANSITION:** You MUST start with a strong contrastive connector (e.g., 'However', 'Yet', 'In reality', 'Conversely', 'But'). The logical relationship is CONTRAST."
+        elif edge_type == "CAUSALITY":
+             transition_guidance = "**MANDATORY TRANSITION:** You MUST start with a causal connector (e.g., 'Therefore', 'Consequently', 'Thus', 'As a result'). The logical relationship is CAUSE -> EFFECT."
+        elif edge_type == "SEQUENCE":
+             transition_guidance = "**MANDATORY TRANSITION:** You MUST start with a sequential connector (e.g., 'Then', 'Subsequently', 'Next')."
+        
+        # 2. Fallback to Node Transition Type (if edge is generic)
+        elif node.transition_type == "Causal":
             transition_guidance = "Use a causal connector like 'Consequently', 'Therefore', or 'As a result' if appropriate."
         elif node.transition_type == "Adversative":
             transition_guidance = "Use an adversative connector like 'However', 'Yet', or 'In contrast' if appropriate."
@@ -1617,7 +1655,9 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
         if style_tracker:
             forbidden_openers = style_tracker.get_forbidden_openers()
             forbidden_phrases = style_tracker.get_forbidden_phrases()
-            if forbidden_openers or forbidden_phrases:
+            forbidden_structures = style_tracker.get_forbidden_structures()
+
+            if forbidden_openers or forbidden_phrases or forbidden_structures:
                 constraints_parts = []
                 if forbidden_openers:
                     constraints_parts.append(f"- **FORBIDDEN OPENERS:** Do not start with: {', '.join([f'\"{f}\"' for f in forbidden_openers])}")
@@ -1625,6 +1665,12 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
                     important_phrases = [p for p in forbidden_phrases if len(p.split()) >= 2][:10]
                     if important_phrases:
                         constraints_parts.append(f"- **FORBIDDEN PHRASES:** Do not repeat: {', '.join([f'\"{p}\"' for p in important_phrases])}")
+                if forbidden_structures:
+                    # Extract root lemmas (e.g., "is", "have", "create")
+                    recent_roots = {s.split(':')[1].split('+')[0] for s in forbidden_structures if ':' in s}
+                    if recent_roots:
+                        constraints_parts.append(f"- **SYNTAX VARIETY:** Avoid repeating the same root verb structure. Recently used: {', '.join(list(recent_roots)[:3])}.")
+
                 if constraints_parts:
                     state_constraints = "**NEGATIVE CONSTRAINTS:**\n" + "\n".join(constraints_parts) + "\n\n"
 
@@ -1648,8 +1694,9 @@ Create a skeleton structure with [S0], [S1] placeholders that matches the style 
 3. Follow the Style DNA constraints (length, punctuation, vocabulary).
 4. Use the Syntax Template's grammatical structure, not its content.
 5. Apply the transition guidance appropriately.
-6. Do NOT create run-on sentences or fragments.
-7. Output ONLY the sentence text, no explanation."""
+6. **Flow over Template:** If strict adherence to the template makes the sentence nonsensical or grammatically disjointed, prioritize logical flow and grammar.
+7. Do NOT create run-on sentences or fragments.
+8. Output ONLY the sentence text, no explanation."""
 
         user_prompt = f"""{context_section}{content_section}
 
@@ -1707,6 +1754,41 @@ Write a single sentence that:
                         if verbose:
                             print(f"     ⚠ Rejected sentence (Suffix Repetition): '{sentence}'")
                         return ""
+
+            # Validation: Prefix Check (The Echo Guard)
+            if previous_text:
+                prev_words = previous_text.strip().split()
+                curr_words = sentence.strip().split()
+                # Check first 3 words
+                if len(prev_words) >= 3 and len(curr_words) >= 3:
+                    prev_prefix = " ".join(prev_words[:3]).lower()
+                    curr_prefix = " ".join(curr_words[:3]).lower()
+                    # Remove punctuation for comparison
+                    prev_prefix = re.sub(r'[^\w\s]', '', prev_prefix)
+                    curr_prefix = re.sub(r'[^\w\s]', '', curr_prefix)
+                    
+                    if prev_prefix == curr_prefix:
+                        if verbose:
+                            print(f"     ⚠ Rejected sentence (Prefix Repetition): '{sentence}'")
+                        return ""
+
+            # Validation: 4-gram Repetition Check (Phrase Echo)
+            if previous_text:
+                def get_ngrams(text, n):
+                    # Simple tokenizer keeping only alphanumeric
+                    words = re.findall(r'\b\w+\b', text.lower())
+                    if len(words) < n: return set()
+                    return set([" ".join(words[i:i+n]) for i in range(len(words)-n+1)])
+                
+                prev_4grams = get_ngrams(previous_text, 4)
+                curr_4grams = get_ngrams(sentence, 4)
+                
+                common_4grams = prev_4grams.intersection(curr_4grams)
+                
+                if common_4grams:
+                    if verbose:
+                        print(f"     ⚠ Rejected sentence (Phrase Repetition): '{list(common_4grams)[0]}...'")
+                    return ""
 
             # Validation: Check for length
             if len(sentence) < 10:

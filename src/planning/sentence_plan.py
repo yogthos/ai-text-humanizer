@@ -17,6 +17,7 @@ class SentenceNode:
     keywords: List[str] = field(default_factory=list)  # Mandatory vocabulary
     global_indices: List[int] = field(default_factory=list)  # Original proposition indices
     style_template: Optional[str] = None  # Retrieved style candidate text for syntax template (RAG)
+    intended_subject: Optional[str] = None  # Subject derived from propositions (for tracking)
 
     def to_json(self) -> dict:
         """Serialize to JSON-compatible dict."""
@@ -28,7 +29,8 @@ class SentenceNode:
             "target_length": self.target_length,
             "keywords": self.keywords,
             "global_indices": self.global_indices,
-            "style_template": self.style_template
+            "style_template": self.style_template,
+            "intended_subject": self.intended_subject
         }
 
     @classmethod
@@ -42,7 +44,8 @@ class SentenceNode:
             target_length=data["target_length"],
             keywords=data.get("keywords", []),
             global_indices=data.get("global_indices", []),
-            style_template=data.get("style_template")
+            style_template=data.get("style_template"),
+            intended_subject=data.get("intended_subject")
         )
 
     def __repr__(self) -> str:

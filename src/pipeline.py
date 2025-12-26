@@ -399,6 +399,7 @@ def process_text(
                     paragraph_index=para_idx,
                     total_paragraphs=total_paragraphs,
                     prev_paragraph_text=prev_paragraph_text,
+                    global_context=global_context,
                     verbose=verbose
                 )
 

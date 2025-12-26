@@ -423,7 +423,8 @@ class GraphPlanner:
                         transition_type=transition,
                         target_length=target_length,
                         keywords=self.keywords[:3] if self.keywords else [],  # Use top 3 keywords
-                        global_indices=current_cluster
+                        global_indices=current_cluster,
+                        intended_subject=None
                     )
                     sentence_nodes.append(node)
                     previous_cluster_end = current_cluster[-1]
@@ -460,7 +461,8 @@ class GraphPlanner:
                 transition_type=transition,
                 target_length=target_length,
                 keywords=self.keywords[:3] if self.keywords else [],
-                global_indices=current_cluster
+                global_indices=current_cluster,
+                intended_subject=None
             )
             sentence_nodes.append(node)
 
@@ -481,7 +483,8 @@ class GraphPlanner:
                     transition_type="Flow",
                     target_length=int(self.avg_words_per_sentence) if self.avg_words_per_sentence else 25,
                     keywords=self.keywords[:3] if self.keywords else [],
-                    global_indices=[prop_idx]
+                    global_indices=[prop_idx],
+                    intended_subject=None
                 )
                 sentence_nodes.append(node)
 

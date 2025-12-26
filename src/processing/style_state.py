@@ -37,6 +37,13 @@ class GlobalStyleTracker:
         self.structure_history: Deque[str] = collections.deque(maxlen=self.history_window)
         # Key phrases (noun phrases, proper nouns) to prevent repetition
         self.key_phrases_history: Deque[str] = collections.deque(maxlen=self.history_window * 2)  # Track more phrases
+        # Syntactic fingerprints (ROOT + deps) to prevent structural repetition
+        self.syntactic_history: Deque[str] = collections.deque(maxlen=self.history_window)
+        
+        # Subject tracking for pronoun resolution
+        self.subject_history: Deque[str] = collections.deque(maxlen=self.history_window)
+        self.entity_registry: Dict[str, int] = {}  # Entity -> Last seen index (global counter)
+        self.global_sentence_count = 0
 
         # Load NLP for connector extraction and phrase extraction (lightweight usage)
         self.nlp = None
@@ -54,6 +61,10 @@ class GlobalStyleTracker:
         self.connector_history.clear()
         self.structure_history.clear()
         self.key_phrases_history.clear()
+        self.syntactic_history.clear()
+        self.subject_history.clear()
+        self.entity_registry.clear()
+        self.global_sentence_count = 0
 
     def register_usage(
         self,
@@ -75,6 +86,8 @@ class GlobalStyleTracker:
         """
         if not self.enabled:
             return
+            
+        self.global_sentence_count += 1
 
         # 1. Register Opener
         if not opener and text:
@@ -87,7 +100,13 @@ class GlobalStyleTracker:
         if structure:
             self.structure_history.append(structure)
 
-        # 3. Register Connectors
+        # 3. Register Syntactic Fingerprint (NEW)
+        if text:
+            fingerprint = self._extract_structural_fingerprint(text)
+            if fingerprint:
+                self.syntactic_history.append(fingerprint)
+
+        # 4. Register Connectors
         # If connectors aren't provided explicitly, try to extract them
         if connectors is None and text:
             connectors = self._extract_connectors_from_text(text)
@@ -114,6 +133,39 @@ class GlobalStyleTracker:
                     except Exception:
                         # Skip phrases that fail normalization
                         continue
+        
+        # 5. Register Subject (NEW)
+        if text:
+            self._extract_and_register_subject(text)
+
+    def _extract_and_register_subject(self, text: str):
+        """Extract main subject from text and register it."""
+        if not self.nlp or not text:
+            return
+            
+        try:
+            doc = self.nlp(text)
+            for token in doc:
+                if token.dep_ in ["nsubj", "nsubjpass"]:
+                    # Get the full noun chunk for the subject
+                    subj_text = token.text.lower()
+                    # Try to get the chunk
+                    for chunk in doc.noun_chunks:
+                        if chunk.root == token:
+                            subj_text = chunk.text.lower()
+                            break
+                    
+                    self.subject_history.append(subj_text)
+                    self.entity_registry[subj_text] = self.global_sentence_count
+                    return # Only register the first main subject
+        except Exception:
+            pass
+
+    def get_last_subject(self) -> Optional[str]:
+        """Return the subject of the most recently registered sentence."""
+        if self.subject_history:
+            return self.subject_history[-1]
+        return None
 
     def filter_available_connectors(self, candidates: List[str], signature: str) -> List[str]:
         """
@@ -162,6 +214,16 @@ class GlobalStyleTracker:
         if not self.enabled:
             return []
         return list(set(self.key_phrases_history))
+
+    def get_forbidden_structures(self) -> List[str]:
+        """Return list of recently used syntactic fingerprints.
+        
+        Returns:
+            Unique list of recent structural fingerprints (e.g. "VERB:is+nsubj+attr")
+        """
+        if not self.enabled:
+            return []
+        return list(set(self.syntactic_history))
 
     def _extract_opener(self, text: str) -> str:
         """
@@ -357,6 +419,41 @@ class GlobalStyleTracker:
                 seen.add(normalized)
 
         return normalized_phrases
+
+    def _extract_structural_fingerprint(self, text: str) -> Optional[str]:
+        """Extract a simplified structural fingerprint using spaCy.
+        
+        Format: "ROOT_POS:ROOT_LEMMA+DEP1+DEP2..."
+        Example: "The cat sat." -> "VERB:sit+nsubj+punct"
+        
+        Args:
+            text: Sentence text
+            
+        Returns:
+            Structural fingerprint string or None if spaCy unavailable/parsing fails
+        """
+        if not self.nlp or not text:
+            return None
+            
+        try:
+            doc = self.nlp(text)
+            
+            # Find root
+            roots = [t for t in doc if t.dep_ == "ROOT"]
+            if not roots:
+                return None
+            root = roots[0]
+            
+            # Get direct children dependency labels (sorted for consistency)
+            deps = sorted([t.dep_ for t in root.children])
+            
+            # Build fingerprint: ROOT_POS:ROOT_LEMMA + child dependencies
+            # We include the root lemma to catch repetitive verbs (e.g. "is", "has")
+            fingerprint = f"{root.pos_}:{root.lemma_}+" + "+".join(deps)
+            
+            return fingerprint
+        except Exception:
+            return None
 
     def _normalize_phrase(self, phrase: str) -> str:
         """

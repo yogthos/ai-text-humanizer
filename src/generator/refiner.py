@@ -7,12 +7,16 @@ approach to fix flow issues in assembly-line generated paragraphs.
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from nltk.tokenize import sent_tokenize
 from src.generator.llm_provider import LLMProvider
 from src.validator.statistical_critic import StatisticalCritic
 from src.utils.parsing import extract_json_from_text
 from src.utils.text_processing import parse_variants_from_response
+from src.critic.paragraph_critic import ParagraphCritic, EditRequest
+from src.generator.paragraph_editor import ParagraphEditor
+from src.processing.style_state import GlobalStyleTracker
+from src.validator.semantic_critic import SemanticCritic
 
 
 class ParagraphRefiner:
@@ -29,6 +33,110 @@ class ParagraphRefiner:
             self.config = json.load(f)
         self.llm_provider = LLMProvider(config_path=config_path)
         self.statistical_critic = StatisticalCritic(config_path=config_path)
+        self.critic = ParagraphCritic(config_path=config_path)
+        self.editor = ParagraphEditor(config_path=config_path)
+        self.semantic_critic = SemanticCritic(config_path=config_path)
+
+    def refine_paragraph(
+        self,
+        sentences: List[str],
+        global_context: Dict[str, Any],
+        style_tracker: GlobalStyleTracker,
+        author_profile: Dict[str, Any],
+        original_propositions: List[str],
+        verbose: bool = False
+    ) -> List[str]:
+        """Iteratively refine paragraph sentences using Critic-Editor loop.
+        
+        Args:
+            sentences: Initial list of generated sentences
+            global_context: Document context
+            style_tracker: Persistent style and subject tracker
+            author_profile: Author style DNA
+            original_propositions: Factual source of truth
+            verbose: Enable logging
+            
+        Returns:
+            Refined list of sentences
+        """
+        current_sentences = list(sentences)
+        max_loops = 3
+        
+        for loop in range(max_loops):
+            if verbose:
+                print(f"  --- Refinement Loop {loop + 1}/{max_loops} ---")
+            
+            # 1. Critic Analyzes
+            issues = self.critic.evaluate(current_sentences, global_context, style_tracker, author_profile)
+            
+            if not issues:
+                if verbose:
+                    print("  ✓ Critic is satisfied. No issues found.")
+                break
+                
+            # 2. Sort issues by severity
+            issues.sort(key=lambda x: x.severity, reverse=True)
+            top_issue = issues[0]
+            
+            if verbose:
+                print(f"  ⚠ Issue found at index {top_issue.target_index}: {top_issue.instruction}")
+            
+            # 3. Editor Proposes Fixes
+            candidates = self.editor.propose_fixes(current_sentences, top_issue, author_profile, global_context)
+            
+            if not candidates:
+                if verbose:
+                    print("  ⚠ Editor failed to propose fixes.")
+                continue
+                
+            # 4. Selector: Pick best candidate
+            best_candidate = current_sentences[top_issue.target_index]
+            
+            # Build mini-blueprint for the single sentence check
+            from src.ingestion.blueprint import SemanticBlueprint
+            dummy_blueprint = SemanticBlueprint(
+                original_text=" ".join(original_propositions), # Use all props as context
+                svo_triples=[], 
+                named_entities=[],
+                core_keywords=set(),
+                citations=[],
+                quotes=[]
+            )
+            
+            passing_candidates = []
+            for cand in candidates:
+                # Check semantic recall against all original propositions
+                eval_result = self.semantic_critic.evaluate(
+                    cand, 
+                    dummy_blueprint, 
+                    propositions=original_propositions,
+                    is_paragraph=True,
+                    verbose=False
+                )
+                
+                recall = eval_result.get("proposition_recall", 0.0)
+                if recall >= 0.85:
+                    passing_candidates.append((cand, recall))
+            
+            if passing_candidates:
+                # Sort by recall (highest first)
+                passing_candidates.sort(key=lambda x: x[1], reverse=True)
+                best_candidate = passing_candidates[0][0]
+                if verbose:
+                    print(f"  ✓ Selected fix from {len(passing_candidates)} valid candidates (best recall: {passing_candidates[0][1]:.2f})")
+                    print(f"    FIX: {best_candidate}")
+            else:
+                if verbose:
+                    print("  ⚠ No candidate fix passed semantic recall gate. Skipping fix to avoid meaning loss.")
+                continue
+            
+            # 5. Apply Fix
+            current_sentences[top_issue.target_index] = best_candidate
+            
+            # 6. Register usage in tracker so we don't repeat this fix's patterns
+            style_tracker.register_usage(best_candidate)
+
+        return current_sentences
 
     def refine_via_repair_plan(
         self,
