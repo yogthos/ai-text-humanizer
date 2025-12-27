@@ -21,6 +21,12 @@ from ..utils.nlp import get_nlp, split_into_sentences
 from ..utils.logging import get_logger
 from ..humanization.pattern_injector import PatternInjector, HumanizationConfig
 from ..humanization.corpus_patterns import HumanPatterns
+from ..rhetorical import (
+    SentenceFunction,
+    RhetoricalTemplateGenerator,
+    PropositionMapper,
+    FUNCTION_DESCRIPTIONS,
+)
 
 logger = get_logger(__name__)
 
@@ -78,6 +84,9 @@ class GenerationState:
 
     # Source discourse relation for current sentence (to preserve logic)
     required_discourse_relation: Optional[str] = None
+
+    # Rhetorical function for current sentence (from template)
+    rhetorical_function: Optional[SentenceFunction] = None
 
 
 class EvolutionarySentenceGenerator:
@@ -157,6 +166,13 @@ class EvolutionarySentenceGenerator:
         ) if self.vocabulary_palette.connectives else []
         # Get LLM-speak to avoid
         self.llm_avoid = list(self.vocabulary_palette.llm_replacements.keys())[:10] if self.vocabulary_palette.llm_replacements else []
+
+        # Store rhetorical function profile for template generation
+        self.function_profile = profile.function_profile
+        self.function_samples = (
+            self.function_profile.function_samples
+            if self.function_profile else {}
+        )
 
     def _create_pattern_injector(self, human_patterns: Dict) -> PatternInjector:
         """Create PatternInjector from profile's human_patterns dict."""
@@ -801,6 +817,20 @@ class EvolutionarySentenceGenerator:
         if pattern_request:
             parts.append(f"Structure: {pattern_request}")
 
+        # RHETORICAL FUNCTION: Add function hint if available
+        # This creates varied argumentative flow instead of monotonous statements
+        rhetorical_function = state.rhetorical_function
+        if rhetorical_function and rhetorical_function != SentenceFunction.CONTINUATION:
+            func_desc = FUNCTION_DESCRIPTIONS.get(rhetorical_function, "")
+            if func_desc:
+                parts.append(f"Role: {rhetorical_function.value.upper()} - {func_desc}")
+                # Add example from corpus if available
+                if hasattr(self, 'function_samples') and self.function_samples:
+                    samples = self.function_samples.get(rhetorical_function.value, [])
+                    if samples:
+                        example = random.choice(samples[:5])  # Pick from top 5
+                        parts.append(f'Example: "{example[:80]}..."' if len(example) > 80 else f'Example: "{example}"')
+
         parts.append("")
         parts.append("Write ONE sentence expressing this. NEVER repeat words from 'Previous'.")
         parts.append("Sentence:")
@@ -1105,6 +1135,7 @@ class EvolutionaryParagraphGenerator:
         llm_generate: Callable[[str], str],
         population_size: int = 5,
         max_generations: int = 3,
+        use_rhetorical_templates: bool = True,
     ):
         """Initialize paragraph generator."""
         self.generator = EvolutionarySentenceGenerator(
@@ -1115,6 +1146,22 @@ class EvolutionaryParagraphGenerator:
         )
         self.profile = profile
         self.verifier = StyleVerifier(profile)
+
+        # Initialize rhetorical template generator if profile has function data
+        self.use_rhetorical_templates = use_rhetorical_templates
+        self.template_generator = None
+        self.proposition_mapper = None
+
+        if use_rhetorical_templates and profile.function_profile:
+            func_profile = profile.function_profile
+            self.template_generator = RhetoricalTemplateGenerator(
+                function_transitions=func_profile.function_transitions,
+                initial_function_probs=func_profile.initial_function_probs,
+                min_variety=2,
+                max_same_consecutive=2,
+            )
+            self.proposition_mapper = PropositionMapper(llm_provider=None)  # Use heuristics
+            logger.info("[PARA] Rhetorical template generation enabled")
 
     def generate_paragraph(
         self,
@@ -1158,6 +1205,39 @@ class EvolutionaryParagraphGenerator:
 
         logger.info(f"[PARA] Grouped into {len(prop_groups)} sentence groups")
 
+        # Generate rhetorical template and map propositions to slots
+        slot_functions = []
+        if self.template_generator and len(prop_groups) > 1:
+            template = self.template_generator.generate(len(prop_groups))
+            group_props_text = [g["propositions"][0] for g in prop_groups if g["propositions"]]
+
+            mapping_result = self.proposition_mapper.map_propositions(
+                group_props_text, template
+            )
+
+            # Reorder groups if mapping suggests reordering
+            if mapping_result.reordered and mapping_result.mappings:
+                # Build reordered groups based on mapping
+                reordered_groups = [None] * len(prop_groups)
+                for mapping in mapping_result.mappings:
+                    if mapping.slot_index < len(reordered_groups):
+                        orig_idx = mapping.original_index
+                        if orig_idx < len(prop_groups):
+                            reordered_groups[mapping.slot_index] = prop_groups[orig_idx]
+
+                # Fill any gaps and filter None
+                prop_groups = [g for g in reordered_groups if g is not None]
+                logger.info(f"[PARA] Reordered propositions for rhetorical flow")
+
+            # Extract functions in order
+            slot_functions = [
+                mapping_result.template.slots[i].function
+                if i < len(mapping_result.template.slots)
+                else SentenceFunction.CONTINUATION
+                for i in range(len(prop_groups))
+            ]
+            logger.info(f"[PARA] Rhetorical template: {[f.value for f in slot_functions]}")
+
         for group_idx, group in enumerate(prop_groups):
             group_props = group["propositions"]
             group_rst = group.get("rst_info", [])
@@ -1198,6 +1278,12 @@ class EvolutionaryParagraphGenerator:
             # Add citation to content if present
             if citations:
                 combined_content += f" {' '.join(citations)}"
+
+            # Set rhetorical function for this sentence
+            if slot_functions and group_idx < len(slot_functions):
+                state.rhetorical_function = slot_functions[group_idx]
+            else:
+                state.rhetorical_function = None
 
             # Generate the sentence
             sentence, state = self.generator.generate_sentence(

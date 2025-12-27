@@ -313,6 +313,48 @@ class DeltaProfile:
 
 
 @dataclass
+class SentenceFunctionProfile:
+    """Sentence function patterns extracted from corpus.
+
+    Tracks rhetorical functions (claim, question, contrast, etc.)
+    and their transition probabilities for natural argumentative flow.
+    """
+
+    # Function distribution across corpus
+    function_distribution: Dict[str, float] = field(default_factory=dict)
+    # e.g., {"claim": 0.3, "question": 0.1, "contrast": 0.15, ...}
+
+    # Function transition Markov model
+    # P(next_function | current_function)
+    function_transitions: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    # e.g., {"claim": {"evidence": 0.4, "contrast": 0.2, ...}, ...}
+
+    # Initial function probabilities (paragraph starters)
+    initial_function_probs: Dict[str, float] = field(default_factory=dict)
+    # e.g., {"setup": 0.3, "claim": 0.4, "question": 0.2, ...}
+
+    # Sample sentences for each function type
+    function_samples: Dict[str, List[str]] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict:
+        return {
+            "function_distribution": self.function_distribution,
+            "function_transitions": self.function_transitions,
+            "initial_function_probs": self.initial_function_probs,
+            "function_samples": self.function_samples,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "SentenceFunctionProfile":
+        return cls(
+            function_distribution=data.get("function_distribution", {}),
+            function_transitions=data.get("function_transitions", {}),
+            initial_function_probs=data.get("initial_function_probs", {}),
+            function_samples=data.get("function_samples", {}),
+        )
+
+
+@dataclass
 class VocabularyPalette:
     """Author's vocabulary organized for style transfer.
 
@@ -377,6 +419,9 @@ class AuthorStyleProfile:
     # Vocabulary palette (for vocabulary transformation)
     vocabulary_palette: VocabularyPalette = field(default_factory=VocabularyPalette)
 
+    # Sentence function profile (for rhetorical templates)
+    function_profile: SentenceFunctionProfile = field(default_factory=SentenceFunctionProfile)
+
     # Human writing patterns (for humanization)
     human_patterns: Dict = field(default_factory=dict)
     # Contains: fragments, questions, asides, dash_patterns, short_sentences, etc.
@@ -397,6 +442,7 @@ class AuthorStyleProfile:
             "structure_profile": self.structure_profile.to_dict(),
             "discourse_profile": self.discourse_profile.to_dict(),
             "vocabulary_palette": self.vocabulary_palette.to_dict(),
+            "function_profile": self.function_profile.to_dict(),
             "human_patterns": self.human_patterns,
             "style_dna": self.style_dna,
         }
@@ -415,6 +461,7 @@ class AuthorStyleProfile:
             structure_profile=SentenceStructureProfile.from_dict(data.get("structure_profile", {})),
             discourse_profile=DiscourseRelationProfile.from_dict(data.get("discourse_profile", {})),
             vocabulary_palette=VocabularyPalette.from_dict(data.get("vocabulary_palette", {})),
+            function_profile=SentenceFunctionProfile.from_dict(data.get("function_profile", {})),
             human_patterns=data.get("human_patterns", {}),
             style_dna=data.get("style_dna", ""),
         )

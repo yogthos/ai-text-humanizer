@@ -18,9 +18,11 @@ from .profile import (
     SentenceStructureProfile,
     DiscourseRelationProfile,
     VocabularyPalette,
+    SentenceFunctionProfile,
     AuthorStyleProfile,
 )
 from ..vocabulary.palette import VocabularyPaletteExtractor
+from ..rhetorical.function_classifier import SentenceFunctionClassifier
 
 logger = get_logger(__name__)
 
@@ -76,6 +78,17 @@ class StyleProfileExtractor:
         vocab_extractor = VocabularyPaletteExtractor()
         vocabulary_palette = vocab_extractor.extract(paragraphs)
 
+        # Extract sentence function profile for rhetorical templates
+        func_classifier = SentenceFunctionClassifier()
+        func_profile_data = func_classifier.extract_function_profile(paragraphs)
+        function_profile = SentenceFunctionProfile(
+            function_distribution=func_profile_data["function_distribution"],
+            function_transitions=func_profile_data["function_transitions"],
+            initial_function_probs=func_profile_data["initial_function_probs"],
+            function_samples=func_profile_data["function_samples"],
+        )
+        logger.info(f"  Function types: {list(func_profile_data['function_distribution'].keys())}")
+
         # Extract human writing patterns for humanization
         human_patterns = self._extract_human_patterns(paragraphs)
 
@@ -100,6 +113,7 @@ class StyleProfileExtractor:
             structure_profile=structure_profile,
             discourse_profile=discourse_profile,
             vocabulary_palette=vocabulary_palette,
+            function_profile=function_profile,
             human_patterns=human_patterns,
         )
 
