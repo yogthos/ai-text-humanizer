@@ -147,6 +147,17 @@ class EvolutionarySentenceGenerator:
         # Initialize humanization pattern injector from profile
         self.pattern_injector = self._create_pattern_injector(profile.human_patterns)
 
+        # Store vocabulary palette for prompt hints
+        self.vocabulary_palette = profile.vocabulary_palette
+        # Get author's STYLISTIC words for prompts - NOT content words
+        # Use connectives and intensifiers (these are style, not content)
+        self.author_stylistic_words = (
+            self.vocabulary_palette.connectives[:8] +
+            self.vocabulary_palette.intensifiers[:6]
+        ) if self.vocabulary_palette.connectives else []
+        # Get LLM-speak to avoid
+        self.llm_avoid = list(self.vocabulary_palette.llm_replacements.keys())[:10] if self.vocabulary_palette.llm_replacements else []
+
     def _create_pattern_injector(self, human_patterns: Dict) -> PatternInjector:
         """Create PatternInjector from profile's human_patterns dict."""
         if not human_patterns:
@@ -740,6 +751,17 @@ class EvolutionarySentenceGenerator:
 
         parts.append("")
         parts.append("(Match the sentence RHYTHM and STRUCTURE above, not the topics.)")
+
+        # Add vocabulary hints - author's STYLISTIC words only (not content)
+        if self.author_stylistic_words:
+            stylistic_sample = ", ".join(self.author_stylistic_words[:8])
+            parts.append(f"Style words: {stylistic_sample}")
+
+        # Add LLM-speak to avoid
+        if self.llm_avoid:
+            avoid_sample = ", ".join(self.llm_avoid[:6])
+            parts.append(f"Avoid: {avoid_sample}")
+
         parts.append("---")
 
         # Context from previous sentences

@@ -313,6 +313,45 @@ class DeltaProfile:
 
 
 @dataclass
+class VocabularyPalette:
+    """Author's vocabulary organized for style transfer.
+
+    Includes POS-specific words, semantic clusters, and LLM-speak replacements.
+    """
+
+    nouns: Dict[str, float] = field(default_factory=dict)
+    verbs: Dict[str, float] = field(default_factory=dict)
+    adjectives: Dict[str, float] = field(default_factory=dict)
+    adverbs: Dict[str, float] = field(default_factory=dict)
+    keywords: List[str] = field(default_factory=list)
+    keyword_frequencies: Dict[str, float] = field(default_factory=dict)
+    common_openers: List[str] = field(default_factory=list)
+    semantic_clusters: Dict[str, List[str]] = field(default_factory=dict)
+    llm_replacements: Dict[str, str] = field(default_factory=dict)
+    intensifiers: List[str] = field(default_factory=list)
+    connectives: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict:
+        return {
+            "nouns": self.nouns,
+            "verbs": self.verbs,
+            "adjectives": self.adjectives,
+            "adverbs": self.adverbs,
+            "keywords": self.keywords,
+            "keyword_frequencies": self.keyword_frequencies,
+            "common_openers": self.common_openers,
+            "semantic_clusters": self.semantic_clusters,
+            "llm_replacements": self.llm_replacements,
+            "intensifiers": self.intensifiers,
+            "connectives": self.connectives,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "VocabularyPalette":
+        return cls(**data)
+
+
+@dataclass
 class AuthorStyleProfile:
     """Complete author style profile.
 
@@ -335,6 +374,9 @@ class AuthorStyleProfile:
     structure_profile: SentenceStructureProfile = field(default_factory=SentenceStructureProfile)
     discourse_profile: DiscourseRelationProfile = field(default_factory=DiscourseRelationProfile)
 
+    # Vocabulary palette (for vocabulary transformation)
+    vocabulary_palette: VocabularyPalette = field(default_factory=VocabularyPalette)
+
     # Human writing patterns (for humanization)
     human_patterns: Dict = field(default_factory=dict)
     # Contains: fragments, questions, asides, dash_patterns, short_sentences, etc.
@@ -354,6 +396,7 @@ class AuthorStyleProfile:
             "delta_profile": self.delta_profile.to_dict(),
             "structure_profile": self.structure_profile.to_dict(),
             "discourse_profile": self.discourse_profile.to_dict(),
+            "vocabulary_palette": self.vocabulary_palette.to_dict(),
             "human_patterns": self.human_patterns,
             "style_dna": self.style_dna,
         }
@@ -371,6 +414,7 @@ class AuthorStyleProfile:
             delta_profile=DeltaProfile.from_dict(data["delta_profile"]),
             structure_profile=SentenceStructureProfile.from_dict(data.get("structure_profile", {})),
             discourse_profile=DiscourseRelationProfile.from_dict(data.get("discourse_profile", {})),
+            vocabulary_palette=VocabularyPalette.from_dict(data.get("vocabulary_palette", {})),
             human_patterns=data.get("human_patterns", {}),
             style_dna=data.get("style_dna", ""),
         )

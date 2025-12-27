@@ -17,8 +17,10 @@ from .profile import (
     DeltaProfile,
     SentenceStructureProfile,
     DiscourseRelationProfile,
+    VocabularyPalette,
     AuthorStyleProfile,
 )
+from ..vocabulary.palette import VocabularyPaletteExtractor
 
 logger = get_logger(__name__)
 
@@ -70,6 +72,10 @@ class StyleProfileExtractor:
         structure_profile = self._extract_structure_profile(all_sentences)
         discourse_profile = self._extract_discourse_profile(paragraphs)
 
+        # Extract vocabulary palette for style transfer
+        vocab_extractor = VocabularyPaletteExtractor()
+        vocabulary_palette = vocab_extractor.extract(paragraphs)
+
         # Extract human writing patterns for humanization
         human_patterns = self._extract_human_patterns(paragraphs)
 
@@ -93,6 +99,7 @@ class StyleProfileExtractor:
             delta_profile=delta_profile,
             structure_profile=structure_profile,
             discourse_profile=discourse_profile,
+            vocabulary_palette=vocabulary_palette,
             human_patterns=human_patterns,
         )
 

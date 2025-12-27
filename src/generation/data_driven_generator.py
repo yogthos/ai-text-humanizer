@@ -15,6 +15,7 @@ from ..utils.nlp import split_into_sentences
 from ..utils.logging import get_logger
 from ..ingestion.proposition_extractor import PropositionExtractor
 from ..validation.entailment import EntailmentVerifier, EntailmentResult
+from ..vocabulary.transformer import VocabularyTransformer
 
 logger = get_logger(__name__)
 
@@ -108,6 +109,9 @@ class DataDrivenStyleTransfer:
             max_generations=max_generations,
         )
 
+        # Initialize vocabulary transformer for post-processing
+        self.vocab_transformer = VocabularyTransformer(self.profile.vocabulary_palette)
+
         logger.info(
             f"Initialized DataDrivenStyleTransfer for {author_name} "
             f"(mean length={self.profile.length_profile.mean:.1f}, "
@@ -163,6 +167,11 @@ class DataDrivenStyleTransfer:
             proposition_texts,
             rst_info=rst_info
         )
+
+        # Apply vocabulary transformation (replace LLM-speak with author words)
+        transferred, vocab_stats = self.vocab_transformer.transform(transferred)
+        if vocab_stats.replacements_made > 0:
+            logger.info(f"[VOCAB] Replaced {vocab_stats.replacements_made} words: {vocab_stats.replacements_detail}")
 
         # Verify against profile
         verification = self.verifier.verify_paragraph(transferred)
