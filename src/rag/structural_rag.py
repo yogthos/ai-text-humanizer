@@ -275,7 +275,17 @@ class StructuralRAG:
             chunks = [r["text"] for r in results]
         except Exception as e:
             logger.debug(f"Could not query similar chunks: {e}")
-            return []
+            chunks = []
+
+        # Fall back to random chunks if semantic search returned nothing
+        if not chunks:
+            try:
+                random_chunks = self.indexer.get_random_chunks(self.author, n=10)
+                if random_chunks:
+                    logger.debug(f"Using random chunks as fallback for exemplar sentences")
+                    chunks = random_chunks
+            except Exception as e:
+                logger.debug(f"Could not get random chunks: {e}")
 
         if not chunks:
             return []
@@ -287,21 +297,30 @@ class StructuralRAG:
             sentences = split_into_sentences(chunk)
             all_sentences.extend(sentences)
 
+        # Build emotion word list dynamically from enhanced profile
+        emotion_words = []
+        if self._enhanced_profile and self._enhanced_profile.vocabulary:
+            emotion_words = list(self._enhanced_profile.vocabulary.emotional)
+
         # Filter for high-quality exemplar sentences
         exemplars = []
         for sent in all_sentences:
             words = sent.split()
             # Good length: 10-40 words (interesting but not overwhelming)
             if 10 <= len(words) <= 40:
-                # Has interesting features
+                # Structural features (author-agnostic)
                 has_dash = '—' in sent or ' – ' in sent
                 has_semicolon = ';' in sent
-                has_emotion = any(w in sent.lower() for w in [
-                    'dread', 'horror', 'terrible', 'nameless', 'strange',
-                    'fear', 'wonder', 'awe', 'confess', 'shudder'
-                ])
+                # Dynamic emotion detection from corpus vocabulary
+                has_emotion = bool(emotion_words) and any(
+                    w in sent.lower() for w in emotion_words
+                )
+                # Sentence length variety is itself a signal
+                word_count = len(words)
+                has_length_variety = word_count <= 15 or word_count >= 30
                 # Prioritize sentences with distinctive features
-                score = int(has_dash) + int(has_semicolon) + int(has_emotion) * 2
+                score = (int(has_dash) + int(has_semicolon)
+                         + int(has_emotion) * 2 + int(has_length_variety))
                 if score > 0 or len(exemplars) < 3:  # Always get at least 3
                     exemplars.append((score, sent))
 

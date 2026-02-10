@@ -370,7 +370,8 @@ class CorpusIndexer:
         self,
         author: str,
         query_text: str,
-        n: int = 3
+        n: int = 3,
+        fallback_to_random: bool = True
     ) -> List[dict]:
         """Retrieve chunks semantically similar to query text.
 
@@ -378,6 +379,8 @@ class CorpusIndexer:
             author: Author name to search within.
             query_text: Text to find similar chunks for.
             n: Number of results to return.
+            fallback_to_random: If True, fall back to random chunks when
+                semantic search returns empty but chunks exist for the author.
 
         Returns:
             List of dicts with 'text', 'skeleton', and 'distance' keys.
@@ -398,8 +401,37 @@ class CorpusIndexer:
         distances = results.get("distances", [[]])[0]
 
         if not documents:
-            logger.warning(f"No similar chunks found for author: {author}")
-            return []
+            # Diagnose why no results were found
+            chunk_count = self.get_chunk_count(author)
+            if chunk_count == 0:
+                available = self.get_authors()
+                if available:
+                    logger.warning(
+                        f"No chunks indexed for author '{author}'. "
+                        f"Available authors: {', '.join(available)}. "
+                        f"Run: python scripts/load_corpus.py --input <corpus> --author \"{author}\""
+                    )
+                else:
+                    logger.warning(
+                        f"No chunks indexed for author '{author}' "
+                        f"(ChromaDB is empty — no authors indexed). "
+                        f"Run: python scripts/load_corpus.py --input <corpus> --author \"{author}\""
+                    )
+                return []
+            else:
+                # Chunks exist but semantic search returned nothing — unexpected
+                logger.warning(
+                    f"Semantic search returned no results for author '{author}' "
+                    f"despite {chunk_count} indexed chunks. This is unexpected."
+                )
+                if fallback_to_random:
+                    logger.info(f"Falling back to random chunks for '{author}'")
+                    random_chunks = self.get_random_chunks(author, n=n)
+                    return [
+                        {"text": text, "skeleton": "", "distance": -1.0}
+                        for text in random_chunks
+                    ]
+                return []
 
         # Build result list
         chunks = []

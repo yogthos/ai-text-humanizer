@@ -77,8 +77,18 @@ class StructuralGrafter:
             return None
 
         if not similar:
-            logger.debug(f"No similar samples found for {self.author}")
-            return None
+            # Fall back to random chunks
+            try:
+                random_chunks = self.indexer.get_random_chunks(self.author, n=3)
+                if random_chunks:
+                    logger.debug(f"Using random chunk as fallback for grafting guidance")
+                    similar = [{"text": random_chunks[0], "skeleton": ""}]
+                else:
+                    logger.debug(f"No samples found for {self.author}")
+                    return None
+            except Exception as e:
+                logger.debug(f"Could not get random chunks for fallback: {e}")
+                return None
 
         # Get best match
         best = similar[0]
