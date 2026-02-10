@@ -364,14 +364,18 @@ def load_corpus(
         metadatas.append(meta)
         embedding_list.append(embedding.tolist())
 
-    # Upsert to collection
-    logger.info(f"Indexing {len(ids)} chunks into ChromaDB...")
-    indexer.collection.upsert(
-        ids=ids,
-        documents=documents,
-        metadatas=metadatas,
-        embeddings=embedding_list,
-    )
+    # Upsert to collection in batches (ChromaDB max batch size is 5461)
+    batch_size = 5000
+    logger.info(f"Indexing {len(ids)} chunks into ChromaDB (batch size {batch_size})...")
+    for start in range(0, len(ids), batch_size):
+        end = min(start + batch_size, len(ids))
+        indexer.collection.upsert(
+            ids=ids[start:end],
+            documents=documents[start:end],
+            metadatas=metadatas[start:end],
+            embeddings=embedding_list[start:end],
+        )
+        logger.info(f"  Indexed batch {start}-{end} ({end - start} chunks)")
 
     stats.indexed_chunks = len(ids)
     logger.info(f"Successfully indexed {len(ids)} chunks for {author}")
