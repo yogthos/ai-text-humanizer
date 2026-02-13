@@ -124,7 +124,11 @@ class CorpusIndexer:
                 name="style_chunks",
                 metadata={"description": "Author style chunks for RAG retrieval"}
             )
-            logger.info(f"Collection 'style_chunks' has {self._collection.count()} chunks")
+            count = self._collection.count()
+            if count == 0:
+                logger.warning("ChromaDB collection 'style_chunks' is empty — no authors indexed. Run load_corpus.py first.")
+            else:
+                logger.info(f"Collection 'style_chunks' has {count} chunks")
         return self._collection
 
     @property

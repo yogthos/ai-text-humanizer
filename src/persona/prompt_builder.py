@@ -59,6 +59,9 @@ def _load_persona_file(persona_filename: str) -> Dict[str, Any]:
 
     Returns dict with keys: narrative_frames, conceptual_frames
     """
+    if not persona_filename:
+        return {"narrative_frames": [], "conceptual_frames": []}
+
     prompts_dir = Path(__file__).parent.parent.parent / "prompts"
     filepath = prompts_dir / persona_filename
 
@@ -96,7 +99,7 @@ def _load_persona_file(persona_filename: str) -> Dict[str, Any]:
     return result
 
 
-def _get_worldview_filename(adapter_path: str = None) -> str:
+def _get_worldview_filename(adapter_path: Optional[str] = None) -> str:
     """Get worldview filename from config.json for a specific adapter.
 
     Args:
@@ -126,9 +129,9 @@ def _get_worldview_filename(adapter_path: str = None) -> str:
     return "default_persona.txt"
 
 
-def _get_persona_frame(is_narrative: bool) -> str:
+def _get_persona_frame(is_narrative: bool, adapter_path: Optional[str] = None) -> str:
     """Get a persona frame from the configured worldview file."""
-    filename = _get_worldview_filename()
+    filename = _get_worldview_filename(adapter_path)
     persona_data = _load_persona_file(filename)
 
     if is_narrative:
@@ -236,6 +239,7 @@ def build_persona_prompt(
     target_words: Optional[int] = None,
     deterministic_constraints: bool = False,
     expand_for_texture: bool = False,
+    adapter_path: Optional[str] = None,
 ) -> str:
     """Build a prompt matching the training format EXACTLY.
 
@@ -265,7 +269,7 @@ def build_persona_prompt(
     is_narrative = _detect_content_type(content)
 
     # Get situational persona frame from config file
-    persona_frame = _get_persona_frame(is_narrative)
+    persona_frame = _get_persona_frame(is_narrative, adapter_path=adapter_path)
 
     # Calculate target words if not provided
     if target_words is None:

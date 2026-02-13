@@ -5,6 +5,7 @@ import os
 import pytest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from src.config import (
     load_config,
@@ -59,7 +60,7 @@ class TestConfigLoading:
                 config = load_config(f.name)
                 assert config.llm.provider.writer == "mlx"
                 assert config.llm.provider.critic == "deepseek"
-                assert config.generation.max_repair_attempts == 3  # default is 3
+                assert config.generation.max_repair_attempts == 3  # explicitly set to 3 in config
             finally:
                 os.unlink(f.name)
 
@@ -169,7 +170,7 @@ class TestDefaultConfig:
         config = Config()
 
         assert config.llm.max_retries == 5
-        assert config.generation.max_repair_attempts == 3  # actual default is 3
+        assert config.generation.max_repair_attempts == 5  # default is 5
         assert config.validation.entailment_threshold == 0.7
         assert config.validation.max_hallucinations_before_reject == 2
 
@@ -227,3 +228,198 @@ class TestLLMConfig:
         with pytest.raises(ValueError) as exc_info:
             llm_config.get_provider_config("unknown")
         assert "Unknown LLM provider" in str(exc_info.value)
+
+
+class TestDefaultValueMatches:
+    """Tests for default value consistency (Bug 15)."""
+
+    def test_generation_config_max_repair_attempts(self):
+        """GenerationConfig max_repair_attempts should match config.json default."""
+        from src.config import GenerationConfig
+        assert GenerationConfig().max_repair_attempts == 5
+
+    def test_generation_config_rag_sample_size(self):
+        """GenerationConfig rag_sample_size should match config.json default."""
+        from src.config import GenerationConfig
+        assert GenerationConfig().rag_sample_size == 300
+
+    def test_transfer_config_sentence_length_variance(self):
+        """TransferConfig sentence_length_variance should match config.json default."""
+        from src.generation.transfer import TransferConfig
+        assert TransferConfig().sentence_length_variance == 0.4
+
+
+class TestWorldviewFileValidation:
+    """Tests for worldview file existence check on load (Bug 20)."""
+
+    def test_nonexistent_worldview_logs_warning(self):
+        """Config with nonexistent worldview file should log a warning."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "lora_adapters": {
+                    "test_adapter": {
+                        "scale": 2.0,
+                        "worldview": "nonexistent_worldview_xyz.txt",
+                    }
+                }
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                with patch('src.config.logger') as mock_logger:
+                    config = load_config(f.name)
+                    # Should have logged a warning about missing worldview file
+                    warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+                    assert any("nonexistent_worldview_xyz.txt" in str(c) for c in warning_calls), \
+                        f"Expected warning about missing worldview file, got: {warning_calls}"
+            finally:
+                os.unlink(f.name)
+
+
+class TestDualEntailmentThreshold:
+    """Tests for entailment_threshold sync between generation and validation (Bug 8)."""
+
+    def test_validation_threshold_propagates(self):
+        """When only set in validation section, generation should match."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "validation": {
+                "entailment_threshold": 0.85,
+                "max_hallucinations_before_reject": 3,
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                config = load_config(f.name)
+                # Both should be 0.85 since validation is the only source
+                assert config.validation.entailment_threshold == 0.85
+                assert config.generation.entailment_threshold == 0.85
+            finally:
+                os.unlink(f.name)
+
+    def test_generation_threshold_takes_precedence(self):
+        """When set in both, generation value should win."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "entailment_threshold": 0.6,
+            },
+            "validation": {
+                "entailment_threshold": 0.85,
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                config = load_config(f.name)
+                # generation explicitly set should win
+                assert config.generation.entailment_threshold == 0.6
+            finally:
+                os.unlink(f.name)
+
+
+class TestEnvVarResolution:
+    """Tests for environment variable resolution in config (Bug 13)."""
+
+    def test_base_url_env_var_resolved(self):
+        """base_url should resolve ${ENV_VAR} syntax."""
+        os.environ["TEST_BASE_URL"] = "http://test.example.com"
+
+        config_data = {
+            "llm": {
+                "provider": {"writer": "mlx", "critic": "test_provider"},
+                "providers": {
+                    "test_provider": {
+                        "api_key": "key",
+                        "base_url": "${TEST_BASE_URL}",
+                        "model": "test-model",
+                    }
+                },
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                config = load_config(f.name)
+                assert config.llm.providers["test_provider"].base_url == "http://test.example.com"
+            finally:
+                os.unlink(f.name)
+                del os.environ["TEST_BASE_URL"]
+
+    def test_model_env_var_resolved(self):
+        """model should resolve ${ENV_VAR} syntax."""
+        os.environ["TEST_MODEL"] = "gpt-4"
+
+        config_data = {
+            "llm": {
+                "provider": {"writer": "mlx", "critic": "test_provider"},
+                "providers": {
+                    "test_provider": {
+                        "api_key": "key",
+                        "model": "${TEST_MODEL}",
+                    }
+                },
+            }
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                config = load_config(f.name)
+                assert config.llm.providers["test_provider"].model == "gpt-4"
+            finally:
+                os.unlink(f.name)
+                del os.environ["TEST_MODEL"]
+
+
+class TestUnknownConfigFields:
+    """Tests for unknown config field warnings (Bug 14)."""
+
+    def test_unknown_adapter_field_logs_warning(self):
+        """Unknown fields in adapter config should trigger a warning."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "lora_adapters": {
+                    "test_adapter": {
+                        "scale": 2.0,
+                        "typo_field": "oops",
+                        "another_bad_key": 42,
+                    }
+                }
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                with patch('src.config.logger') as mock_logger:
+                    config = load_config(f.name)
+                    # Just verify config loaded without crashing
+                    assert "test_adapter" in config.generation.lora_adapters
+                    # Check warning was logged
+                    warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+                    assert any("typo_field" in str(c) for c in warning_calls) or \
+                           any("another_bad_key" in str(c) for c in warning_calls), \
+                           f"Expected warning about unknown fields, got: {warning_calls}"
+            finally:
+                os.unlink(f.name)

@@ -18,8 +18,7 @@ class TestGrammarCorrectorConfig:
         assert "CASING" in config.skip_categories
         assert "PASSIVE_VOICE" in config.skip_rules
         assert "TOO_LONG_SENTENCE" in config.skip_rules
-        assert "GRAMMAR" in config.fix_only_categories
-        assert "TYPOS" in config.fix_only_categories
+        assert config.fix_only_categories == set()  # Empty by default (fix all)
 
     def test_custom_language(self):
         """Test custom language setting."""
@@ -332,6 +331,19 @@ class TestDefaultSkipLists:
             "EN_QUOTES",
         }
         assert expected.issubset(DEFAULT_SKIP_RULES)
+
+
+class TestGrammarCorrectorDefaults:
+    """Tests for grammar corrector default values (Bug 17)."""
+
+    def test_fix_only_categories_default_empty(self):
+        """Default fix_only_categories should be empty (fix all categories)."""
+        from src.vocabulary.grammar_corrector import GrammarCorrectorConfig
+
+        config = GrammarCorrectorConfig()
+        assert config.fix_only_categories == set(), (
+            f"fix_only_categories should default to empty set, got {config.fix_only_categories}"
+        )
 
 
 if __name__ == "__main__":

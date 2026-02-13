@@ -134,8 +134,9 @@ class StructuralRAG:
             self.load_patterns()
 
         if not self._cached_rhythms:
-            # Fallback: generate Lovecraft-style pattern
-            return self._generate_lovecraft_rhythm(target_sentences)
+            # Fallback: generate default rhythm pattern
+            logger.debug(f"No cached rhythms for {self.author}, using default fallback")
+            return self._generate_default_rhythm(target_sentences)
 
         # Find patterns with similar sentence count
         matching = [r for r in self._cached_rhythms
@@ -148,9 +149,9 @@ class StructuralRAG:
         rhythm = random.choice(matching)
         return rhythm.to_rhythm_string()
 
-    def _generate_lovecraft_rhythm(self, n: int) -> str:
-        """Generate Lovecraft-style rhythm pattern."""
-        # Lovecraft's characteristic patterns:
+    def _generate_default_rhythm(self, n: int) -> str:
+        """Generate default fallback rhythm pattern."""
+        # Generic characteristic patterns:
         # - Long complex sentences followed by short punchy ones
         # - Occasional fragments for emphasis
         # - Building tension with increasing length
@@ -288,6 +289,7 @@ class StructuralRAG:
                 logger.debug(f"Could not get random chunks: {e}")
 
         if not chunks:
+            logger.warning(f"No exemplar sentences found for author '{self.author}' — corpus may be empty or unindexed")
             return []
 
         # Extract individual sentences from chunks

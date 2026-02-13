@@ -10,6 +10,10 @@ affect both. The classification logic must remain consistent to match training.
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from .logging import get_logger
+
+logger = get_logger(__name__)
+
 if TYPE_CHECKING:
     from spacy.tokens import Doc
 
@@ -102,12 +106,18 @@ def classify_content_type(text: str, default_to_narrative: bool = True) -> Conte
 
     # Return classification with hysteresis to avoid flipping on edge cases
     if narrative_score > conceptual_score + 1:
-        return ContentType.NARRATIVE
+        result = ContentType.NARRATIVE
     elif conceptual_score > narrative_score + 1:
-        return ContentType.CONCEPTUAL
+        result = ContentType.CONCEPTUAL
     else:
         # Tied or close - use default
-        return ContentType.NARRATIVE if default_to_narrative else ContentType.CONCEPTUAL
+        result = ContentType.NARRATIVE if default_to_narrative else ContentType.CONCEPTUAL
+        logger.debug(
+            f"Borderline classification: narrative={narrative_score}, conceptual={conceptual_score} "
+            f"→ {result.value} (default). Text: {text[:80]}..."
+        )
+
+    return result
 
 
 def is_narrative(text: str) -> bool:

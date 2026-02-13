@@ -50,12 +50,12 @@ LLM_SPEAK = {
     "deep dive": "detailed look",
     "moving forward": "next",
     # Mechanical precision markers (AI tells)
-    "specifically": "",  # Often unnecessary
-    "particularly": "",
-    "fundamentally": "",
-    "essentially": "",
-    "inherently": "",
-    "intrinsically": "",
+    "specifically": "precisely",
+    "particularly": "especially",
+    "fundamentally": "at root",
+    "essentially": "really",
+    "inherently": "naturally",
+    "intrinsically": "naturally",
     "ultimately": "in the end",
     "subsequently": "then",
     "consequently": "so",
@@ -72,10 +72,10 @@ LLM_SPEAK = {
     "thereof": "of it",
     "therein": "in it",
     # Logic gate connectors (mechanical transitions - GPTZero flags)
-    "therefore": "",
-    "thus": "",
-    "hence": "",
-    "basically": "",
+    "therefore": "so",
+    "thus": "so",
+    "hence": "so",
+    "basically": "really",
     "notion": "idea",  # Academic flag
     "notions": "ideas",
     # Hedging/filler phrases
@@ -218,6 +218,7 @@ class RepetitionReducer:
         threshold: int = 3,
         use_wordnet: bool = True,
         synonym_replacement: bool = False,  # Disable by default - causes problems
+        fix_llm_speak: bool = True,  # Replace LLM-speak words with plain alternatives
     ):
         """Initialize the reducer.
 
@@ -226,10 +227,12 @@ class RepetitionReducer:
             use_wordnet: Whether to use WordNet for synonyms.
             synonym_replacement: Whether to replace overused words with synonyms.
                                Defaults to False as this often introduces weird vocabulary.
+            fix_llm_speak: Whether to replace LLM-speak words. Defaults to True.
         """
         self.threshold = threshold
         self.use_wordnet = use_wordnet
         self.synonym_replacement = synonym_replacement
+        self.fix_llm_speak = fix_llm_speak
         self._nlp = None
         self._wordnet = None
 
@@ -288,7 +291,7 @@ class RepetitionReducer:
             stats.words_checked += 1
 
             # Check for LLM-speak FIRST - bypass _should_track for these
-            if token.text.lower() in LLM_SPEAK:
+            if self.fix_llm_speak and token.text.lower() in LLM_SPEAK:
                 replacement = LLM_SPEAK[token.text.lower()]
                 # Always fix vocabulary issues
                 replacements.append((token.idx, token.text, self._match_case(replacement, token.text)))

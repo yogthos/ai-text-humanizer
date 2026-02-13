@@ -70,7 +70,7 @@ class TransferConfig:
     max_hallucinations_before_reject: int = 2  # Trigger repair after this many hallucinations
 
     # Repair settings
-    max_repair_attempts: int = 3
+    max_repair_attempts: int = 5
     repair_temperature: float = 0.3  # Lower temperature for repair attempts
 
     # Post-processing settings
@@ -100,7 +100,7 @@ class TransferConfig:
     # Structural RAG settings
     use_structural_rag: bool = True  # Enable Structural RAG for rhythm/syntax guidance
     use_structural_grafting: bool = True  # Enable Structural Grafting for argument skeletons
-    rag_sample_size: int = 200  # Number of corpus chunks to sample for rhythm pattern analysis
+    rag_sample_size: int = 300  # Number of corpus chunks to sample for rhythm pattern analysis
 
     # Sentence restructuring settings (convert mechanical patterns to organic)
     restructure_sentences: bool = True  # Enable balanced→inverted restructuring
@@ -108,7 +108,7 @@ class TransferConfig:
     # Sentence splitting settings (break run-on sentences)
     split_sentences: bool = True  # Enable sentence splitting at conjunction points
     max_sentence_length: int = 50  # Words - split sentences longer than this
-    sentence_length_variance: float = 0.3  # Variance factor (0.3 = 70%-130% of max)
+    sentence_length_variance: float = 0.4  # Variance factor (0.4 = 60%-140% of max)
 
     # Grammar correction settings (final post-processing pass)
     correct_grammar: bool = True  # Enable style-safe grammar correction
@@ -214,6 +214,9 @@ class StyleTransfer:
             primary_adapter_path = adapters[0].path
         else:
             primary_adapter_path = adapter_path
+
+        # Store adapter path for worldview lookup in persona prompts
+        self.adapter_path = primary_adapter_path
 
         # Initialize generator using adapter-specific config from config.json
         # This loads temperature, top_p, min_p, repetition_penalty, scale, etc.
@@ -626,6 +629,7 @@ class StyleTransfer:
             pre_perspective_words = len(paragraph_clean.split())
             paragraph_clean = self._convert_to_perspective(paragraph_clean, self.config.perspective)
             post_perspective_words = len(paragraph_clean.split())
+            word_count = post_perspective_words  # Update word count for LoRA target
             logger.info(f"PERSPECTIVE: {pre_perspective_words} → {post_perspective_words} words (→ {self.config.perspective})")
 
         # ========================================
@@ -653,6 +657,7 @@ class StyleTransfer:
                 rtt_input_words = len(paragraph_clean.split())
                 rtt_output_words = len(content_for_generation.split())
                 compression_ratio = rtt_output_words / rtt_input_words if rtt_input_words > 0 else 1.0
+                word_count = rtt_output_words  # Update word count for LoRA target
                 logger.info(f"RTT: {rtt_input_words} → {rtt_output_words} words ({compression_ratio:.0%})")
 
         # ========================================
@@ -712,6 +717,7 @@ class StyleTransfer:
                 grafting_guidance=grafting_guidance,
                 target_words=target_words,  # Pass word count to match training format
                 expand_for_texture=self.config.expand_for_texture,
+                adapter_path=self.adapter_path,
             )
             structural_guidance = None  # Already included in persona prompt
             use_raw_prompt = True  # Use persona prompt directly without additional formatting
@@ -1000,6 +1006,7 @@ class StyleTransfer:
                     author=self.author,
                     target_words=target_words,
                     temperature=self.config.repair_temperature,
+                    raw_prompt=True,
                 )
 
                 if repaired and len(repaired.split()) > 10:

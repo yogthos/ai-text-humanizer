@@ -1095,5 +1095,55 @@ class TestIntegrationWithRealisticCorpus:
         assert lovecraft_formatted != sagan_formatted or len(lovecraft_corpus) != len(sagan_corpus)
 
 
+# =============================================================================
+# Tests for RAG Bug Fixes (Bugs 11, 12)
+# =============================================================================
+
+class TestExemplarWarning:
+    """Tests for empty exemplar logging (Bug 11)."""
+
+    def test_empty_exemplars_logs_warning(self):
+        """When no exemplar sentences found, should log a warning."""
+        from src.rag.structural_rag import StructuralRAG
+        import logging
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: setattr(self, 'author', author) or setattr(self, 'indexer', MagicMock()) or setattr(self, '_enhanced_profile', None)):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            rag.author = "Test"
+            rag.indexer = MagicMock()
+            rag._enhanced_profile = None
+
+            # Mock indexer to return empty results
+            rag.indexer.retrieve_similar.return_value = []
+            rag.indexer.get_random_chunks.return_value = []
+
+            with patch('src.rag.structural_rag.logger') as mock_logger:
+                result = rag._get_exemplar_sentences("test input")
+
+            assert result == []
+            mock_logger.warning.assert_called_once()
+
+
+class TestDefaultRhythmFallback:
+    """Tests for renamed default rhythm fallback (Bug 12)."""
+
+    def test_fallback_method_exists_with_generic_name(self):
+        """The fallback method should have a generic name, not Lovecraft-specific."""
+        from src.rag.structural_rag import StructuralRAG
+        assert hasattr(StructuralRAG, '_generate_default_rhythm'), \
+            "StructuralRAG should have _generate_default_rhythm method"
+
+    def test_fallback_returns_valid_pattern(self):
+        """Fallback rhythm should return valid pattern string."""
+        from src.rag.structural_rag import StructuralRAG
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: None):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            result = rag._generate_default_rhythm(4)
+            assert "→" in result  # Contains arrow separator
+            parts = [p.strip() for p in result.split("→")]
+            assert len(parts) == 4
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

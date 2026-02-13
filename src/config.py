@@ -67,7 +67,7 @@ class GenerationConfig:
     entailment_threshold: float = 0.7  # Min NLI score for semantic preservation
 
     # Repair settings
-    max_repair_attempts: int = 3  # Max critic repair attempts per paragraph
+    max_repair_attempts: int = 5  # Max critic repair attempts per paragraph
     repair_temperature: float = 0.3  # Low temperature for precise edits
 
     # Length control settings
@@ -94,7 +94,7 @@ class GenerationConfig:
     # RAG settings
     use_structural_rag: bool = True  # Enable structural RAG for rhythm/syntax guidance
     use_structural_grafting: bool = True  # Enable structural grafting for argument skeletons
-    rag_sample_size: int = 200  # Number of corpus chunks to sample for rhythm pattern analysis
+    rag_sample_size: int = 300  # Number of corpus chunks to sample for rhythm pattern analysis
 
     # Persona settings
     use_persona: bool = True  # Enable persona-based prompting
@@ -108,7 +108,7 @@ class GenerationConfig:
     restructure_sentences: bool = True  # Enable balanced→inverted restructuring
     split_sentences: bool = True  # Enable sentence splitting at conjunction points
     max_sentence_length: int = 60  # Words - split sentences longer than this
-    sentence_length_variance: float = 0.3  # Variance factor (0.3 = 70%-130% of max)
+    sentence_length_variance: float = 0.4  # Variance factor (0.4 = 60%-140% of max)
 
 
 @dataclass
@@ -201,16 +201,27 @@ def _parse_llm_provider_config(data: Dict) -> LLMProviderConfig:
     """Parse LLM provider configuration."""
     return LLMProviderConfig(
         api_key=_resolve_env_vars(data.get("api_key", "")),
-        base_url=data.get("base_url", ""),
-        model=data.get("model", ""),
+        base_url=_resolve_env_vars(data.get("base_url", "")),
+        model=_resolve_env_vars(data.get("model", "")),
         max_tokens=data.get("max_tokens", 4096),
         temperature=data.get("temperature", 0.7),
         timeout=data.get("timeout", 120),
     )
 
 
+_KNOWN_ADAPTER_FIELDS = {
+    "enabled", "scale", "temperature", "top_p", "min_p", "repetition_penalty",
+    "max_tokens", "worldview", "checkpoint", "backend", "device",
+    "load_in_4bit", "load_in_8bit", "hf_adapter_path",
+}
+
+
 def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
     """Parse LoRA adapter configuration from dict."""
+    unknown_fields = set(data.keys()) - _KNOWN_ADAPTER_FIELDS
+    if unknown_fields:
+        logger.warning(f"Unknown adapter config fields (ignored): {', '.join(sorted(unknown_fields))}")
+
     return LoRAAdapterConfig(
         enabled=data.get("enabled", True),
         scale=data.get("scale", 1.0),
@@ -370,6 +381,33 @@ def load_config(config_path: str = "config.json") -> Config:
         val_data = data["validation"]
         config.validation.entailment_threshold = val_data.get("entailment_threshold", 0.7)
         config.validation.max_hallucinations_before_reject = val_data.get("max_hallucinations_before_reject", 2)
+
+    # Sync entailment_threshold: validation → generation when not explicitly set in generation
+    if "validation" in data and "generation" not in data:
+        # No generation section: propagate validation threshold to generation defaults
+        config.generation.entailment_threshold = config.validation.entailment_threshold
+    elif "validation" in data and "generation" in data:
+        gen_data = data["generation"]
+        if "entailment_threshold" not in gen_data:
+            # Generation section exists but doesn't set threshold: use validation value
+            config.generation.entailment_threshold = config.validation.entailment_threshold
+        elif "entailment_threshold" in gen_data:
+            logger.debug(
+                f"entailment_threshold set in both generation ({config.generation.entailment_threshold}) "
+                f"and validation ({config.validation.entailment_threshold}) sections. "
+                f"Using generation value."
+            )
+
+    # Validate worldview files exist in prompts/ directory
+    prompts_dir = Path(__file__).parent.parent / "prompts"
+    for adapter_path_key, adapter_cfg in config.generation.lora_adapters.items():
+        if adapter_cfg.worldview:
+            worldview_path = prompts_dir / adapter_cfg.worldview
+            if not worldview_path.exists():
+                logger.warning(
+                    f"Worldview file '{adapter_cfg.worldview}' for adapter '{adapter_path_key}' "
+                    f"not found in {prompts_dir}. Persona prompts will use fallback frames."
+                )
 
     config.log_level = data.get("log_level", "INFO")
     config.log_json = data.get("log_json", False)

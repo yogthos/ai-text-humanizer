@@ -87,7 +87,7 @@ class GrammarCorrectorConfig:
     skip_rules: Set[str] = field(default_factory=lambda: DEFAULT_SKIP_RULES.copy())
 
     # Only fix these specific categories (if empty, fix all not skipped)
-    fix_only_categories: Set[str] = field(default_factory=lambda: {"GRAMMAR", "TYPOS"})
+    fix_only_categories: Set[str] = field(default_factory=set)
 
     # Minimum word count to apply correction (skip very short text)
     min_words: int = 3

@@ -438,7 +438,7 @@ def run_repl(
     adapter_path: str,
     author: str,
     config_path: str = "config.json",
-    temperature: float = 0.4,
+    temperature: float = None,
     perspective: str = "preserve",
     verify: bool = True,
     critic_provider = None,
@@ -484,6 +484,14 @@ def run_repl(
             rag_sample_size=gen.rag_sample_size,
             use_persona=gen.use_persona,
             apply_input_perturbation=gen.apply_input_perturbation,
+            # Sentence restructuring settings
+            restructure_sentences=gen.restructure_sentences,
+            split_sentences=gen.split_sentences,
+            max_sentence_length=gen.max_sentence_length,
+            sentence_length_variance=gen.sentence_length_variance,
+            # Grammar correction settings
+            correct_grammar=gen.correct_grammar,
+            grammar_language=gen.grammar_language,
             # Disable document context for REPL (interactive mode)
             use_document_context=False,
             pass_headings_unchanged=False,

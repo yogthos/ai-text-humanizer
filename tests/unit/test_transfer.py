@@ -31,7 +31,7 @@ class TestTransferConfig:
         assert config.top_p == 0.9
         assert config.verify_entailment is True
         assert config.entailment_threshold == 0.7
-        assert config.max_repair_attempts == 3
+        assert config.max_repair_attempts == 5
         assert config.reduce_repetition is True
 
     def test_custom_values(self):
@@ -466,6 +466,202 @@ class TestRepetitionReduction:
         )
 
         assert transfer.repetition_reducer is None
+
+
+# =============================================================================
+# Tests for Repair Prompt Format (Bug 10)
+# =============================================================================
+
+class TestRepairPromptFormat:
+    """Tests for _repair_missing_entities passing raw_prompt (Bug 10)."""
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_repair_passes_raw_prompt(self, mock_generator_class):
+        """Repair should pass raw_prompt=True to generator.generate()."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        mock_generator = MagicMock()
+        mock_generator.generate.return_value = "Repaired text with Entity Name included."
+        mock_generator_class.return_value = mock_generator
+
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(verify_entailment=False, repair_temperature=0.3)
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+
+        result = transfer._repair_missing_entities(
+            source="Original text with Entity Name.",
+            output="Styled text missing entities.",
+            missing_entities=["Entity Name"],
+        )
+
+        # Verify raw_prompt=True was passed
+        call_kwargs = mock_generator.generate.call_args
+        assert call_kwargs.kwargs.get('raw_prompt') is True or \
+               (len(call_kwargs.args) > 0 and True in call_kwargs.args), \
+               "raw_prompt=True should be passed to generator.generate()"
+
+
+# =============================================================================
+# Tests for Word Count Tracking (Bug 1)
+# =============================================================================
+
+class TestWordCountTracking:
+    """Tests for word count updates after perspective conversion and RTT."""
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_word_count_updated_after_perspective_conversion(self, mock_generator_class):
+        """target_words should reflect post-perspective-conversion word count."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        mock_generator = MagicMock()
+        mock_generator.generate.return_value = "Styled output text from the generator model."
+        mock_generator_class.return_value = mock_generator
+
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(
+            verify_entailment=False,
+            skip_neutralization=True,
+            perspective="first_person_singular",
+            use_persona=False,
+            apply_input_perturbation=False,
+            use_structural_rag=False,
+            use_structural_grafting=False,
+            reduce_repetition=False,
+            restructure_sentences=False,
+            split_sentences=False,
+            correct_grammar=False,
+            min_paragraph_words=3,
+            target_expansion_ratio=1.0,
+        )
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+
+        # Mock perspective conversion to return shorter text
+        original_text = "The observer noticed the changes in the environment around them quite clearly"
+        shorter_text = "I noticed the changes around me"  # fewer words
+
+        with patch.object(transfer, '_convert_to_perspective', return_value=shorter_text):
+            transfer.transfer_paragraph(original_text)
+
+        # Check that target_words was based on the post-conversion text, not the original
+        call_kwargs = mock_generator.generate.call_args
+        target_words = call_kwargs.kwargs.get('target_words') or call_kwargs[1].get('target_words')
+        expected_target = len(shorter_text.split())  # 1.0 expansion ratio
+        assert target_words == expected_target, (
+            f"target_words={target_words} should be {expected_target} (post-perspective count)"
+        )
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_word_count_updated_after_rtt(self, mock_generator_class):
+        """target_words should reflect post-RTT word count."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        mock_generator = MagicMock()
+        mock_generator.generate.return_value = "Styled output text from the generator model."
+        mock_generator_class.return_value = mock_generator
+
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(
+            verify_entailment=False,
+            skip_neutralization=False,
+            perspective="preserve",
+            use_persona=False,
+            apply_input_perturbation=False,
+            use_structural_rag=False,
+            use_structural_grafting=False,
+            reduce_repetition=False,
+            restructure_sentences=False,
+            split_sentences=False,
+            correct_grammar=False,
+            min_paragraph_words=3,
+            target_expansion_ratio=1.0,
+        )
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+
+        # Mock RTT to return shorter text (compression)
+        original_text = "The magnificent and extraordinarily beautiful sunset painted the vast expansive sky with brilliant colors"
+        rtt_text = "The sunset painted the sky with colors"  # compressed by RTT
+
+        with patch.object(transfer, '_rtt_neutralize', return_value=rtt_text):
+            transfer.transfer_paragraph(original_text)
+
+        call_kwargs = mock_generator.generate.call_args
+        target_words = call_kwargs.kwargs.get('target_words') or call_kwargs[1].get('target_words')
+        expected_target = len(rtt_text.split())  # 1.0 expansion ratio
+        assert target_words == expected_target, (
+            f"target_words={target_words} should be {expected_target} (post-RTT count)"
+        )
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_word_count_not_updated_after_perturbation(self, mock_generator_class):
+        """target_words should NOT change after perturbation (intentional drops)."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        mock_generator = MagicMock()
+        mock_generator.generate.return_value = "Styled output text from the generator model."
+        mock_generator_class.return_value = mock_generator
+
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(
+            verify_entailment=False,
+            skip_neutralization=True,
+            perspective="preserve",
+            use_persona=False,
+            apply_input_perturbation=True,
+            use_structural_rag=False,
+            use_structural_grafting=False,
+            reduce_repetition=False,
+            restructure_sentences=False,
+            split_sentences=False,
+            correct_grammar=False,
+            min_paragraph_words=3,
+            target_expansion_ratio=1.0,
+        )
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+
+        # Original text with 10 words
+        original_text = "The ancient darkness consumed all light within the vast chambers below"
+        original_word_count = len(original_text.split())
+
+        # Mock perturb_text to drop some words
+        perturbed = "ancient darkness consumed light within vast chambers below"  # dropped some
+
+        with patch('src.utils.perturbation.perturb_text', return_value=perturbed):
+            transfer.transfer_paragraph(original_text)
+
+        call_kwargs = mock_generator.generate.call_args
+        target_words = call_kwargs.kwargs.get('target_words') or call_kwargs[1].get('target_words')
+        # target_words should be based on pre-perturbation count, not post-perturbation
+        assert target_words == original_word_count, (
+            f"target_words={target_words} should be {original_word_count} (pre-perturbation)"
+        )
 
 
 if __name__ == "__main__":

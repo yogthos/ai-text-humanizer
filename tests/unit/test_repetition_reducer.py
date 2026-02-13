@@ -92,6 +92,37 @@ class TestReductionStats:
         assert "test" in stats.overused_words
 
 
+class TestLLMSpeakControl:
+    """Tests for LLM-speak replacement control (Bug 9)."""
+
+    def test_llm_speak_disabled_preserves_words(self):
+        """When fix_llm_speak=False, LLM-speak words should be preserved."""
+        reducer = RepetitionReducer(threshold=3, fix_llm_speak=False)
+        text = "We need to utilize this functionality to leverage our synergy."
+        result, stats = reducer.reduce(text)
+        assert "utilize" in result.lower()
+
+    def test_llm_speak_enabled_by_default(self):
+        """LLM-speak replacement should be enabled by default."""
+        reducer = RepetitionReducer(threshold=3)
+        assert reducer.fix_llm_speak is True
+
+
+class TestEmptyLLMSpeakReplacements:
+    """Tests for empty string replacements in LLM_SPEAK (Bug 19)."""
+
+    def test_no_empty_replacement_for_single_words(self):
+        """Single-word LLM_SPEAK entries should not have empty string replacements."""
+        single_word_empties = [
+            key for key, val in LLM_SPEAK.items()
+            if " " not in key and val == ""
+        ]
+        # These should have real synonyms, not empty strings
+        assert len(single_word_empties) == 0, (
+            f"Single-word keys with empty replacements: {single_word_empties}"
+        )
+
+
 class TestLLMSpeakDictionary:
     """Tests for the LLM_SPEAK dictionary."""
 

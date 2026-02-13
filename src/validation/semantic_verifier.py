@@ -603,11 +603,16 @@ class SemanticVerifier:
 _verifier = None
 
 
-def get_semantic_verifier() -> SemanticVerifier:
-    """Get or create the singleton semantic verifier."""
+def get_semantic_verifier(**kwargs) -> SemanticVerifier:
+    """Get or create the singleton semantic verifier.
+
+    Args:
+        **kwargs: Passed to SemanticVerifier() on first creation only.
+                  Subsequent calls return the existing instance.
+    """
     global _verifier
     if _verifier is None:
-        _verifier = SemanticVerifier()
+        _verifier = SemanticVerifier(**kwargs)
     return _verifier
 
 
