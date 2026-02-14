@@ -1417,5 +1417,92 @@ class TestExemplarFallbackLogging:
             )
 
 
+class TestOpeningHintOrdering:
+    """Tests for opening_hint being populated before load_patterns triggers."""
+
+    def test_opening_hint_populated_on_first_call(self):
+        """opening_hint should not be empty on first get_guidance() call."""
+        from src.rag.structural_rag import StructuralRAG
+        from src.rag.enhanced_analyzer import EnhancedStyleProfile, OpeningPatterns
+
+        rag = StructuralRAG.__new__(StructuralRAG)
+        rag.author = "Test"
+        rag.indexer = MagicMock()
+        rag.analyzer = MagicMock()
+        rag._cached_rhythms = []
+        rag._loaded = False
+        rag._enhanced_profile = None
+
+        # Mock extract_rhythm for input text
+        mock_rhythm = MagicMock()
+        mock_rhythm.sentence_count = 3
+        rag.analyzer.extract_rhythm.return_value = mock_rhythm
+
+        # Mock load_patterns to set enhanced_profile with openings
+        def mock_load_patterns():
+            rag._loaded = True
+            rag._cached_rhythms = [MagicMock() for _ in range(5)]
+            rag._enhanced_profile = MagicMock()
+            rag._enhanced_profile.openings = OpeningPatterns(
+                patterns={"Determiner": 0.5, "Adverb": 0.3, "Pronoun": 0.2},
+                avoid_patterns=["furthermore"],
+            )
+
+        with patch.object(rag, 'load_patterns', side_effect=mock_load_patterns):
+            with patch.object(rag, 'get_rhythm_pattern', return_value="LONG → SHORT → MEDIUM"):
+                with patch.object(rag, 'get_punctuation_hints', return_value=["use dashes"]):
+                    with patch.object(rag, 'get_length_guidance', return_value="Vary 5-30"):
+                        with patch.object(rag, 'get_fragment_hint', return_value="Use fragments"):
+                            with patch.object(rag, '_get_exemplar_sentences', return_value=[]):
+                                guidance = rag.get_guidance("Test input text here.")
+
+        # opening_hint should NOT be empty — load_patterns should run before it's computed
+        assert guidance.opening_hint != "", (
+            "opening_hint is empty on first call — load_patterns must run before opening_hint is computed"
+        )
+
+
+class TestMultiWordLLMTransitions:
+    """Tests for multi-word LLM_TRANSITIONS being matched correctly."""
+
+    def test_multi_word_transition_detected_in_author_corpus(self):
+        """Multi-word transitions like 'in addition' should be detected in author corpus."""
+        from src.rag.enhanced_analyzer import EnhancedStructuralAnalyzer
+
+        analyzer = EnhancedStructuralAnalyzer()
+        # Corpus where author uses "in addition" at sentence start
+        texts = [
+            "The cosmos is vast. In addition to the stars, there are planets.",
+            "In addition, many galaxies exist beyond our view.",
+            "The universe expands. It is important to understand this.",
+        ]
+        transitions = analyzer.extract_transitions(texts)
+
+        # "in addition" is used by the author, so it should NOT be in avoid list
+        assert "in addition" not in transitions.avoid, (
+            "'in addition' found in author corpus but still in avoid list — multi-word check broken"
+        )
+
+
+class TestDefaultBaseModelMatch:
+    """Tests for factory and generator having consistent default base model."""
+
+    def test_factory_and_generator_default_match(self):
+        """Factory default base model should match LoRAStyleGenerator default."""
+        from src.generation.lora_generator import LoRAStyleGenerator
+        import inspect
+
+        # Get the default from LoRAStyleGenerator.__init__
+        sig = inspect.signature(LoRAStyleGenerator.__init__)
+        generator_default = sig.parameters["base_model"].default
+
+        # Factory should use the same default (check source)
+        from src.generation import factory
+        source = inspect.getsource(factory.create_style_generator)
+        assert generator_default in source, (
+            f"Factory default base model does not match generator default '{generator_default}'"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -119,7 +119,7 @@ def create_style_generator(
 
         generator = LoRAStyleGenerator(
             adapter_path=adapter_path,
-            base_model=base_model or "mlx-community/Qwen2.5-32B-Instruct-4bit",
+            base_model=base_model or "mlx-community/Qwen3-8B-Base-bf16",
             config=config,
             checkpoint=checkpoint,
             adapters=adapter_specs,

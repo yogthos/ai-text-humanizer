@@ -546,8 +546,11 @@ def is_heading(line: str) -> bool:
         if significant_words >= 2 and capitalized_count / significant_words >= 0.5:
             return True
 
-        # Short lines (<=6 words) with at least one capitalized word after first
-        if word_count <= 6 and capitalized_count >= 1:
+        # Short lines (<=6 words) with capitalized words after first
+        # Only if ALL significant words are capitalized (avoids "Tell me about Paris")
+        if word_count <= 6 and capitalized_count >= 1 and (
+            significant_words <= 1 or capitalized_count == significant_words
+        ):
             return True
 
     return False

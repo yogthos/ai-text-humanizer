@@ -79,17 +79,17 @@ def classify_content_type(text: str, default_to_narrative: bool = True) -> Conte
     elif past_tense_count >= 2:
         narrative_score += 1
 
-    # Check for sequence words
+    # Check for sequence words (use text_words for word-boundary matching)
     sequence_words = {'first', 'second', 'third', 'next', 'finally', 'began', 'started', 'ended'}
-    sequence_count = sum(1 for word in sequence_words if word in text_lower)
+    sequence_count = sum(1 for word in sequence_words if word in text_words)
     narrative_score += min(sequence_count, 2)
 
-    # Check for abstract/conceptual vocabulary
+    # Check for abstract/conceptual vocabulary (use text_words for word-boundary matching)
     conceptual_words = {'concept', 'theory', 'mechanism', 'process', 'system', 'principle',
                        'function', 'method', 'approach', 'technique', 'structure', 'pattern',
                        'relationship', 'connection', 'effect', 'cause', 'result', 'factor',
                        'element', 'component', 'aspect', 'nature', 'essence', 'phenomenon'}
-    conceptual_count = sum(1 for word in conceptual_words if word in text_lower)
+    conceptual_count = sum(1 for word in conceptual_words if word in text_words)
     conceptual_score += min(conceptual_count * 2, 4)
 
     # Check for definition patterns

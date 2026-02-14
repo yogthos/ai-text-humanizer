@@ -1028,8 +1028,8 @@ class StyleTransfer:
                     logger.warning("Repair produced empty/short output")
 
             except Exception as e:
-                logger.warning(f"Repair failed: {e}")
-                break
+                logger.warning(f"Repair attempt {attempt + 1} failed: {e}")
+                continue
 
         return output  # Return original if repair failed
 
@@ -1190,13 +1190,12 @@ class StyleTransfer:
             # Check for duplicate paragraphs (same start)
             para_start = para[:50].lower() if len(para) > 50 else para.lower()
             if para_start in seen_starts:
-                existing = seen_starts[para_start]
+                existing_text, existing_idx = seen_starts[para_start]
                 # Keep the longer/more complete version
-                if len(para) > len(existing):
-                    # Replace with longer version
-                    idx = cleaned.index(existing)
-                    cleaned[idx] = para
-                    seen_starts[para_start] = para
+                if len(para) > len(existing_text):
+                    # Replace with longer version using tracked index
+                    cleaned[existing_idx] = para
+                    seen_starts[para_start] = (para, existing_idx)
                 logger.debug(f"Skipping duplicate paragraph: {para[:50]}...")
                 continue
 
@@ -1235,7 +1234,7 @@ class StyleTransfer:
                 if len(unique_sentences) < len(sentences):
                     para = " ".join(unique_sentences)
 
-            seen_starts[para_start] = para
+            seen_starts[para_start] = (para, len(cleaned))
             cleaned.append(para)
 
         return cleaned

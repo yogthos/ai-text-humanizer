@@ -285,7 +285,7 @@ def build_persona_prompt(
     # 3. Skeleton structure (if available from grafting - matches training's 50% skeleton)
     if grafting_guidance and hasattr(grafting_guidance, 'skeleton') and grafting_guidance.skeleton:
         parts.append("")
-        parts.append(f"Follow this structure: {grafting_guidance.skeleton}")
+        parts.append(f"Follow this structure: {grafting_guidance.skeleton.format_for_prompt()}")
 
     # 4. Structural RAG guidance (rhythm patterns from corpus)
     # Format as simple guidance, not as "[CRITICAL - AUTHOR STYLE PATTERNS]" blocks

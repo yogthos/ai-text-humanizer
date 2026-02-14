@@ -224,6 +224,9 @@ class StructuralRAG:
 
     def get_guidance(self, input_text: str) -> StructuralGuidance:
         """Get complete structural guidance for input text."""
+        # Ensure patterns are loaded before computing opening_hint
+        self.load_patterns()
+
         # Analyze input to match sentence count
         input_rhythm = self.analyzer.extract_rhythm(input_text)
         target_sentences = max(3, input_rhythm.sentence_count)

@@ -378,3 +378,33 @@ class TestClassifyBySimilarity:
         category, score = classify_by_similarity("", prototypes)
         assert category == "FIRST"
         assert score == 0.0
+
+
+class TestIsHeadingShortLines:
+    """Tests for is_heading not misclassifying short sentences with proper nouns."""
+
+    def test_short_sentence_with_proper_noun_not_heading(self):
+        """Short sentence with a proper noun should NOT be classified as heading."""
+        from src.utils.nlp import is_heading
+        # This is a sentence, not a heading — has verb structure
+        assert is_heading("Tell me about Paris") is False
+
+    def test_short_sentence_with_name_not_heading(self):
+        """Short sentence mentioning a name should NOT be a heading."""
+        from src.utils.nlp import is_heading
+        assert is_heading("I met John yesterday") is False
+
+    def test_actual_heading_still_detected(self):
+        """Actual headings (title case, no verb) should still be detected."""
+        from src.utils.nlp import is_heading
+        assert is_heading("Chapter One") is True
+
+    def test_heading_with_all_caps(self):
+        """All-caps lines should be detected as headings."""
+        from src.utils.nlp import is_heading
+        assert is_heading("INTRODUCTION") is True
+
+    def test_sentence_ending_with_period_not_heading(self):
+        """Sentences ending with period should never be headings."""
+        from src.utils.nlp import is_heading
+        assert is_heading("I visited London.") is False

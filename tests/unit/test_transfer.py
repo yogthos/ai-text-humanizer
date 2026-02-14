@@ -706,5 +706,76 @@ class TestRepairSkipLogging:
             # The fix adds an elif log for this case
 
 
+class TestCleanedIndexValueError:
+    """Tests for _cleanup_document_paragraphs not raising ValueError on mutated paragraphs."""
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_duplicate_para_after_mutation_no_crash(self, mock_generator_class):
+        """When a paragraph is mutated after being stored, index lookup should not crash."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        mock_generator = MagicMock()
+        mock_generator_class.return_value = mock_generator
+
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(verify_entailment=False, min_paragraph_words=3)
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+
+        # Two paragraphs sharing the same 50-char prefix but second is longer
+        para1 = "A" * 50 + " first paragraph ending here."
+        para2 = "A" * 50 + " second paragraph that is longer and has more content added."
+
+        # This should not raise ValueError
+        result = transfer._cleanup_document_paragraphs([para1, para2])
+        assert len(result) >= 1
+
+
+class TestRepairRetryContinue:
+    """Tests for repair retry using continue instead of break on exception."""
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_repair_continues_after_transient_error(self, mock_generator_class):
+        """Transient errors should not abort all repair attempts."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        mock_generator = MagicMock()
+        # First call raises, second returns valid repair (>10 words required)
+        mock_generator.generate.side_effect = [
+            RuntimeError("transient API error"),
+            "Repaired text that includes Entity Name along with sufficient additional context words here.",
+        ]
+        mock_generator_class.return_value = mock_generator
+
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(verify_entailment=False, repair_temperature=0.3)
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+
+        result = transfer._repair_missing_entities(
+            source="Original text with Entity Name.",
+            output="Styled text without the entity.",
+            missing_entities=["Entity Name"],
+            max_attempts=3,
+        )
+
+        # Should have tried at least twice (not broken on first error)
+        assert mock_generator.generate.call_count >= 2
+        # Should have returned the repaired text from second attempt
+        assert "Entity Name" in result
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -330,6 +330,9 @@ def transfer_file(
             # RAG settings
             use_structural_rag=gen.use_structural_rag,
             use_structural_grafting=gen.use_structural_grafting,
+            rag_sample_size=gen.rag_sample_size,
+            # Input perturbation
+            apply_input_perturbation=gen.apply_input_perturbation,
             # Persona settings
             use_persona=gen.use_persona,
             # Sentence post-processing

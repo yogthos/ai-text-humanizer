@@ -150,7 +150,7 @@ LLM_SPEAK = {
     "earpiece": "phone",
     "headphone": "phone",
     "telephony": "phone",
-    "at the end of the day": "ultimately",
+    "at the end of the day": "in the end",
     "think outside the box": "be creative",
 }
 
@@ -389,7 +389,7 @@ class RepetitionReducer:
 
         for phrase, replacement in phrases:
             # Case-insensitive replacement
-            pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+            pattern = re.compile(r'\b' + re.escape(phrase) + r'\b', re.IGNORECASE)
             matches = pattern.findall(text)
             if matches:
                 for match in matches:
@@ -486,7 +486,7 @@ class RepetitionReducer:
         text = re.sub(r'\.\s*—', '.', text)  # Fix ".—" artifact -> "."
         text = re.sub(r'—\s*;', ';', text)  # Fix "—;" artifact -> ";"
         text = re.sub(r';\s*—', ';', text)  # Fix ";—" artifact -> ";"
-        text = re.sub(r'\s*,\s*', ', ', text)  # Normalize comma spacing
+        text = re.sub(r'(?<!\d)\s*,\s*(?!\d)', ', ', text)  # Normalize comma spacing (preserve numbers like 1,000)
         text = re.sub(r',\s*,', ',', text)  # Remove double commas
         text = re.sub(r'\.\s*\.', '.', text)  # Remove double periods
         text = re.sub(r'\s+', ' ', text)  # Normalize spaces

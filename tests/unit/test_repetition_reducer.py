@@ -201,3 +201,72 @@ class TestNoLegitimateWordsInLLMSpeak:
             assert word in LLM_SPEAK, (
                 f"Genuine Qwen artifact '{word}' should remain in LLM_SPEAK"
             )
+
+
+class TestCommaNumberPreservation:
+    """Tests for comma normalization not destroying numbers."""
+
+    def test_number_with_commas_preserved(self):
+        """Numbers like 1,000 should not become '1, 000'."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The population was 1,000 people in the town."
+        result, stats = reducer.reduce(text)
+        assert "1,000" in result, f"Number destroyed: '{result}'"
+
+    def test_large_number_with_commas_preserved(self):
+        """Numbers like 10,000,000 should be preserved."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The city had 10,000,000 inhabitants."
+        result, stats = reducer.reduce(text)
+        assert "10,000,000" in result, f"Number destroyed: '{result}'"
+
+    def test_normal_comma_spacing_still_fixed(self):
+        """Normal comma spacing should still be normalized."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The cat ,the dog ,and the bird flew away."
+        result, stats = reducer.reduce(text)
+        # Should normalize spacing around commas
+        assert " ,the" not in result
+
+
+class TestWordBoundaryPhraseReplacement:
+    """Tests for multi-word phrase replacement respecting word boundaries."""
+
+    def test_in_turn_not_matched_across_words(self):
+        """'in turn' should not match inside 'main turnover'."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The main turnover rate increased significantly last year."
+        result, stats = reducer.reduce(text)
+        assert "turnover" in result, f"'turnover' was corrupted: '{result}'"
+
+    def test_in_turn_matched_as_standalone(self):
+        """'in turn' as a standalone phrase should still be replaced."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "This affects morale, which in turn reduces productivity."
+        result, stats = reducer.reduce(text)
+        # "in turn" maps to "" so "which" should be followed by "reduces"
+        assert "in turn" not in result.lower() or "which" in result
+
+    def test_prior_to_not_matched_across_words(self):
+        """'prior to' should not match inside other word combinations."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The a priori to posterior analysis was complete."
+        result, stats = reducer.reduce(text)
+        # Should not corrupt the text
+        assert "priori" in result
+
+
+class TestCascadingReplacementPrevention:
+    """Tests for preventing cascading double-replacement chains."""
+
+    def test_at_the_end_of_the_day_no_double_replacement(self):
+        """'at the end of the day' should map directly, not cascade through 'ultimately'."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "At the end of the day, we need this solution."
+        result, stats = reducer.reduce(text)
+        # Should be replaced (original phrase gone)
+        assert "at the end of the day" not in result.lower()
+        # Should NOT go through "ultimately" as intermediate
+        assert "ultimately" not in result.lower(), (
+            f"Cascading via 'ultimately' intermediate detected: '{result}'"
+        )

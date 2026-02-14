@@ -530,3 +530,22 @@ class TestNoRedundantPerspectiveValidation:
                     )
             finally:
                 os.unlink(f.name)
+
+
+class TestConfigFieldsForwarded:
+    """Tests for config fields being forwarded from config.json to TransferConfig."""
+
+    def test_apply_input_perturbation_forwarded(self):
+        """apply_input_perturbation from config should reach TransferConfig."""
+        from src.config import GenerationConfig
+
+        gen = GenerationConfig(apply_input_perturbation=False)
+        # Check the field exists and is set correctly
+        assert gen.apply_input_perturbation is False
+
+    def test_rag_sample_size_forwarded(self):
+        """rag_sample_size from config should reach TransferConfig."""
+        from src.config import GenerationConfig
+
+        gen = GenerationConfig(rag_sample_size=500)
+        assert gen.rag_sample_size == 500

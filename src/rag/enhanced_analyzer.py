@@ -496,6 +496,12 @@ class EnhancedStructuralAnalyzer:
                 if first_word:
                     author_transitions.add(first_word)
 
+                    # Also check multi-word sentence openings for LLM_TRANSITIONS
+                    sent_text = sent.text.strip().lower()
+                    for multi_word in self.LLM_TRANSITIONS:
+                        if ' ' in multi_word and sent_text.startswith(multi_word):
+                            author_transitions.add(multi_word)
+
                     if first_word in self.ADDITIVE:
                         transitions['additive'][first_word] += 1
                     elif first_word in self.ADVERSATIVE:

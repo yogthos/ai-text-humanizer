@@ -414,7 +414,7 @@ Original passage:
 
 Requirements:
 1. The new passage must be ENTIRELY about "{topic}" - a mundane everyday activity
-2. Preserve the EXACT sentence structure: {len(paragraph.split('.'))} sentences, same clause patterns
+2. Preserve the EXACT sentence structure: {len(split_into_sentences(paragraph))} sentences, same clause patterns
 3. Use {author}'s distinctive vocabulary and phrasing style
 4. Match the word count closely (~{len(paragraph.split())} words)
 5. Keep the same punctuation patterns and rhythm
@@ -1669,7 +1669,7 @@ def generate_training_data(
                     entry = json.loads(line)
                     if 'source_idx' in entry:
                         processed_indices.add(entry['source_idx'])
-                except:
+                except Exception:
                     pass
         logger.info(f"Resuming: found {len(processed_indices)} already processed items")
 
@@ -1847,9 +1847,10 @@ def generate_training_data(
                     failed_count += 1
 
     elapsed = time.time() - start_time
+    pct = f"{success_count/total*100:.1f}%" if total > 0 else "N/A"
     logger.info(
         f"Complete: {success_count}/{total} examples written "
-        f"({success_count/total*100:.1f}%) in {elapsed:.1f}s"
+        f"({pct}) in {elapsed:.1f}s"
     )
     logger.info(f"By variation type: {type_counts}")
     return success_count

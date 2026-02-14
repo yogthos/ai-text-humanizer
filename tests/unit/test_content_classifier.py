@@ -66,5 +66,44 @@ class TestTemporalMarkerWithPunctuation:
         assert result == ContentType.NARRATIVE
 
 
+class TestSubstringMatchingFix:
+    """Tests for sequence/conceptual word matching using word boundaries, not substrings."""
+
+    def test_because_does_not_trigger_cause(self):
+        """'because' should NOT match 'cause' in conceptual words."""
+        from src.utils.content_classifier import classify_content_type, ContentType
+
+        # Text with 'because' but no actual conceptual words — should be narrative
+        text = "The knight charged forward because the dragon threatened the village. He raised his sword then, slashing through the beast's scales before it could strike. After the battle ended, the villagers cheered."
+        result = classify_content_type(text)
+        assert result == ContentType.NARRATIVE
+
+    def test_factory_does_not_trigger_factor(self):
+        """'factory' should NOT match 'factor' in conceptual words."""
+        from src.utils.content_classifier import classify_content_type, ContentType
+
+        # Narrative text with 'factory' — should stay narrative
+        text = "John walked to the factory when dawn broke. He started his shift then, operating the machines before the others arrived. Eventually the workers gathered."
+        result = classify_content_type(text)
+        assert result == ContentType.NARRATIVE
+
+    def test_secondary_does_not_trigger_second(self):
+        """'secondary' should NOT match 'second' in sequence words."""
+        from src.utils.content_classifier import classify_content_type, ContentType
+
+        # Conceptual text with 'secondary' — should stay conceptual
+        text = "The secondary mechanism involves a complex process. This system functions through a structured approach. The principle defines how each component interacts."
+        result = classify_content_type(text)
+        assert result == ContentType.CONCEPTUAL
+
+    def test_actual_conceptual_words_still_detected(self):
+        """Real conceptual words like 'theory' should still be detected."""
+        from src.utils.content_classifier import classify_content_type, ContentType
+
+        text = "The theory proposes a mechanism for this phenomenon. The principle defines the relationship between cause and effect in this system."
+        result = classify_content_type(text)
+        assert result == ContentType.CONCEPTUAL
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
