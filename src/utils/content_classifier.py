@@ -67,7 +67,9 @@ def classify_content_type(text: str, default_to_narrative: bool = True) -> Conte
     temporal_markers = {'then', 'after', 'before', 'when', 'while', 'during', 'later',
                        'earlier', 'soon', 'finally', 'eventually', 'suddenly', 'once'}
     text_lower = text.lower()
-    temporal_count = sum(1 for marker in temporal_markers if f' {marker} ' in f' {text_lower} ')
+    # Use word boundary check: split into words and strip punctuation
+    text_words = {w.strip('.,!?;:"\'-') for w in text_lower.split()}
+    temporal_count = sum(1 for marker in temporal_markers if marker in text_words)
     narrative_score += min(temporal_count, 3)
 
     # Check for past tense verbs (narrative signal)

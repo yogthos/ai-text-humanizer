@@ -323,8 +323,8 @@ class BaseStyleGenerator(ABC):
         try:
             from ..utils.nlp import get_nlp
             nlp = get_nlp()
-        except Exception:
-            # If spaCy not available, return unchanged
+        except Exception as e:
+            logger.warning(f"Could not load spaCy for atmospheric phrase fix: {e}")
             return text
 
         # Process the text
@@ -361,7 +361,7 @@ class BaseStyleGenerator(ABC):
 
                 # The phrase before "of" + noun is broken - remove it
                 start_char = next_tok.idx
-                if start_char >= len(text) - 1:
+                if start_char >= len(text):
                     return text  # Bounds check
                 fixed_text = text[start_char].upper() + text[start_char + 1:]
                 logger.debug(f"Fixed broken prepositional opening at '{next_tok.text}'")

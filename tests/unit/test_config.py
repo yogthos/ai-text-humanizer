@@ -497,3 +497,36 @@ class TestUnknownConfigFields:
                            f"Expected warning about unknown fields, got: {warning_calls}"
             finally:
                 os.unlink(f.name)
+
+
+class TestNoRedundantPerspectiveValidation:
+    """Tests for Bug 1 Round 5: No double validation of perspective."""
+
+    def test_invalid_perspective_warns_only_once(self):
+        """Invalid perspective in config should produce exactly one warning, not two."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "style": {
+                "perspective": "invalid_value",
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+
+            try:
+                with patch('src.config.logger') as mock_logger:
+                    config = load_config(f.name)
+                    assert config.style.perspective == "preserve"
+                    # Count warnings about invalid perspective
+                    perspective_warnings = [
+                        c for c in mock_logger.warning.call_args_list
+                        if "perspective" in str(c).lower()
+                    ]
+                    assert len(perspective_warnings) == 1, (
+                        f"Expected exactly 1 perspective warning, got {len(perspective_warnings)}: "
+                        f"{perspective_warnings}"
+                    )
+            finally:
+                os.unlink(f.name)

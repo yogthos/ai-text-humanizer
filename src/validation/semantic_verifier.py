@@ -261,17 +261,18 @@ class SemanticVerifier:
         self,
         source_sents: List[str],
         output_sents: List[str],
-        nli_model,
+        nli_model=None,
     ) -> Tuple[List[SentenceVerification], float, int]:
         """Check if each output sentence is grounded in source using content word overlap.
 
-        NLI models conflate "topically related" with "entailed", so we use
-        a stricter content-word-based approach:
+        Uses a content-word-based approach (NLI models conflate "topically related"
+        with "entailed"):
         - Extract lemmatized content words from each sentence
         - Compute bidirectional overlap with best-matching source sentence
         - Flag sentences with low overlap as hallucinations
 
-        This catches fabricated content that shares vocabulary but different facts.
+        Note: nli_model parameter is accepted for API compatibility but unused.
+        This method uses content word overlap exclusively.
         """
         nlp = _get_nlp()
 

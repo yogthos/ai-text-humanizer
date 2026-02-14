@@ -797,6 +797,11 @@ class StyleTransfer:
                     max_attempts=self.config.max_repair_attempts,
                 )
                 logger.info(f"AFTER REPAIR: {len(output.split())} words")
+            elif needs_repair:
+                logger.info(
+                    f"Repair warranted ({semantic_result.hallucination_count} hallucinations) "
+                    f"but no missing entities to repair"
+                )
 
         # Ensure output ends with complete sentence
         logger.info(f"BEFORE _ensure_complete_ending: {len(output.split())} words")

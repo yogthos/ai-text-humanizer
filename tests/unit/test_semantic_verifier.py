@@ -119,5 +119,23 @@ class TestEntityStemMatching:
         assert result is True, "communist and communism should match"
 
 
+class TestSentenceGroundingNliParam:
+    """Tests for Bug 5 Round 5: Dead nli_model parameter in _check_sentence_grounding."""
+
+    def test_nli_model_not_required_for_grounding(self):
+        """_check_sentence_grounding should work without nli_model (it uses content word overlap)."""
+        from src.validation.semantic_verifier import SemanticVerifier
+        verifier = SemanticVerifier()
+        source_sents = ["The cat sat on the mat."]
+        output_sents = ["The cat rested on the mat."]
+
+        # Should work with nli_model=None since the method doesn't use it
+        results, ratio, hallucinations = verifier._check_sentence_grounding(
+            source_sents, output_sents, nli_model=None
+        )
+        assert len(results) == 1
+        assert ratio >= 0.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -381,11 +381,7 @@ def load_config(config_path: str = "config.json") -> Config:
         config.style = StyleConfig(
             perspective=style_data.get("perspective", "preserve"),
         )
-        if not config.style.validate_perspective():
-            logger.warning(
-                f"Invalid perspective '{config.style.perspective}', using 'preserve'"
-            )
-            config.style.perspective = "preserve"
+        # Note: validation is handled by StyleConfig.__post_init__
 
     if "validation" in data:
         val_data = data["validation"]
