@@ -174,9 +174,7 @@ class StructuralRAG:
         if dash_count > len(self._cached_rhythms) * 0.3:
             hints.append("use em-dashes (—) for interruptions and asides")
 
-        fragment_ratio = sum(r.fragment_ratio for r in self._cached_rhythms) / len(self._cached_rhythms)
-        if fragment_ratio > 0.1:
-            hints.append(f"use sentence fragments (~{int(fragment_ratio*100)}% of sentences)")
+        # Fragment guidance is handled by get_fragment_hint() — not duplicated here
 
         return hints if hints else ["vary punctuation for rhythm"]
 

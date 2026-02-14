@@ -29,7 +29,7 @@ class SplitStats:
 @dataclass
 class SentenceSplitterConfig:
     """Configuration for sentence splitting."""
-    max_sentence_length: int = 50  # Words - split sentences longer than this
+    max_sentence_length: int = 60  # Words - split sentences longer than this
     min_clause_length: int = 15  # Minimum words between split points
     split_conjunctions: List[str] = field(default_factory=lambda: ["and", "but", "for", "yet", "so"])
     length_variance: float = 0.3  # Variance factor (0.3 = 70%-130% of max_sentence_length)

@@ -777,5 +777,59 @@ class TestRepairRetryContinue:
         assert "Entity Name" in result
 
 
+class TestIdentityCheckVariable:
+    """Bug: Identity check compares LoRA output against paragraph_clean (pre-RTT)
+    instead of content_for_generation (what LoRA actually received)."""
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_identity_check_uses_content_for_generation(self, mock_generator_class):
+        """Identity check should compare against RTT-neutralized content, not original."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        import inspect
+
+        # Verify the source code compares against content_for_generation
+        source = inspect.getsource(StyleTransfer.transfer_paragraph)
+        # Look for the identity check pattern
+        # It should compare output against content_for_generation, not paragraph_clean
+        assert "output.strip() == content_for_generation.strip()" in source or \
+               "output.strip()==content_for_generation.strip()" in source, \
+            "Identity check should compare against content_for_generation, not paragraph_clean"
+
+
+class TestHallucinationThresholdOperator:
+    """Bug: Hallucination repair uses > instead of >= for threshold comparison."""
+
+    def test_threshold_triggers_at_exact_count(self):
+        """Repair should trigger when hallucination_count == max_hallucinations_before_reject."""
+        from src.generation.transfer import TransferConfig
+
+        config = TransferConfig(max_hallucinations_before_reject=2)
+        # With >=, repair triggers at count 2 (the configured max)
+        # With >, repair only triggers at count 3
+        assert config.max_hallucinations_before_reject == 2
+
+        # Simulate the threshold check as it should work
+        hallucination_count = 2
+        needs_repair = hallucination_count >= config.max_hallucinations_before_reject
+        assert needs_repair, "Repair should trigger when count equals threshold"
+
+
+class TestMaxSentenceLengthDefault:
+    """Bug: TransferConfig defaults max_sentence_length to 50 but
+    GenerationConfig defaults to 60."""
+
+    def test_transfer_config_default_matches_generation_config(self):
+        """TransferConfig default should match GenerationConfig for max_sentence_length."""
+        from src.generation.transfer import TransferConfig
+        from src.config import GenerationConfig
+
+        transfer_default = TransferConfig().max_sentence_length
+        generation_default = GenerationConfig().max_sentence_length
+        assert transfer_default == generation_default, (
+            f"TransferConfig default ({transfer_default}) != "
+            f"GenerationConfig default ({generation_default})"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

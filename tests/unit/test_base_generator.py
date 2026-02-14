@@ -111,5 +111,35 @@ class TestBoundsCheckOffByOne:
         assert result == "B"
 
 
+class TestFictionMarkerAllHallucinated:
+    """Bug: When ALL sentences match fiction markers, clean_sentences is empty,
+    `if clean_sentences:` is False, and original hallucinated response is returned."""
+
+    def test_all_sentences_hallucinated_returns_empty(self):
+        """When all sentences are fiction hallucinations, response should be empty."""
+        from src.generation.base_generator import BaseStyleGenerator
+
+        class TestGenerator(BaseStyleGenerator):
+            def generate(self, content, author, max_tokens=None, target_words=None,
+                         structural_guidance=None, raw_prompt=False, temperature=None):
+                return "test"
+            def unload(self):
+                pass
+
+        gen = TestGenerator()
+        gen.fiction_markers = [r'\bCthulhu\b', r"\bR'lyeh\b"]
+
+        # All sentences contain fiction markers — should all be filtered
+        text = "Cthulhu stirred in the deep. R'lyeh rose from the ocean."
+        result = gen._clean_response(text)
+        # Should NOT return the original hallucinated text
+        assert "Cthulhu" not in result, (
+            "All-hallucinated output should not be preserved"
+        )
+        assert "R'lyeh" not in result, (
+            "All-hallucinated output should not be preserved"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

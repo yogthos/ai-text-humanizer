@@ -12,7 +12,7 @@ class TestSentenceSplitterConfig:
 
         config = SentenceSplitterConfig()
 
-        assert config.max_sentence_length == 50
+        assert config.max_sentence_length == 60
         assert config.min_clause_length == 15
         assert config.length_variance == 0.3  # Default variance
         assert "and" in config.split_conjunctions
@@ -53,7 +53,7 @@ class TestSentenceSplitter:
         splitter = SentenceSplitter()
 
         assert splitter.config is not None
-        assert splitter.config.max_sentence_length == 50
+        assert splitter.config.max_sentence_length == 60
 
     def test_init_custom_config(self):
         """Test initialization with custom config."""

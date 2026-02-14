@@ -263,6 +263,9 @@ class BaseStyleGenerator(ABC):
 
             if clean_sentences:
                 response = ' '.join(clean_sentences)
+            else:
+                logger.warning("Fiction marker filtering removed all sentences")
+                response = ""
 
         response = response.strip()
 

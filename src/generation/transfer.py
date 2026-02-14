@@ -107,7 +107,7 @@ class TransferConfig:
 
     # Sentence splitting settings (break run-on sentences)
     split_sentences: bool = True  # Enable sentence splitting at conjunction points
-    max_sentence_length: int = 50  # Words - split sentences longer than this
+    max_sentence_length: int = 60  # Words - split sentences longer than this
     sentence_length_variance: float = 0.4  # Variance factor (0.4 = 60%-140% of max)
 
     # Grammar correction settings (final post-processing pass)
@@ -736,8 +736,8 @@ class StyleTransfer:
         logger.info(f"LORA OUTPUT: {lora_output_words} words (target was {target_words})")
 
         # Check if LoRA output matches input (indicates no transformation)
-        if output.strip() == paragraph_clean.strip():
-            logger.warning("LoRA output identical to original paragraph - no transformation occurred")
+        if output.strip() == content_for_generation.strip():
+            logger.warning("LoRA output identical to input - no transformation occurred")
 
         # Check for memorization (output has no semantic overlap with input)
         output_overlap = self._check_content_overlap(content_for_generation, output)
@@ -782,7 +782,7 @@ class StyleTransfer:
             # Missing entities are often just paraphrases (e.g., "roughly" → "about")
             # The repair process generates from original source, which loses styled expansion
             needs_repair = (
-                semantic_result.hallucination_count > self.config.max_hallucinations_before_reject
+                semantic_result.hallucination_count >= self.config.max_hallucinations_before_reject
             )
 
             if needs_repair and semantic_result.missing_entities:

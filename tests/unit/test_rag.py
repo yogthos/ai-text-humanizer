@@ -1504,5 +1504,37 @@ class TestDefaultBaseModelMatch:
         )
 
 
+class TestDuplicateFragmentGuidance:
+    """Bug: Fragment ratio guidance appears in both get_punctuation_hints()
+    and get_fragment_hint(), creating redundant/conflicting prompt guidance."""
+
+    def test_punctuation_hints_no_fragment_info(self):
+        """get_punctuation_hints() should NOT include fragment guidance
+        (it belongs in get_fragment_hint() only)."""
+        from src.rag.structural_rag import StructuralRAG
+        from src.rag.structural_analyzer import RhythmFingerprint
+
+        rag = StructuralRAG.__new__(StructuralRAG)
+        rag.author = "Test"
+        rag._cached_rhythms = [
+            RhythmFingerprint(
+                sentence_count=5,
+                length_sequence=["LONG", "SHORT", "MEDIUM", "SHORT", "LONG"],
+                length_variance=0.3,
+                avg_sentence_length=12.0,
+                punctuation_density=0.1,
+                fragment_ratio=0.25,  # High fragment ratio
+            )
+            for _ in range(10)
+        ]
+
+        hints = rag.get_punctuation_hints()
+        for hint in hints:
+            assert "fragment" not in hint.lower(), (
+                f"Fragment guidance found in punctuation hints: '{hint}'. "
+                "Fragment info should only be in get_fragment_hint()."
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

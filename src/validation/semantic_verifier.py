@@ -153,7 +153,6 @@ class SemanticVerifier:
 
     def __init__(
         self,
-        entailment_threshold: float = 0.5,
         grounding_threshold: float = 0.4,
         content_coverage_weight: float = 0.3,
         entity_coverage_weight: float = 0.3,
@@ -162,13 +161,11 @@ class SemanticVerifier:
         """Initialize the verifier.
 
         Args:
-            entailment_threshold: Min entailment score for sentence grounding.
             grounding_threshold: Min score to consider a sentence grounded.
             content_coverage_weight: Weight for content word coverage in final score.
             entity_coverage_weight: Weight for entity coverage in final score.
             grounding_weight: Weight for sentence grounding in final score.
         """
-        self.entailment_threshold = entailment_threshold
         self.grounding_threshold = grounding_threshold
         self.content_coverage_weight = content_coverage_weight
         self.entity_coverage_weight = entity_coverage_weight

@@ -20,17 +20,17 @@ class TestSemanticVerifierSingleton:
         """Singleton should accept and store custom kwargs."""
         from src.validation.semantic_verifier import get_semantic_verifier
 
-        verifier = get_semantic_verifier(entailment_threshold=0.8)
-        assert verifier.entailment_threshold == 0.8
+        verifier = get_semantic_verifier(grounding_threshold=0.8)
+        assert verifier.grounding_threshold == 0.8
 
     def test_singleton_ignores_subsequent_kwargs(self):
         """Second call should return existing instance, ignoring new kwargs."""
         from src.validation.semantic_verifier import get_semantic_verifier
 
-        v1 = get_semantic_verifier(entailment_threshold=0.8)
-        v2 = get_semantic_verifier(entailment_threshold=0.5)
+        v1 = get_semantic_verifier(grounding_threshold=0.8)
+        v2 = get_semantic_verifier(grounding_threshold=0.5)
         assert v1 is v2
-        assert v2.entailment_threshold == 0.8  # First value wins
+        assert v2.grounding_threshold == 0.8  # First value wins
 
     def test_singleton_returns_same_instance(self):
         """Multiple calls should return the same instance."""
@@ -78,7 +78,7 @@ class TestEntityStemMatching:
         from src.validation.semantic_verifier import SemanticVerifier
 
         verifier = SemanticVerifier.__new__(SemanticVerifier)
-        verifier.entailment_threshold = 0.7
+        verifier.grounding_threshold = 0.7
 
         mars_stem = verifier._get_entity_stem("Mars")
         stems = {verifier._get_entity_stem("Marx")}
@@ -94,7 +94,7 @@ class TestEntityStemMatching:
         from src.validation.semantic_verifier import SemanticVerifier
 
         verifier = SemanticVerifier.__new__(SemanticVerifier)
-        verifier.entailment_threshold = 0.7
+        verifier.grounding_threshold = 0.7
 
         mark_stem = verifier._get_entity_stem("Mark")
         marker_stem = verifier._get_entity_stem("marker")
@@ -112,7 +112,7 @@ class TestEntityStemMatching:
         from src.validation.semantic_verifier import SemanticVerifier
 
         verifier = SemanticVerifier.__new__(SemanticVerifier)
-        verifier.entailment_threshold = 0.7
+        verifier.grounding_threshold = 0.7
 
         communism_stem = verifier._get_entity_stem("communism")
         result = verifier._entity_matches_any_stem("communist", {communism_stem})
@@ -135,6 +135,33 @@ class TestSentenceGroundingNliParam:
         )
         assert len(results) == 1
         assert ratio >= 0.0
+
+
+class TestUnusedEntailmentThreshold:
+    """Bug: SemanticVerifier stores entailment_threshold but never uses it.
+    The grounding check at line 365 uses grounding_threshold instead."""
+
+    def setup_method(self):
+        """Reset singleton."""
+        import src.validation.semantic_verifier as sv
+        sv._verifier = None
+
+    def test_entailment_threshold_not_dead_code(self):
+        """entailment_threshold should be used in the verifier, not just stored."""
+        import inspect
+        from src.validation.semantic_verifier import SemanticVerifier
+
+        # Get source of all methods (not just __init__)
+        source = inspect.getsource(SemanticVerifier)
+        # Count occurrences of self.entailment_threshold
+        # Should appear in at least one method BESIDES __init__
+        init_source = inspect.getsource(SemanticVerifier.__init__)
+        non_init_source = source.replace(init_source, "")
+        assert "self.entailment_threshold" in non_init_source or \
+               "entailment_threshold" not in inspect.getsource(SemanticVerifier.__init__), (
+            "entailment_threshold is stored in __init__ but never used elsewhere — "
+            "either use it or remove it"
+        )
 
 
 if __name__ == "__main__":
