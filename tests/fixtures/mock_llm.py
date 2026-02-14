@@ -44,7 +44,8 @@ class MockLLMProvider(LLMProvider):
         messages: List[Message],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        require_json: bool = False
+        require_json: bool = False,
+        logit_bias: Optional[Dict] = None
     ) -> LLMResponse:
         """Return mock response or raise configured error."""
         self.last_messages = messages

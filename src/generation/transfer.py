@@ -82,7 +82,7 @@ class TransferConfig:
     min_paragraph_words: int = 10  # Skip very short paragraphs
 
     # Document context settings
-    use_document_context: bool = True  # Extract and use document-level context
+    use_document_context: bool = False  # Extract and use document-level context (disabled: extracted but never used)
 
     # Input format (uses graph-based description matching training format)
 

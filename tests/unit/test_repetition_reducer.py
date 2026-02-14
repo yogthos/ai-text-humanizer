@@ -138,4 +138,34 @@ class TestLLMSpeakDictionary:
         # These are weird substitutions Qwen makes
         assert LLM_SPEAK["ticker"] == "watch"
         assert LLM_SPEAK["cogwheel"] == "gear"
-        assert LLM_SPEAK["macrocosm"] == "world"
+
+
+class TestNoLegitimateWordsInLLMSpeak:
+    """Tests for legitimate words removed from LLM_SPEAK (Bug 6)."""
+
+    def test_no_legitimate_words_in_llm_speak(self):
+        """Words like cosmos, creation, wandering should NOT be in LLM_SPEAK."""
+        legitimate_words = [
+            "cosmos", "creation", "existence", "domain", "macrocosm",
+            "corporeal", "sentinel", "scout", "vigil", "wandering",
+            "nomadic", "roving", "peregrine", "illuminates",
+            "elucidates", "delineates", "underscores",
+            "lookout", "sentry", "picket", "spotter", "timekeeper",
+            "gearing", "unmarried", "undivided", "exclusive",
+            "unharmed", "unhurt", "unscathed",
+        ]
+        for word in legitimate_words:
+            assert word not in LLM_SPEAK, (
+                f"Legitimate word '{word}' should not be in LLM_SPEAK"
+            )
+
+    def test_qwen_vocabulary_subset_reasonable(self):
+        """Remaining Qwen fixes should be genuinely model artifacts."""
+        genuine_artifacts = [
+            "ticker", "cogwheel", "geartrain", "paraphernalia",
+            "appurtenance", "earphone", "earpiece", "headphone", "telephony",
+        ]
+        for word in genuine_artifacts:
+            assert word in LLM_SPEAK, (
+                f"Genuine Qwen artifact '{word}' should remain in LLM_SPEAK"
+            )

@@ -127,6 +127,7 @@ class BaseStyleGenerator(ABC):
             config: Generation configuration.
         """
         self.config = config or GenerationConfig()
+        self.fiction_markers: List[str] = []  # Set from adapter config
 
     @abstractmethod
     def generate(
@@ -247,26 +248,21 @@ class BaseStyleGenerator(ABC):
         response = self._fix_broken_atmospheric_phrases(response)
 
         # 7. Remove sentences containing fiction-specific markers (hallucinations)
-        fiction_markers = [
-            r'\barkham\b', r'\bcthulhu\b', r'\bnecronomicon\b', r'\bmiskatonic\b',
-            r'\binnsmouth\b', r'\bdunwich\b', r'\bshoggoth\b', r'\byog-sothoth\b',
-            r'\bazathoth\b', r'\bnyarlathotep\b', r'\br\'lyeh\b', r'\bdagon\b',
-            r'\bmy letters to you\b', r'\bin my letters\b', r'\bi have seen\b',
-            r'\bi have written\b', r'\bi cannot recall\b', r'\bwhose names i\b',
-        ]
-        fiction_pattern = re.compile('|'.join(fiction_markers), re.IGNORECASE)
+        # Markers are loaded from adapter config (no hardcoded author content)
+        if self.fiction_markers:
+            fiction_pattern = re.compile('|'.join(self.fiction_markers), re.IGNORECASE)
 
-        # Split into sentences and filter
-        sentences = re.split(r'(?<=[.!?])\s+', response)
-        clean_sentences = []
-        for sent in sentences:
-            if not fiction_pattern.search(sent):
-                clean_sentences.append(sent)
-            else:
-                logger.debug(f"Removed fiction hallucination: {sent[:80]}...")
+            # Split into sentences and filter
+            sentences = re.split(r'(?<=[.!?])\s+', response)
+            clean_sentences = []
+            for sent in sentences:
+                if not fiction_pattern.search(sent):
+                    clean_sentences.append(sent)
+                else:
+                    logger.debug(f"Removed fiction hallucination: {sent[:80]}...")
 
-        if clean_sentences:
-            response = ' '.join(clean_sentences)
+            if clean_sentences:
+                response = ' '.join(clean_sentences)
 
         response = response.strip()
 

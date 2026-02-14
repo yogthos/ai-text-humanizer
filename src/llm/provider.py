@@ -69,7 +69,8 @@ class LLMProvider(ABC):
         messages: List[Message],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        require_json: bool = False
+        require_json: bool = False,
+        logit_bias: Optional[Dict] = None,
     ) -> LLMResponse:
         """Make the actual API call.
 
@@ -208,7 +209,8 @@ class LLMProvider(ABC):
         messages: List[Message],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        require_json: bool = False
+        require_json: bool = False,
+        logit_bias: Optional[Dict] = None,
     ) -> LLMResponse:
         """Make API call with retry logic.
 
@@ -223,7 +225,7 @@ class LLMProvider(ABC):
         for attempt in range(max_retries):
             start_time = time.time()
             try:
-                response = self._call_api(messages, temperature, max_tokens, require_json)
+                response = self._call_api(messages, temperature, max_tokens, require_json, logit_bias=logit_bias)
 
                 # Track usage
                 self._total_input_tokens += response.input_tokens

@@ -46,6 +46,19 @@ def detect_best_backend() -> str:
     )
 
 
+def _set_fiction_markers(generator, adapter_path: Optional[str]) -> None:
+    """Load fiction markers from adapter config and set on generator."""
+    if not adapter_path:
+        return
+    try:
+        from ..config import get_adapter_config
+        adapter_config = get_adapter_config(adapter_path)
+        if adapter_config.fiction_markers:
+            generator.fiction_markers = adapter_config.fiction_markers
+    except Exception:
+        pass
+
+
 def create_style_generator(
     adapter_path: Optional[str] = None,
     base_model: Optional[str] = None,
@@ -104,18 +117,21 @@ def create_style_generator(
                         checkpoint=a.get("checkpoint"),
                     ))
 
-        return LoRAStyleGenerator(
+        generator = LoRAStyleGenerator(
             adapter_path=adapter_path,
             base_model=base_model or "mlx-community/Qwen2.5-32B-Instruct-4bit",
             config=config,
             checkpoint=checkpoint,
             adapters=adapter_specs,
         )
+        # Load fiction markers from adapter config
+        _set_fiction_markers(generator, adapter_path)
+        return generator
 
     elif backend == "pytorch":
         from .pytorch_generator import PyTorchStyleGenerator
 
-        return PyTorchStyleGenerator(
+        generator = PyTorchStyleGenerator(
             adapter_path=adapter_path,
             base_model=base_model or "Qwen/Qwen2.5-32B-Instruct",
             config=config,
@@ -124,6 +140,9 @@ def create_style_generator(
             load_in_4bit=load_in_4bit,
             load_in_8bit=load_in_8bit,
         )
+        # Load fiction markers from adapter config
+        _set_fiction_markers(generator, adapter_path)
+        return generator
 
     else:
         raise ValueError(

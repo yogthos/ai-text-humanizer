@@ -5,24 +5,6 @@ Provides a terminal UI similar to Claude Code for interactive style transfer.
 
 import sys
 import os
-
-# Suppress tqdm progress bars globally for cleaner REPL output
-os.environ["TQDM_DISABLE"] = "1"
-
-# Disable all tqdm variants (tqdm, tqdm.auto, tqdm.autonotebook)
-def _disable_tqdm():
-    try:
-        import tqdm
-        import tqdm.auto
-        from functools import partialmethod
-        # Disable base tqdm
-        tqdm.tqdm.__init__ = partialmethod(tqdm.tqdm.__init__, disable=True)
-        # Disable auto tqdm (used by sentence-transformers)
-        tqdm.auto.tqdm.__init__ = partialmethod(tqdm.auto.tqdm.__init__, disable=True)
-    except (ImportError, AttributeError):
-        pass
-
-_disable_tqdm()
 import textwrap
 import readline
 from typing import Optional
@@ -261,10 +243,10 @@ class StyleREPL:
 
                 if not line:
                     empty_count += 1
-                    if empty_count >= 1 and lines:
+                    if empty_count >= 2 and lines:
                         # Double enter - submit
                         break
-                    elif empty_count >= 2:
+                    elif empty_count >= 3:
                         # Triple enter with no content - skip
                         return ""
                 else:
@@ -454,6 +436,17 @@ def run_repl(
         verify: Whether to verify entailment.
         critic_provider: Optional critic provider for repairs.
     """
+    # Suppress tqdm progress bars for cleaner REPL output (scoped to run_repl)
+    os.environ["TQDM_DISABLE"] = "1"
+    try:
+        import tqdm
+        import tqdm.auto
+        from functools import partialmethod
+        tqdm.tqdm.__init__ = partialmethod(tqdm.tqdm.__init__, disable=True)
+        tqdm.auto.tqdm.__init__ = partialmethod(tqdm.auto.tqdm.__init__, disable=True)
+    except (ImportError, AttributeError):
+        pass
+
     from ..config import load_config
 
     # Load config

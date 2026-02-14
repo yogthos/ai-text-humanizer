@@ -167,20 +167,18 @@ FREQUENT_CONSTRAINTS = [
     "Do not use numbered lists or 'Firstly/Secondly/Thirdly' structures.",
 ]
 
-# STRUCTURAL CONSTRAINTS (70% each) - Key style markers
-# These push for the structural patterns that distinguish human writing
-STRUCTURAL_CONSTRAINTS = [
-    "Use em-dashes (—) for asides that reveal your inner turmoil.",
-    "Vary sentence lengths dramatically. Follow a long sentence with a short one.",
-]
-
 # ROTATING (one random, 40%) - stylistic variety
+# Must match training exactly (generate_flat_training.py ROTATING_CONSTRAINTS)
 ROTATING_CONSTRAINTS = [
-    "Use fragments. Interrupt yourself.",
+    "Use fragments. Interrupt yourself with dashes (—).",
     "Let ideas collide without transition words.",
     "Do not explain. Imply.",
     "Use at least one rhetorical question.",
-    "Start with a conjunction (But, And, Yet, So).",
+    "Interrupt yourself with a parenthetical thought.",
+    "Start the paragraph with a conjunction (But, And, Yet, So).",
+    "Be biased. Be opinionated. Do not balance your argument.",
+    "Vary sentence lengths dramatically. Follow a long sentence with a short one.",
+    "Use concrete nouns instead of abstractions. Not 'the concept' but the thing itself.",
     "End on an image or action, not a summary.",
 ]
 
@@ -188,13 +186,12 @@ ROTATING_CONSTRAINTS = [
 def _build_constraints() -> str:
     """Build constraint block matching training format.
 
-    Training used tiered constraints:
+    Training used tiered constraints (3 tiers only):
     - ALWAYS_CONSTRAINTS: 100%
     - FREQUENT_CONSTRAINTS: 70% each
-    - STRUCTURAL_CONSTRAINTS: 70% each (em-dashes, varied lengths)
     - ROTATING_CONSTRAINTS: one random, 40%
 
-    Total: typically 3-5 constraints
+    Total: typically 3-4 constraints
     """
     constraints = []
 
@@ -203,11 +200,6 @@ def _build_constraints() -> str:
 
     # FREQUENT constraints (70% each) - match training
     for constraint in FREQUENT_CONSTRAINTS:
-        if random.random() < 0.70:
-            constraints.append(constraint)
-
-    # STRUCTURAL constraints (70% each) - key style markers
-    for constraint in STRUCTURAL_CONSTRAINTS:
         if random.random() < 0.70:
             constraints.append(constraint)
 
@@ -303,7 +295,7 @@ def build_persona_prompt(
     parts.append("")
     if deterministic_constraints:
         # For testing: include all constraints
-        constraints = ALWAYS_CONSTRAINTS + FREQUENT_CONSTRAINTS + STRUCTURAL_CONSTRAINTS + [ROTATING_CONSTRAINTS[0]]
+        constraints = ALWAYS_CONSTRAINTS + FREQUENT_CONSTRAINTS + [ROTATING_CONSTRAINTS[0]]
         parts.append("\n".join(f"[CONSTRAINT]: {c}" for c in constraints))
     else:
         parts.append(_build_constraints())

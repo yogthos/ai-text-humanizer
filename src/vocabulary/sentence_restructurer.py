@@ -31,16 +31,16 @@ class RestructureStats:
 class SentenceRestructurer:
     """Restructures mechanical sentence patterns into organic ones."""
 
-    # Preposition phrases for inverted openings
+    # Preposition phrases for inverted openings (generic literary inversions)
     INVERSION_PREFIXES = [
         "From beyond the bounds of",
         "In the depths of",
-        "Through the veil of",
-        "Within the shadow of",
-        "Beneath the weight of",
-        "Amidst the darkness of",
-        "Beyond the pale of",
-        "Upon the threshold of",
+        "Through the scope of",
+        "Within the confines of",
+        "Beneath the surface of",
+        "Amidst the complexity of",
+        "Beyond the reach of",
+        "Upon the edge of",
     ]
 
     # Patterns for detecting balanced openings (first 50 chars)
@@ -192,44 +192,44 @@ class SentenceRestructurer:
         """Choose an appropriate inversion prefix based on content."""
         import random
 
-        # Map content to appropriate prefixes
-        cosmic_words = {'universe', 'cosmos', 'space', 'void', 'abyss', 'infinity'}
+        # Map content to appropriate prefixes (generic literary inversions)
+        scope_words = {'universe', 'cosmos', 'space', 'world', 'scale', 'scope'}
         limit_words = {'limit', 'boundary', 'edge', 'border', 'bound'}
-        experience_words = {'experience', 'knowledge', 'understanding', 'comprehension'}
-        dark_words = {'dark', 'shadow', 'night', 'black'}
+        experience_words = {'experience', 'knowledge', 'understanding', 'perception'}
+        depth_words = {'dark', 'shadow', 'deep', 'hidden', 'beneath'}
 
         nouns_set = set(nouns)
         sent_lower = sent.lower()
 
-        if nouns_set & cosmic_words or 'universe' in sent_lower:
+        if nouns_set & scope_words or 'universe' in sent_lower:
             return random.choice([
-                "From beyond the bounds of mortal comprehension,",
-                "In the vast and terrible expanse where",
-                "Beyond the furthest reaches of human understanding,",
+                "From beyond the bounds of ordinary understanding,",
+                "In the broader scope of what we know,",
+                "Beyond the conventional frame of reference,",
             ])
 
         if nouns_set & limit_words or 'limit' in sent_lower or 'bound' in sent_lower:
             return random.choice([
-                "At the very edge of conceivable reality,",
-                "Upon the threshold of the unknowable,",
-                "Where comprehension fails and reason falters,",
+                "At the very edge of what is known,",
+                "Upon the threshold of understanding,",
+                "Where familiar assumptions give way,",
             ])
 
         if nouns_set & experience_words:
             return random.choice([
-                "Through the lens of our feeble understanding,",
-                "In the dim light of human perception,",
-                "Filtered through the inadequacy of mortal experience,",
+                "Through the lens of lived experience,",
+                "In the light of what we have learned,",
+                "Filtered through the weight of accumulated knowledge,",
             ])
 
-        if nouns_set & dark_words:
+        if nouns_set & depth_words:
             return random.choice([
-                "In the depths of that impenetrable darkness,",
-                "Amidst the shadows that harbor nameless things,",
-                "Within the blackness where light fears to tread,",
+                "In the depths of this complexity,",
+                "Beneath the surface of the obvious,",
+                "Within the layers that remain unseen,",
             ])
 
-        # Default cosmic horror prefixes
+        # Default generic literary prefixes
         return random.choice(self.INVERSION_PREFIXES)
 
     def _add_interruption(self, sent: str) -> str:

@@ -249,6 +249,55 @@ class TestDefaultValueMatches:
         assert TransferConfig().sentence_length_variance == 0.4
 
 
+class TestParserFallbackDefaults:
+    """Tests for parser .get() fallback defaults matching dataclass (Bug 9)."""
+
+    def test_parser_fallback_matches_dataclass_default_max_repair(self):
+        """Parser fallback for max_repair_attempts should be 5, not 3."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {},  # Empty generation section — fallbacks kick in
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                config = load_config(f.name)
+                assert config.generation.max_repair_attempts == 5
+            finally:
+                os.unlink(f.name)
+
+    def test_parser_fallback_matches_dataclass_default_rag_sample(self):
+        """Parser fallback for rag_sample_size should be 300, not 200."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {},
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                config = load_config(f.name)
+                assert config.generation.rag_sample_size == 300
+            finally:
+                os.unlink(f.name)
+
+    def test_parser_fallback_matches_dataclass_default_sentence_variance(self):
+        """Parser fallback for sentence_length_variance should be 0.4, not 0.3."""
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {},
+        }
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                config = load_config(f.name)
+                assert config.generation.sentence_length_variance == 0.4
+            finally:
+                os.unlink(f.name)
+
+
 class TestWorldviewFileValidation:
     """Tests for worldview file existence check on load (Bug 20)."""
 

@@ -179,7 +179,7 @@ class StructuralAnalyzer:
             has_question="?" in text,
             opening_pos=opening_pos,
             is_fragment=is_fragment,
-            has_parenthetical="(" in text or "," in text.split()[1:5] if len(text.split()) > 5 else False,
+            has_parenthetical=("(" in text or ("," in text.split()[1:5] if len(text.split()) > 5 else False)),
             clause_count=clause_count,
         )
 

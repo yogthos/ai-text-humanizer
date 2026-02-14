@@ -1145,5 +1145,90 @@ class TestDefaultRhythmFallback:
             assert len(parts) == 4
 
 
+class TestCorpusIndexerBatching:
+    """Tests for ChromaDB upsert batching (Bug 7)."""
+
+    @patch('src.rag.corpus_indexer.get_embedding_model')
+    @patch('src.rag.corpus_indexer.get_chromadb')
+    def test_large_upsert_batched(self, mock_chromadb, mock_embedding):
+        """Upserts with >5000 items should be batched."""
+        from src.rag.corpus_indexer import CorpusIndexer
+        import numpy as np
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+
+        # Mock embedding model
+        mock_model = MagicMock()
+        n_chunks = 6000
+        mock_model.encode.return_value = np.random.rand(n_chunks, 384)
+        mock_embedding.return_value = mock_model
+
+        # Mock ChromaDB
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 0
+        mock_client = MagicMock()
+        mock_client.get_or_create_collection.return_value = mock_collection
+        mock_chromadb.return_value.PersistentClient.return_value = mock_client
+
+        indexer = CorpusIndexer(temp_dir)
+
+        # Create a large corpus file
+        corpus_path = Path(temp_dir) / "large_corpus.txt"
+        # Generate enough text to produce ~6000 chunks
+        paragraphs = ["Word " * 30 + "." for _ in range(n_chunks)]
+        corpus_path.write_text("\n\n".join(paragraphs))
+
+        # Mock _split_into_chunks to return exactly 6000 chunks
+        with patch.object(indexer, '_split_into_chunks', return_value=["chunk"] * n_chunks):
+            count = indexer.index_corpus(str(corpus_path), "Test Author")
+
+        assert count == n_chunks
+        # Should have multiple upsert calls (6000 / 5000 = 2 batches)
+        assert mock_collection.upsert.call_count == 2
+        # First batch should have 5000 items
+        first_call = mock_collection.upsert.call_args_list[0]
+        assert len(first_call.kwargs.get('ids', first_call[1].get('ids', []))) == 5000 or \
+               len(first_call[1]['ids']) == 5000
+
+
+class TestStructuralAnalyzerParenthetical:
+    """Tests for has_parenthetical operator precedence (Bug 14)."""
+
+    def _get_first_sent(self, text):
+        """Helper to get first spaCy sentence span."""
+        from src.utils.nlp import get_nlp
+        nlp = get_nlp()
+        doc = nlp(text)
+        return list(doc.sents)[0]
+
+    def test_parenthetical_with_short_text(self):
+        """Text <5 words with '(' should still detect parenthetical."""
+        from src.rag.structural_analyzer import StructuralAnalyzer
+
+        analyzer = StructuralAnalyzer()
+        sent = self._get_first_sent("Word (note) here.")
+        pattern = analyzer.analyze_sentence(sent)
+        assert pattern.has_parenthetical is True
+
+    def test_parenthetical_detected_with_paren(self):
+        """Text with literal parentheses should always be detected."""
+        from src.rag.structural_analyzer import StructuralAnalyzer
+
+        analyzer = StructuralAnalyzer()
+        sent = self._get_first_sent("The quick brown fox (a sly creature) jumped over the lazy dog.")
+        pattern = analyzer.analyze_sentence(sent)
+        assert pattern.has_parenthetical is True
+
+    def test_no_parenthetical_short_text(self):
+        """Short text without parens or commas should not have parenthetical."""
+        from src.rag.structural_analyzer import StructuralAnalyzer
+
+        analyzer = StructuralAnalyzer()
+        sent = self._get_first_sent("Hello world.")
+        pattern = analyzer.analyze_sentence(sent)
+        assert pattern.has_parenthetical is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

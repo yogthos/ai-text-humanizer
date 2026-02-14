@@ -281,13 +281,16 @@ class CorpusIndexer:
 
             embedding_list.append(embedding.tolist())
 
-        # Upsert to collection
-        self.collection.upsert(
-            ids=ids,
-            documents=documents,
-            metadatas=metadatas,
-            embeddings=embedding_list,
-        )
+        # Upsert to collection in batches (ChromaDB limit is 5461)
+        batch_size = 5000
+        for start in range(0, len(ids), batch_size):
+            end = start + batch_size
+            self.collection.upsert(
+                ids=ids[start:end],
+                documents=documents[start:end],
+                metadatas=metadatas[start:end],
+                embeddings=embedding_list[start:end],
+            )
 
         logger.info(f"Indexed {len(chunks)} chunks for {author}")
         return len(chunks)

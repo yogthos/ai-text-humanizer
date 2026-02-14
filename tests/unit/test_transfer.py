@@ -664,5 +664,18 @@ class TestWordCountTracking:
         )
 
 
+class TestDocumentContextDisabled:
+    """Tests for document_context being disabled by default (Bug 13)."""
+
+    def test_document_context_disabled_by_default(self):
+        """use_document_context should default to False."""
+        from src.generation.transfer import TransferConfig
+
+        config = TransferConfig()
+        assert config.use_document_context is False, (
+            "use_document_context should default to False (extracted but never used)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

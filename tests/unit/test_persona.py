@@ -98,5 +98,56 @@ class TestBuildPersonaPromptAdapterPath:
         mock_get_frame.assert_called_once_with(True, adapter_path="lora_adapters/test")
 
 
+class TestConstraintTiers:
+    """Tests for constraint tier matching training (Bug 3)."""
+
+    def test_no_structural_constraints_tier(self):
+        """_build_constraints should not use a separate STRUCTURAL tier."""
+        from src.persona.prompt_builder import _build_constraints
+        import src.persona.prompt_builder as pb
+
+        # STRUCTURAL_CONSTRAINTS should not exist as a module-level variable
+        assert not hasattr(pb, 'STRUCTURAL_CONSTRAINTS'), (
+            "STRUCTURAL_CONSTRAINTS should be removed — training only has 3 tiers"
+        )
+
+    def test_constraint_tiers_match_training(self):
+        """Constraint tiers should be ALWAYS + FREQUENT + ROTATING only."""
+        import src.persona.prompt_builder as pb
+
+        # Should only have these 3 tier lists
+        assert hasattr(pb, 'ALWAYS_CONSTRAINTS')
+        assert hasattr(pb, 'FREQUENT_CONSTRAINTS')
+        assert hasattr(pb, 'ROTATING_CONSTRAINTS')
+        assert not hasattr(pb, 'STRUCTURAL_CONSTRAINTS')
+
+
+class TestConstraintWording:
+    """Tests for constraint wording matching training (Bug 4)."""
+
+    def test_rotating_constraints_match_training(self):
+        """ROTATING_CONSTRAINTS should match training exactly."""
+        from src.persona.prompt_builder import ROTATING_CONSTRAINTS
+
+        expected = [
+            "Use fragments. Interrupt yourself with dashes (—).",
+            "Let ideas collide without transition words.",
+            "Do not explain. Imply.",
+            "Use at least one rhetorical question.",
+            "Interrupt yourself with a parenthetical thought.",
+            "Start the paragraph with a conjunction (But, And, Yet, So).",
+            "Be biased. Be opinionated. Do not balance your argument.",
+            "Vary sentence lengths dramatically. Follow a long sentence with a short one.",
+            "Use concrete nouns instead of abstractions. Not 'the concept' but the thing itself.",
+            "End on an image or action, not a summary.",
+        ]
+
+        assert ROTATING_CONSTRAINTS == expected, (
+            f"ROTATING_CONSTRAINTS doesn't match training.\n"
+            f"Missing: {set(expected) - set(ROTATING_CONSTRAINTS)}\n"
+            f"Extra: {set(ROTATING_CONSTRAINTS) - set(expected)}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

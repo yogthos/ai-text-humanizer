@@ -10,7 +10,7 @@ This matches the training script's perturb_text() function exactly.
 import random
 from typing import Optional
 
-# Simple synonym map matching training
+# Simple synonym map matching training exactly (generate_flat_training.py)
 SYNONYMS = {
     "big": ["large", "huge", "great"],
     "small": ["little", "tiny", "minor"],
@@ -21,11 +21,9 @@ SYNONYMS = {
     "house": ["building", "home", "dwelling"],
     "said": ["stated", "spoke", "remarked"],
     "walked": ["went", "moved", "traveled"],
-    "looked": ["gazed", "stared", "peered"],
-    "saw": ["noticed", "observed", "spotted"],
-    "strange": ["odd", "peculiar", "unusual"],
-    "dark": ["dim", "shadowy", "murky"],
-    "light": ["bright", "pale", "faint"],
+    "looked": ["appeared", "seemed", "gazed"],
+    "very": ["quite", "rather", "extremely"],
+    "really": ["truly", "actually", "indeed"],
 }
 
 
@@ -55,21 +53,25 @@ def perturb_text(
     result = []
     droppable = {'the', 'a', 'an', 'very', 'really', 'just', 'quite'}
 
-    # Common adjectives to drop (forces model to regenerate them in author's style)
+    # Common adjectives to drop - matches training exactly (generate_flat_training.py)
     adjectives_to_drop = {
         'great', 'small', 'large', 'old', 'new', 'good', 'bad', 'long', 'short',
         'high', 'low', 'young', 'little', 'big', 'dark', 'light', 'strange',
         'ancient', 'terrible', 'horrible', 'beautiful', 'ugly', 'quiet', 'loud',
-        'vast', 'deep', 'wide', 'narrow', 'thick', 'thin', 'heavy', 'empty',
+        'soft', 'hard', 'cold', 'hot', 'warm', 'cool', 'wet', 'dry', 'empty',
+        'full', 'deep', 'shallow', 'thick', 'thin', 'wide', 'narrow', 'vast',
+        'immense', 'enormous', 'tiny', 'massive', 'peculiar', 'odd', 'weird',
     }
+
+    # Per-call decision: 30% chance to drop adjectives (matches training)
+    should_drop_adjs = drop_adjectives and random.random() < 0.30
 
     for word in words:
         word_lower = word.lower().rstrip('.,!?;:"\'-')
 
-        # Adjective dropping (separate from perturbation)
-        if drop_adjectives and word_lower in adjectives_to_drop:
-            if random.random() < 0.30:
-                continue  # Drop the adjective
+        # Adjective dropping (per-call decision, not per-word)
+        if should_drop_adjs and word_lower in adjectives_to_drop:
+            continue  # Drop the adjective
 
         if random.random() > perturbation_rate:
             result.append(word)

@@ -457,6 +457,70 @@ class RTTNeutralizer:
 
         return None
 
+    def _do_neutralize(
+        self,
+        text: str,
+        max_retries: int = 2,
+        monotone: bool = False,
+    ) -> Optional[str]:
+        """Core RTT neutralization without chunking.
+
+        Called directly for chunks that are >300 words but can't be split further
+        (e.g., single sentences with no period boundaries).
+        """
+        import re
+
+        word_count = len(text.split())
+
+        for attempt in range(max_retries):
+            try:
+                max_mandarin_tokens = min(int(word_count * 2), 512)
+                rtt_mandarin_prompt = load_prompt("rtt_to_mandarin")
+                mandarin = self._generate(
+                    system=rtt_mandarin_prompt,
+                    user=f"Translate to simple Mandarin:\n\n{text}",
+                    max_tokens=max_mandarin_tokens,
+                )
+
+                if not mandarin or len(mandarin) < 10:
+                    logger.debug(f"RTT Step 1 failed: empty Mandarin (attempt {attempt + 1})")
+                    continue
+
+                max_english_tokens = min(int(word_count * 1.5) + 20, 400)
+                rtt_english_prompt = load_prompt("rtt_to_english")
+                english = self._generate(
+                    system=rtt_english_prompt,
+                    user=f"Translate to simple English:\n\n{mandarin}",
+                    max_tokens=max_english_tokens,
+                )
+
+                if not english or len(english) < 10:
+                    logger.debug(f"RTT Step 2 failed: empty English (attempt {attempt + 1})")
+                    continue
+
+                english = english.strip()
+                english = re.sub(r'^```\w*\n?', '', english)
+                english = re.sub(r'\n?```$', '', english)
+
+                if re.search(r'[\u4e00-\u9fff]', english):
+                    logger.debug(f"RTT Step 2 failed: output contains Chinese (attempt {attempt + 1})")
+                    continue
+
+                neutral_words = len(english.split())
+                if neutral_words < 3:
+                    continue
+
+                if monotone:
+                    english = self._monotone_flatten(english)
+
+                logger.debug(f"RTT success: {word_count} → {len(english.split())} words")
+                return english
+
+            except Exception as e:
+                logger.warning(f"RTT attempt {attempt + 1} failed: {e}")
+
+        return None
+
     def _neutralize_chunked(
         self,
         text: str,
@@ -499,12 +563,18 @@ class RTTNeutralizer:
         # Neutralize each chunk
         results = []
         for chunk in chunks:
-            # Call neutralize for short chunk (won't recurse since <300 words)
-            result = self.neutralize(chunk, max_retries=max_retries, monotone=False)
+            chunk_words = len(chunk.split())
+            if chunk_words > 300:
+                # Chunk is still too long (e.g., single sentence with no periods)
+                # Call _do_neutralize directly to avoid infinite recursion
+                result = self._do_neutralize(chunk, max_retries=max_retries, monotone=False)
+            else:
+                # Short enough chunk — safe to call neutralize (won't recurse)
+                result = self.neutralize(chunk, max_retries=max_retries, monotone=False)
             if result:
                 results.append(result)
             else:
-                logger.debug(f"Chunk failed: {len(chunk.split())} words")
+                logger.debug(f"Chunk failed: {chunk_words} words")
                 # Continue with other chunks
 
         if not results:

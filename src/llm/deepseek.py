@@ -168,10 +168,10 @@ class DeepSeekProvider(LLMProvider):
             Message(role=MessageRole.USER, content=user_prompt)
         ]
 
-        response = self._call_api(
+        response = self._call_with_retry(
             messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            logit_bias=logit_bias
+            logit_bias=logit_bias,
         )
         return response.content

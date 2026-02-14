@@ -271,5 +271,71 @@ class TestRunReplConfig:
                 assert tc.temperature == 0.8
 
 
+class TestReplInputSubmission:
+    """Tests for REPL input submission behavior (Bug 12)."""
+
+    def test_single_enter_does_not_submit(self):
+        """Single Enter after content should NOT submit."""
+        from src.repl.repl import StyleREPL, REPLConfig
+
+        config = REPLConfig(author="Test", adapter_path="/test", use_color=False)
+        mock_transfer = MagicMock()
+        repl = StyleREPL(mock_transfer, config)
+
+        # Simulate: "Hello" then one empty line
+        inputs = iter(["Hello", ""])
+        with patch('builtins.input', side_effect=inputs):
+            try:
+                result = repl._read_input()
+            except StopIteration:
+                # If we run out of inputs, it means single enter didn't submit
+                result = None
+
+        # Should NOT have submitted yet (needs double enter)
+        # The fact that we get StopIteration means it kept asking for more input
+        assert result is None or result == ""
+
+    def test_double_enter_submits(self):
+        """Double Enter after content should submit."""
+        from src.repl.repl import StyleREPL, REPLConfig
+
+        config = REPLConfig(author="Test", adapter_path="/test", use_color=False)
+        mock_transfer = MagicMock()
+        repl = StyleREPL(mock_transfer, config)
+
+        # Simulate: "Hello" then two empty lines
+        inputs = iter(["Hello", "", ""])
+        with patch('builtins.input', side_effect=inputs):
+            result = repl._read_input()
+
+        assert result is not None
+        assert "Hello" in result
+
+
+class TestTqdmNotGloballyDisabled:
+    """Tests for tqdm not being disabled at import (Bug 15)."""
+
+    def test_tqdm_disable_scoped_to_repl_run(self):
+        """Importing repl module should NOT monkey-patch tqdm at import time."""
+        # Save original state
+        import importlib
+        import tqdm
+
+        original_init = tqdm.tqdm.__init__
+
+        # Re-import the module
+        import src.repl.repl as repl_module
+        importlib.reload(repl_module)
+
+        # tqdm.__init__ should NOT be monkey-patched at import time
+        # (it should only be patched inside run_repl)
+        current_init = tqdm.tqdm.__init__
+        # If it's a partialmethod, it was monkey-patched
+        from functools import partialmethod
+        assert not isinstance(current_init, partialmethod), (
+            "tqdm.tqdm.__init__ should not be monkey-patched at module import time"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

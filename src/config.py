@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from .utils.logging import get_logger
 
@@ -87,7 +87,7 @@ class GenerationConfig:
     reduce_repetition: bool = True  # Enable repetition reduction
 
     # Document handling
-    use_document_context: bool = True  # Extract document-level context
+    use_document_context: bool = False  # Extract document-level context (disabled: extracted but never used)
     pass_headings_unchanged: bool = True  # Don't transform headings
     min_paragraph_words: int = 10  # Skip paragraphs shorter than this
 
@@ -126,6 +126,7 @@ class LoRAAdapterConfig:
     repetition_penalty: float = 1.15  # Penalty for repeating tokens
     max_tokens: int = 512  # Maximum tokens to generate
     worldview: str = ""  # Author worldview prompt file
+    fiction_markers: List[str] = field(default_factory=list)  # Fiction markers to filter from output
     checkpoint: Optional[str] = None  # Specific checkpoint to use
     # Backend configuration
     backend: str = "auto"  # "auto", "mlx", or "pytorch"
@@ -211,7 +212,7 @@ def _parse_llm_provider_config(data: Dict) -> LLMProviderConfig:
 
 _KNOWN_ADAPTER_FIELDS = {
     "enabled", "scale", "temperature", "top_p", "min_p", "repetition_penalty",
-    "max_tokens", "worldview", "checkpoint", "backend", "device",
+    "max_tokens", "worldview", "fiction_markers", "checkpoint", "backend", "device",
     "load_in_4bit", "load_in_8bit", "hf_adapter_path",
 }
 
@@ -231,6 +232,7 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         repetition_penalty=data.get("repetition_penalty", 1.15),
         max_tokens=data.get("max_tokens", 512),
         worldview=data.get("worldview", ""),
+        fiction_markers=data.get("fiction_markers", []),
         checkpoint=data.get("checkpoint"),
         # Backend configuration
         backend=data.get("backend", "auto"),
@@ -332,7 +334,7 @@ def load_config(config_path: str = "config.json") -> Config:
             # Validation settings
             entailment_threshold=entailment_thresh,
             # Repair settings
-            max_repair_attempts=gen.get("max_repair_attempts", 3),
+            max_repair_attempts=gen.get("max_repair_attempts", 5),
             repair_temperature=gen.get("repair_temperature", 0.3),
             # Length control
             max_expansion_ratio=gen.get("max_expansion_ratio", 2.5),
@@ -346,13 +348,13 @@ def load_config(config_path: str = "config.json") -> Config:
             repetition_threshold=gen.get("repetition_threshold", 3),
             reduce_repetition=gen.get("reduce_repetition", True),
             # Document handling
-            use_document_context=gen.get("use_document_context", True),
+            use_document_context=gen.get("use_document_context", False),
             pass_headings_unchanged=gen.get("pass_headings_unchanged", True),
             min_paragraph_words=gen.get("min_paragraph_words", 10),
             # RAG settings
             use_structural_rag=gen.get("use_structural_rag", True),
             use_structural_grafting=gen.get("use_structural_grafting", True),
-            rag_sample_size=gen.get("rag_sample_size", 200),
+            rag_sample_size=gen.get("rag_sample_size", 300),
             # Persona settings
             use_persona=gen.get("use_persona", True),
             apply_input_perturbation=gen.get("apply_input_perturbation", True),
@@ -363,7 +365,7 @@ def load_config(config_path: str = "config.json") -> Config:
             restructure_sentences=gen.get("restructure_sentences", True),
             split_sentences=gen.get("split_sentences", True),
             max_sentence_length=gen.get("max_sentence_length", 60),
-            sentence_length_variance=gen.get("sentence_length_variance", 0.3),
+            sentence_length_variance=gen.get("sentence_length_variance", 0.4),
         )
 
     if "style" in data:
