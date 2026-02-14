@@ -438,6 +438,31 @@ class TestEnvVarResolution:
                 del os.environ["TEST_MODEL"]
 
 
+class TestStyleConfigValidation:
+    """Tests for Bug 8: StyleConfig perspective validation on init."""
+
+    def test_invalid_perspective_auto_corrected(self):
+        """StyleConfig(perspective='invalid') should auto-correct to 'preserve'."""
+        from src.config import StyleConfig
+        sc = StyleConfig(perspective="invalid")
+        assert sc.perspective == "preserve"
+
+    def test_valid_perspective_preserved(self):
+        """StyleConfig with valid perspective should keep the value."""
+        from src.config import StyleConfig
+        sc = StyleConfig(perspective="first_person_singular")
+        assert sc.perspective == "first_person_singular"
+
+    def test_all_valid_perspectives_accepted(self):
+        """All valid perspectives should be accepted without correction."""
+        from src.config import StyleConfig
+        valid = ["preserve", "first_person_singular", "first_person_plural",
+                 "third_person", "author_voice_third_person"]
+        for p in valid:
+            sc = StyleConfig(perspective=p)
+            assert sc.perspective == p, f"Valid perspective '{p}' was not preserved"
+
+
 class TestUnknownConfigFields:
     """Tests for unknown config field warnings (Bug 14)."""
 

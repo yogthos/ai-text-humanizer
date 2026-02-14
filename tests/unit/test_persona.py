@@ -149,5 +149,75 @@ class TestConstraintWording:
         )
 
 
+class TestNoHardcodedAuthorConfigs:
+    """Tests for Bug 1: No hardcoded author-specific configs in PERSONA_CONFIGS."""
+
+    def test_no_author_specific_entries_in_persona_configs(self):
+        """PERSONA_CONFIGS should only have 'default' key — no author-specific entries."""
+        from src.persona.config import PERSONA_CONFIGS
+        assert list(PERSONA_CONFIGS.keys()) == ["default"], (
+            f"PERSONA_CONFIGS should only contain 'default', "
+            f"but found: {list(PERSONA_CONFIGS.keys())}"
+        )
+
+    def test_default_adjective_themes_are_generic(self):
+        """Default persona's adjective_themes should be empty or generic."""
+        from src.persona.config import PERSONA_CONFIGS
+        themes = PERSONA_CONFIGS["default"].adjective_themes
+        lovecraft_words = {"cyclopean", "eldritch", "blasphemous", "foetor", "gibbous"}
+        overlap = set(themes) & lovecraft_words
+        assert not overlap, f"Default adjective_themes contains author-specific words: {overlap}"
+
+    def test_get_persona_config_returns_default_for_any_author(self):
+        """Any author name should return the generic default config."""
+        from src.persona.config import get_persona_config, PERSONA_CONFIGS
+        default = PERSONA_CONFIGS["default"]
+        assert get_persona_config("H.P. Lovecraft") is default
+        assert get_persona_config("Ernest Hemingway") is default
+        assert get_persona_config("Unknown Author") is default
+
+
+class TestConceptualFrameFallback:
+    """Tests for Bug 2: Conceptual frame fallback must match training."""
+
+    def test_conceptual_fallback_matches_training(self):
+        """Fallback conceptual frame must be one of the training defaults."""
+        training_defaults = [
+            "You are reverse-engineering an alien device. Describe the hidden logic as 'invisible machinery'.",
+            "You are a coroner analyzing a system crash. Treat the failure as the universe reclaiming order.",
+            "Describe this complex system as a mindless 'Leviathan' made of billions of dumb parts.",
+            "State these facts with the absolute, pitiless precision of a machine.",
+        ]
+
+        from src.persona.prompt_builder import _get_persona_frame
+
+        # Mock file loading to return empty frames → triggers fallback
+        with patch('src.persona.prompt_builder._get_worldview_filename', return_value=""):
+            with patch('src.persona.prompt_builder._load_persona_file', return_value={
+                "narrative_frames": [], "conceptual_frames": []
+            }):
+                frame = _get_persona_frame(is_narrative=False)
+
+        assert frame in training_defaults, (
+            f"Conceptual fallback '{frame}' not in training defaults: {training_defaults}"
+        )
+
+
+class TestWorldviewLookupLogging:
+    """Tests for Bug 4: Silent exception swallowing in worldview lookup."""
+
+    def test_exception_logged_not_swallowed(self):
+        """When config loading raises, a warning should be logged."""
+        from src.persona.prompt_builder import _get_worldview_filename
+
+        with patch('src.config.get_adapter_config', side_effect=RuntimeError("corrupt config")):
+            with patch('src.persona.prompt_builder.logger') as mock_logger:
+                result = _get_worldview_filename("some/adapter/path")
+
+        assert result == "default_persona.txt"
+        mock_logger.warning.assert_called_once()
+        assert "corrupt config" in str(mock_logger.warning.call_args)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -106,7 +106,7 @@ class StructuralRAG:
                 if rhythm.sentence_count >= 2:  # Need at least 2 sentences
                     self._cached_rhythms.append(rhythm)
             except Exception as e:
-                logger.debug(f"Could not analyze chunk: {e}")
+                logger.warning(f"Could not analyze chunk: {e}")
                 continue
 
         # Run enhanced analysis on all chunks
@@ -272,7 +272,7 @@ class StructuralRAG:
             try:
                 random_chunks = self.indexer.get_random_chunks(self.author, n=10)
                 if random_chunks:
-                    logger.debug(f"Using random chunks as fallback for exemplar sentences")
+                    logger.info(f"Using random chunks as fallback for exemplar sentences")
                     chunks = random_chunks
             except Exception as e:
                 logger.warning(f"Could not get random chunks: {e}")

@@ -148,6 +148,14 @@ class StyleConfig:
     """Configuration for style transfer settings."""
     perspective: str = "preserve"  # preserve, first_person_singular, first_person_plural, third_person, author_voice_third_person
 
+    def __post_init__(self):
+        """Auto-correct invalid perspective on init."""
+        if not self.validate_perspective():
+            logger.warning(
+                f"Invalid perspective '{self.perspective}', using 'preserve'"
+            )
+            self.perspective = "preserve"
+
     def validate_perspective(self) -> bool:
         """Check if perspective setting is valid."""
         valid_perspectives = {

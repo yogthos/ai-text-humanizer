@@ -55,8 +55,8 @@ def _set_fiction_markers(generator, adapter_path: Optional[str]) -> None:
         adapter_config = get_adapter_config(adapter_path)
         if adapter_config.fiction_markers:
             generator.fiction_markers = adapter_config.fiction_markers
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Could not load fiction markers: {e}")
 
 
 def create_style_generator(

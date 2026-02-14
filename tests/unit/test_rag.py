@@ -1321,5 +1321,101 @@ class TestStructuralAnalyzerParenthetical:
         assert pattern.has_parenthetical is False
 
 
+class TestParentheticalCommaDetection:
+    """Tests for Bug 3: Comma-based parenthetical detection."""
+
+    def _get_first_sent(self, text):
+        """Helper to get first spaCy sentence span."""
+        from src.utils.nlp import get_nlp
+        nlp = get_nlp()
+        doc = nlp(text)
+        return list(doc.sents)[0]
+
+    def test_comma_based_parenthetical_detected(self):
+        """Text with internal commas in positions 1-5 should detect parenthetical."""
+        from src.rag.structural_analyzer import StructuralAnalyzer
+
+        analyzer = StructuralAnalyzer()
+        # "ancient, crumbling" has commas attached to words at positions 1-5
+        sent = self._get_first_sent("The ancient, crumbling castle stood on the hill overlooking the valley.")
+        pattern = analyzer.analyze_sentence(sent)
+        assert pattern.has_parenthetical is True
+
+    def test_no_parenthetical_without_commas_or_parens(self):
+        """Clean text without commas or parens in positions 1-5 should be False."""
+        from src.rag.structural_analyzer import StructuralAnalyzer
+
+        analyzer = StructuralAnalyzer()
+        sent = self._get_first_sent("The quick brown fox jumped over the lazy dog today.")
+        pattern = analyzer.analyze_sentence(sent)
+        assert pattern.has_parenthetical is False
+
+
+class TestChunkAnalysisLogging:
+    """Tests for Bug 6: Chunk analysis failures should be WARNING not DEBUG."""
+
+    def test_chunk_analysis_failure_logged_as_warning(self):
+        """When rhythm analysis fails on chunks, it should log at WARNING level."""
+        from src.rag.structural_rag import StructuralRAG
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: None):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            rag.author = "Test"
+            rag.analyzer = MagicMock()
+            rag.enhanced_analyzer = MagicMock()
+            rag.indexer = MagicMock()
+            rag._cached_rhythms = []
+            rag._enhanced_profile = None
+            rag._loaded = False
+
+            # Mock indexer to return chunks
+            rag.indexer.get_random_chunks.return_value = ["chunk1", "chunk2"]
+            # Mock analyzer to raise on extract_rhythm
+            rag.analyzer.extract_rhythm.side_effect = Exception("analysis failed")
+            # Mock enhanced analyzer
+            rag.enhanced_analyzer.analyze.return_value = MagicMock()
+
+            with patch('src.rag.structural_rag.logger') as mock_logger:
+                rag.load_patterns(sample_size=2)
+
+            # Should log warnings, not debug
+            assert mock_logger.warning.call_count >= 1, (
+                "Chunk analysis failure should be logged at WARNING level"
+            )
+            warning_texts = [str(c) for c in mock_logger.warning.call_args_list]
+            assert any("analyze chunk" in str(c).lower() or "Could not analyze" in str(c) for c in warning_texts), (
+                f"Expected warning about chunk analysis, got: {warning_texts}"
+            )
+
+
+class TestExemplarFallbackLogging:
+    """Tests for Bug 7: Exemplar fallback should be logged at INFO not DEBUG."""
+
+    def test_random_fallback_logged_as_info(self):
+        """When semantic search returns empty and random chunks used, should log INFO."""
+        from src.rag.structural_rag import StructuralRAG
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: None):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            rag.author = "Test"
+            rag.indexer = MagicMock()
+            rag._enhanced_profile = None
+
+            # Semantic search returns empty
+            rag.indexer.retrieve_similar.return_value = []
+            # Random chunks returns some results
+            rag.indexer.get_random_chunks.return_value = ["A simple test sentence that is long enough to count as valid content here."]
+
+            with patch('src.rag.structural_rag.logger') as mock_logger:
+                with patch('src.utils.nlp.split_into_sentences', return_value=["A simple test sentence that is long enough."]):
+                    rag._get_exemplar_sentences("test input")
+
+            # Should log at INFO level about random fallback
+            info_texts = [str(c) for c in mock_logger.info.call_args_list]
+            assert any("random" in str(c).lower() or "fallback" in str(c).lower() for c in info_texts), (
+                f"Expected INFO log about random fallback, got info calls: {info_texts}"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

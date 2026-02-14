@@ -33,6 +33,9 @@ from typing import Any, List, Optional, Dict, TYPE_CHECKING
 from functools import lru_cache
 
 from .config import PersonaConfig
+from ..utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from ..rag.structural_grafter import GraftingGuidance
@@ -124,8 +127,8 @@ def _get_worldview_filename(adapter_path: Optional[str] = None) -> str:
                 for adapter_config in config.generation.lora_adapters.values():
                     if adapter_config.enabled and adapter_config.worldview:
                         return adapter_config.worldview
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to determine worldview filename: {e}")
     return "default_persona.txt"
 
 
@@ -146,7 +149,7 @@ def _get_persona_frame(is_narrative: bool, adapter_path: Optional[str] = None) -
     if is_narrative:
         return "You are recounting events you witnessed firsthand. Describe what happened as if confessing to a close friend."
     else:
-        return "You are explaining a complex system. Document your understanding with precision."
+        return "State these facts with the absolute, pitiless precision of a machine."
 
 
 # =============================================================================
