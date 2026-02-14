@@ -102,7 +102,7 @@ class SentenceSplitter:
 
         for sent in doc.sents:
             stats.sentences_processed += 1
-            sent_words = len([t for t in sent if not t.is_space])
+            sent_words = len(sent.text.split())
             original_lengths.append(sent_words)
 
             # If sentence is acceptable length, keep it
@@ -238,7 +238,7 @@ def get_sentence_splitter(config: SentenceSplitterConfig = None) -> SentenceSpli
     return _splitter
 
 
-def split_sentences(text: str, max_length: int = 50) -> str:
+def split_sentences(text: str, max_length: int = 60) -> str:
     """Convenience function to split sentences in text.
 
     Args:

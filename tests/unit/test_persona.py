@@ -76,22 +76,12 @@ class TestBuildPersonaPromptAdapterPath:
     def test_build_persona_prompt_threads_adapter_path(self, mock_detect, mock_get_frame):
         """build_persona_prompt should pass adapter_path to _get_persona_frame."""
         from src.persona.prompt_builder import build_persona_prompt
-        from src.persona.config import PersonaConfig
 
         mock_detect.return_value = True  # narrative
         mock_get_frame.return_value = "You are recounting events."
 
-        persona = PersonaConfig(
-            archetype="Test Scholar",
-            emotional_lens="curiosity",
-            voice_mode="journal",
-            adjective_themes=["dark", "ancient"],
-        )
-
         build_persona_prompt(
             content="Test content for the prompt builder.",
-            author="Test",
-            persona=persona,
             adapter_path="lora_adapters/test",
         )
 
@@ -225,7 +215,6 @@ class TestGraftingSkeletonStringification:
     def test_skeleton_in_prompt_uses_format_for_prompt(self):
         """Skeleton should appear as '[Move1] → [Move2]', not as Python repr."""
         from src.persona.prompt_builder import build_persona_prompt
-        from src.persona.config import get_persona_config
         from src.rag.skeleton_extractor import ArgumentSkeleton
         from src.rag.structural_grafter import GraftingGuidance
 
@@ -240,8 +229,6 @@ class TestGraftingSkeletonStringification:
 
         prompt = build_persona_prompt(
             content="Test content for style transfer.",
-            author="Test Author",
-            persona=get_persona_config("Test Author"),
             target_words=50,
             grafting_guidance=guidance,
         )
@@ -251,6 +238,31 @@ class TestGraftingSkeletonStringification:
         assert "ArgumentSkeleton(" not in prompt, (
             f"Prompt contains Python repr instead of formatted skeleton: {prompt}"
         )
+
+
+class TestUnusedParameters:
+    """Bug: build_persona_prompt accepts vocabulary_palette and persona
+    parameters but never uses them."""
+
+    def test_no_unused_parameters_in_build_persona_prompt(self):
+        """All parameters should be used in the function body."""
+        import inspect
+        from src.persona.prompt_builder import build_persona_prompt
+
+        sig = inspect.signature(build_persona_prompt)
+        source = inspect.getsource(build_persona_prompt)
+
+        # Remove the function signature to check only the body
+        # Find where body starts (after the docstring)
+        body_start = source.find('"""', source.find('"""') + 3) + 3
+        body = source[body_start:]
+
+        for param_name in sig.parameters:
+            if param_name == 'self':
+                continue
+            assert param_name in body, (
+                f"Parameter '{param_name}' is accepted but never used in function body"
+            )
 
 
 if __name__ == "__main__":

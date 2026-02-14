@@ -831,5 +831,53 @@ class TestMaxSentenceLengthDefault:
         )
 
 
+class TestReferenceMarkerWordCount:
+    """Bug: word_count, source_words, and repair source all use paragraph
+    (with [^N] references) instead of paragraph_clean (references stripped)."""
+
+    def test_word_count_excludes_references(self):
+        """Initial word_count should be based on cleaned text, not raw paragraph."""
+        import inspect
+        from src.generation.transfer import StyleTransfer
+
+        source = inspect.getsource(StyleTransfer.transfer_paragraph)
+        # After extract_references, word_count should use paragraph_clean
+        # Find the word_count initialization pattern
+        lines = source.split('\n')
+        found_extract = False
+        for line in lines:
+            if 'extract_references' in line:
+                found_extract = True
+            if found_extract and 'word_count' in line and 'paragraph.split()' in line:
+                assert False, (
+                    "word_count uses paragraph.split() after extract_references — "
+                    "should use paragraph_clean.split() to exclude reference markers"
+                )
+                break
+
+    def test_expansion_ratio_excludes_references(self):
+        """source_words for expansion check should exclude reference markers."""
+        import inspect
+        from src.generation.transfer import StyleTransfer
+
+        source = inspect.getsource(StyleTransfer.transfer_paragraph)
+        # The expansion ratio check should use paragraph_clean, not paragraph
+        assert "source_words = len(paragraph_clean.split())" in source or \
+               "source_words = len(paragraph_clean.split())" in source.replace(" ", ""), \
+            "Expansion ratio check uses paragraph (with refs) instead of paragraph_clean"
+
+    def test_repair_uses_clean_source(self):
+        """_repair_missing_entities should receive text without reference markers."""
+        import inspect
+        from src.generation.transfer import StyleTransfer
+
+        source = inspect.getsource(StyleTransfer.transfer_paragraph)
+        # The repair call should pass paragraph_clean or original_for_verification
+        assert "source=paragraph," not in source, (
+            "Repair receives paragraph (with refs) — "
+            "should use paragraph_clean (refs stripped)"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

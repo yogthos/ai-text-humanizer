@@ -44,11 +44,10 @@ except ImportError:
 
 # Persona system for subjective style transfer
 try:
-    from ..persona import get_persona_config, build_persona_prompt
+    from ..persona import build_persona_prompt
     PERSONA_AVAILABLE = True
 except ImportError:
     PERSONA_AVAILABLE = False
-    get_persona_config = None
 
 logger = get_logger(__name__)
 
@@ -588,14 +587,14 @@ class StyleTransfer:
             logger.debug(f"Skipping short paragraph: {paragraph[:50]}...")
             return paragraph, 1.0
 
-        word_count = len(paragraph.split())
-        logger.debug(f"Translating paragraph: {word_count} words")
-
         # ========================================
         # STEP 0: Extract and preserve references [^N]
         # ========================================
         # References are stripped before processing and reinjected at the end
         paragraph_clean, ref_map = extract_references(paragraph)
+
+        word_count = len(paragraph_clean.split())
+        logger.debug(f"Translating paragraph: {word_count} words")
 
         # Save original for semantic verification (before any expansion)
         original_for_verification = paragraph_clean
@@ -707,12 +706,8 @@ class StyleTransfer:
         final_content = content_for_generation
         use_raw_prompt = False
         if self.config.use_persona and PERSONA_AVAILABLE:
-            persona = get_persona_config(self.author)
             final_content = build_persona_prompt(
                 content=content_for_generation,
-                author=self.author,
-                persona=persona,
-                vocabulary_palette=persona.adjective_themes[:10],
                 structural_guidance=structural_guidance,
                 grafting_guidance=grafting_guidance,
                 target_words=target_words,  # Pass word count to match training format
@@ -749,7 +744,7 @@ class StyleTransfer:
 
         # Track expansion at LoRA stage
         lora_words = len(output.split())
-        source_words = len(paragraph.split())
+        source_words = len(paragraph_clean.split())
         if lora_words > source_words * self.config.max_expansion_ratio:
             logger.warning(f"LoRA over-expanded: {lora_words} words vs {source_words} source ({lora_words/source_words:.0%})")
 
@@ -791,7 +786,7 @@ class StyleTransfer:
                     f"{len(semantic_result.missing_entities)} missing entities"
                 )
                 output = self._repair_missing_entities(
-                    source=paragraph,
+                    source=paragraph_clean,
                     output=output,
                     missing_entities=semantic_result.missing_entities,
                     max_attempts=self.config.max_repair_attempts,

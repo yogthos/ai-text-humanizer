@@ -320,5 +320,49 @@ class TestIntegration:
         assert stats.sentences_processed >= 1
 
 
+class TestConvenienceFunctionDefault:
+    """Bug: split_sentences() defaults max_length to 50 but
+    SentenceSplitterConfig defaults to 60."""
+
+    def test_convenience_default_matches_config(self):
+        """split_sentences() default should match SentenceSplitterConfig default."""
+        import inspect
+        from src.vocabulary.sentence_splitter import split_sentences, SentenceSplitterConfig
+
+        config_default = SentenceSplitterConfig().max_sentence_length
+        sig = inspect.signature(split_sentences)
+        func_default = sig.parameters['max_length'].default
+        assert func_default == config_default, (
+            f"split_sentences default ({func_default}) != "
+            f"SentenceSplitterConfig default ({config_default})"
+        )
+
+
+class TestConsistentWordCounting:
+    """Bug: original_lengths uses spaCy token count (includes punctuation),
+    result_lengths uses .split() (doesn't). Statistics are misleading."""
+
+    def test_word_counting_consistent(self):
+        """Both original and result lengths should use the same counting method."""
+        import inspect
+        from src.vocabulary.sentence_splitter import SentenceSplitter
+
+        source = inspect.getsource(SentenceSplitter.split)
+        # Both original and result counts should use the same method
+        # Either both spaCy tokens or both .split()
+        uses_spacy_for_original = "not t.is_space" in source
+        uses_split_for_result = "s.split()" in source or "result_lengths.append(len(s.split()))" in source
+
+        # They should be consistent — either both spaCy or both split
+        if uses_spacy_for_original and uses_split_for_result:
+            # Check if there's also a spaCy count for results, or
+            # the original also uses split
+            assert "sent.text.split()" in source or "sent_words = len(sent.text.split())" in source, (
+                "Inconsistent word counting: original uses spaCy tokens "
+                "(includes punctuation as separate tokens), "
+                "but result uses .split() (punctuation attached to words)"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

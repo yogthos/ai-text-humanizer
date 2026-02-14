@@ -29,10 +29,8 @@ CONFIGURATION:
 import random
 import re
 from pathlib import Path
-from typing import Any, List, Optional, Dict, TYPE_CHECKING
+from typing import Any, Optional, Dict, TYPE_CHECKING
 from functools import lru_cache
-
-from .config import PersonaConfig
 from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -226,9 +224,6 @@ def _detect_content_type(content: str) -> bool:
 
 def build_persona_prompt(
     content: str,
-    author: str,
-    persona: PersonaConfig,
-    vocabulary_palette: Optional[List[str]] = None,
     structural_guidance: Optional[str] = None,
     grafting_guidance: Optional['GraftingGuidance'] = None,
     target_words: Optional[int] = None,
