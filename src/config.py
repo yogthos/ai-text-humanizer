@@ -397,7 +397,7 @@ def load_config(config_path: str = "config.json") -> Config:
         if "entailment_threshold" not in gen_data:
             # Generation section exists but doesn't set threshold: use validation value
             config.generation.entailment_threshold = config.validation.entailment_threshold
-        elif "entailment_threshold" in gen_data:
+        else:
             logger.debug(
                 f"entailment_threshold set in both generation ({config.generation.entailment_threshold}) "
                 f"and validation ({config.validation.entailment_threshold}) sections. "

@@ -879,5 +879,39 @@ class TestReferenceMarkerWordCount:
         )
 
 
+class TestDeadCodeLoraInputWords:
+    """Bug: lora_input_words computed but never used in transfer_paragraph."""
+
+    def test_no_lora_input_words_in_source(self):
+        """transfer_paragraph should not compute unused lora_input_words."""
+        import inspect
+        from src.generation.transfer import StyleTransfer
+
+        source = inspect.getsource(StyleTransfer.transfer_paragraph)
+        assert "lora_input_words" not in source, (
+            "lora_input_words is dead code — computed but never used"
+        )
+
+
+class TestCleanPunctuationAbbreviations:
+    """Bug: _clean_punctuation_artifacts breaks abbreviations like U.S. -> U. S."""
+
+    def test_abbreviations_preserved(self):
+        """Abbreviations like U.S. should not get spaces inserted."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        st = StyleTransfer.__new__(StyleTransfer)
+        result = st._clean_punctuation_artifacts("The U.S. economy grew.")
+        assert "U.S." in result, f"Abbreviation broken: {result}"
+
+    def test_normal_missing_space_still_fixed(self):
+        """Normal missing spaces after punctuation should still be fixed."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+
+        st = StyleTransfer.__new__(StyleTransfer)
+        result = st._clean_punctuation_artifacts("The cat sat.The dog ran.")
+        assert "sat. The" in result, f"Missing space not fixed: {result}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -128,5 +128,20 @@ class TestRstripMatchesTraining:
         )
 
 
+class TestSynonymSwapDeadCode:
+    """Bug: synonym swap appends word[len(word_lower):] which is always empty."""
+
+    def test_no_trailing_slice_in_synonym_swap(self):
+        """Synonym swap should not append dead word[len(word_lower):]."""
+        import inspect
+        from src.utils import perturbation
+
+        source = inspect.getsource(perturbation.perturb_text)
+        assert "word[len(word_lower):]" not in source, (
+            "word[len(word_lower):] is dead code — len(word.lower()) == len(word) always, "
+            "so this always appends empty string"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

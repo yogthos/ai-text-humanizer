@@ -727,7 +727,6 @@ class StyleTransfer:
             raw_prompt=use_raw_prompt,
         )
         lora_output_words = len(output.split())
-        lora_input_words = len(content_for_generation.split())
         logger.info(f"LORA OUTPUT: {lora_output_words} words (target was {target_words})")
 
         # Check if LoRA output matches input (indicates no transformation)
@@ -917,7 +916,8 @@ class StyleTransfer:
 
         # Fix spacing around punctuation
         text = re.sub(r'\s+([.,;:!?])', r'\1', text)  # No space before
-        text = re.sub(r'([.,;:!?])([A-Za-z])', r'\1 \2', text)  # Space after
+        # Space after punctuation, but not between single uppercase letters (abbreviations like U.S.)
+        text = re.sub(r'([.,;:!?])(?!(?<=[A-Z]\.)[A-Z])([A-Za-z])', r'\1 \2', text)
 
         # Normalize multiple spaces
         text = re.sub(r'\s+', ' ', text)

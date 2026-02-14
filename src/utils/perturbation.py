@@ -87,7 +87,7 @@ def perturb_text(
                 # Preserve case
                 if word[0].isupper():
                     synonym = synonym.capitalize()
-                result.append(synonym + word[len(word_lower):])
+                result.append(synonym)
             else:
                 result.append(word)
 

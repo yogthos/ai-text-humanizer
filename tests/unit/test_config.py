@@ -549,3 +549,20 @@ class TestConfigFieldsForwarded:
 
         gen = GenerationConfig(rag_sample_size=500)
         assert gen.rag_sample_size == 500
+
+
+class TestRedundantElifInConfigSync:
+    """Bug: elif condition in entailment_threshold sync is always true (dead branch)."""
+
+    def test_no_redundant_elif_in_config_sync(self):
+        """The entailment_threshold sync should use else, not elif with redundant condition."""
+        import inspect
+        from src.config import load_config
+
+        source = inspect.getsource(load_config)
+        # After 'if "entailment_threshold" not in gen_data:', the elif condition
+        # 'elif "entailment_threshold" in gen_data:' is always true — should be 'else:'
+        assert 'elif "entailment_threshold" in gen_data:' not in source, (
+            "Redundant elif — after checking 'not in', the elif 'in' is always true. "
+            "Use 'else:' instead."
+        )
