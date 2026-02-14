@@ -5,7 +5,6 @@ Provides a terminal UI similar to Claude Code for interactive style transfer.
 
 import sys
 import os
-import textwrap
 import readline
 from typing import Optional
 from dataclasses import dataclass
@@ -142,7 +141,7 @@ class StyleREPL:
 
         # Instructions
         print()
-        print(self._color("  Enter a paragraph to transform (press Enter twice to submit)", Colors.DIM))
+        print(self._color("  Enter a paragraph to transform (press Enter to submit)", Colors.DIM))
         print(self._color("  Generates 5 variations (Ctrl+C to cancel)", Colors.DIM))
         print(self._color("  Commands: /help, /clear, /history, /quit", Colors.DIM))
         print()
@@ -158,7 +157,7 @@ class StyleREPL:
         print(f"  {self._color('/quit', Colors.CYAN)}     Exit the REPL")
         print()
         print(self._color("How it works:", Colors.BOLD))
-        print("  1. Enter a paragraph (press Enter twice to submit)")
+        print("  1. Enter a paragraph (press Enter to submit)")
         print("  2. Text is neutralized via Round-Trip Translation (RTT)")
         print("  3. LoRA generates 5 variations (shown progressively)")
         print("  4. Press Ctrl+C during generation to stop early")
@@ -211,23 +210,22 @@ class StyleREPL:
         print()
 
     def _print_wrapped(self, text: str, indent: int = 2) -> None:
-        """Print text with word wrapping."""
-        width = get_terminal_width() - indent - 2
-        wrapper = textwrap.TextWrapper(
-            width=width,
-            initial_indent=" " * indent,
-            subsequent_indent=" " * indent,
-        )
+        """Print text as continuous lines for clean copy-paste.
 
+        Each paragraph is printed as a single line so terminal soft-wraps
+        it visually, but selecting and copying gives text without embedded
+        line breaks.
+        """
+        prefix = " " * indent
         for paragraph in text.split("\n\n"):
             if paragraph.strip():
-                print(wrapper.fill(paragraph))
+                # Join any internal newlines into one line
+                print(prefix + " ".join(paragraph.split()))
                 print()
 
     def _read_input(self) -> Optional[str]:
-        """Read multi-line input until double Enter."""
+        """Read input until Enter on a blank line."""
         lines = []
-        empty_count = 0
 
         print(self._color("│ ", Colors.BLUE), end="", flush=True)
 
@@ -242,20 +240,17 @@ class StyleREPL:
                     return None
 
                 if not line:
-                    empty_count += 1
-                    if empty_count >= 2 and lines:
-                        # Double enter - submit
+                    if lines:
+                        # Single blank line after content - submit
                         break
-                    elif empty_count >= 3:
-                        # Triple enter with no content - skip
+                    else:
+                        # Blank line with no content - skip
                         return ""
                 else:
-                    empty_count = 0
                     lines.append(line)
 
                 # Show continuation prompt
-                if empty_count == 0:
-                    print(self._color("│ ", Colors.BLUE), end="", flush=True)
+                print(self._color("│ ", Colors.BLUE), end="", flush=True)
         except KeyboardInterrupt:
             print()
             return ""

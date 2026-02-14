@@ -272,10 +272,10 @@ class TestRunReplConfig:
 
 
 class TestReplInputSubmission:
-    """Tests for REPL input submission behavior (Bug 12)."""
+    """Tests for REPL input submission behavior."""
 
-    def test_single_enter_does_not_submit(self):
-        """Single Enter after content should NOT submit."""
+    def test_single_enter_submits(self):
+        """Single Enter (blank line) after content should submit."""
         from src.repl.repl import StyleREPL, REPLConfig
 
         config = REPLConfig(author="Test", adapter_path="/test", use_color=False)
@@ -285,31 +285,25 @@ class TestReplInputSubmission:
         # Simulate: "Hello" then one empty line
         inputs = iter(["Hello", ""])
         with patch('builtins.input', side_effect=inputs):
-            try:
-                result = repl._read_input()
-            except StopIteration:
-                # If we run out of inputs, it means single enter didn't submit
-                result = None
+            result = repl._read_input()
 
-        # Should NOT have submitted yet (needs double enter)
-        # The fact that we get StopIteration means it kept asking for more input
-        assert result is None or result == ""
+        assert result is not None
+        assert "Hello" in result
 
-    def test_double_enter_submits(self):
-        """Double Enter after content should submit."""
+    def test_blank_enter_with_no_content_skips(self):
+        """Blank Enter with no content should return empty string."""
         from src.repl.repl import StyleREPL, REPLConfig
 
         config = REPLConfig(author="Test", adapter_path="/test", use_color=False)
         mock_transfer = MagicMock()
         repl = StyleREPL(mock_transfer, config)
 
-        # Simulate: "Hello" then two empty lines
-        inputs = iter(["Hello", "", ""])
+        # Simulate: just an empty line (no content)
+        inputs = iter([""])
         with patch('builtins.input', side_effect=inputs):
             result = repl._read_input()
 
-        assert result is not None
-        assert "Hello" in result
+        assert result == ""
 
 
 class TestTqdmNotGloballyDisabled:
