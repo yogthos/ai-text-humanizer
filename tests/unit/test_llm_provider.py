@@ -171,6 +171,26 @@ class TestProviderFactory:
         assert "Unknown LLM provider" in str(exc_info.value)
 
 
+class TestOllamaLogitBias:
+    """Tests for Ollama accepting logit_bias parameter (Bug 5 Round 3)."""
+
+    def test_ollama_call_api_accepts_logit_bias(self):
+        """_call_api(messages, logit_bias={}) should not raise TypeError.
+
+        The base class _call_with_retry passes logit_bias to _call_api,
+        so Ollama must accept it even though Ollama API doesn't support it.
+        """
+        from src.llm.ollama import OllamaProvider
+        import inspect
+
+        sig = inspect.signature(OllamaProvider._call_api)
+        params = list(sig.parameters.keys())
+        assert "logit_bias" in params, (
+            f"OllamaProvider._call_api must accept logit_bias parameter. "
+            f"Current params: {params}"
+        )
+
+
 class TestCallWithHistory:
     """Test conversation history support."""
 

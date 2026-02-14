@@ -951,8 +951,7 @@ class TestEnhancedStyleProfileFormatting:
         profile = EnhancedStyleProfile()
         formatted = profile.format_for_prompt()
 
-        # Even empty profiles should include critical anti-AI-tell guidance
-        assert "CRITICAL" in formatted
+        # Even empty profiles should include anti-AI-tell guidance
         assert "AVOID" in formatted
         assert "INVERTED OPENINGS" in formatted
 
@@ -1099,6 +1098,70 @@ class TestIntegrationWithRealisticCorpus:
 # Tests for RAG Bug Fixes (Bugs 11, 12)
 # =============================================================================
 
+class TestPunctuationHintsGeneric:
+    """Tests for punctuation hints being generic (Bug 2 Round 3)."""
+
+    def test_empty_cache_returns_generic_hints(self):
+        """Empty cache should return generic hints, not Lovecraft-specific."""
+        from src.rag.structural_rag import StructuralRAG
+        from unittest.mock import patch
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: None):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            rag.author = "Generic Author"
+            rag._cached_rhythms = []
+            rag._loaded = True  # Skip load_patterns
+
+            hints = rag.get_punctuation_hints()
+            # Should be generic
+            assert len(hints) >= 1
+            # Should NOT contain Lovecraft-specific terms
+            hint_text = " ".join(hints).lower()
+            assert "trailing thoughts" not in hint_text
+
+    def test_no_lovecraft_vocabulary_in_defaults(self):
+        """Default punctuation hints should not mention Lovecraft-specific terms."""
+        from src.rag.structural_rag import StructuralRAG
+        from unittest.mock import patch
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: None):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            rag.author = "Generic Author"
+            rag._cached_rhythms = []
+            rag._loaded = True
+
+            hints = rag.get_punctuation_hints()
+            hint_text = " ".join(hints).lower()
+            # Generic hints should not be a 3-item Lovecraft list
+            assert len(hints) <= 1 or "ellipsis" not in hint_text
+
+
+class TestExemplarFormatNotInTraining:
+    """Tests for exemplar sentences not being injected into prompt (Bug 9 Round 3)."""
+
+    def test_exemplar_sentences_not_in_prompt(self):
+        """format_for_prompt() with exemplars should NOT include 'Example sentences' section.
+
+        The LoRA was trained with constraints and persona frames only — not exemplar quotes.
+        """
+        from src.rag.structural_rag import StructuralGuidance
+
+        guidance = StructuralGuidance(
+            rhythm_pattern="LONG → SHORT",
+            punctuation_hints=["use dashes"],
+            length_guidance="Vary between 5 and 30 words",
+            fragment_hint="Use occasional fragments",
+            opening_hint="Vary openings",
+            exemplar_sentences=["The cosmos is vast.", "We are star stuff."],
+        )
+
+        formatted = guidance.format_for_prompt()
+        assert "Example sentences" not in formatted, (
+            "format_for_prompt() should not include 'Example sentences' section — "
+            "this format was never in training data"
+        )
+
+
 class TestExemplarWarning:
     """Tests for empty exemplar logging (Bug 11)."""
 
@@ -1122,6 +1185,34 @@ class TestExemplarWarning:
 
             assert result == []
             mock_logger.warning.assert_called_once()
+
+
+class TestRAGLoggingLevel:
+    """Tests for RAG logging levels (Bug 10 Round 3)."""
+
+    def test_corpus_query_failure_logged_as_warning(self):
+        """ChromaDB query failure should be logged at WARNING, not DEBUG."""
+        from src.rag.structural_rag import StructuralRAG
+
+        with patch.object(StructuralRAG, '__init__', lambda self, author: None):
+            rag = StructuralRAG.__new__(StructuralRAG)
+            rag.author = "Test"
+            rag.indexer = MagicMock()
+            rag._enhanced_profile = None
+            rag._cached_rhythms = []
+            rag._loaded = True
+
+            # Mock indexer to raise on retrieve_similar
+            rag.indexer.retrieve_similar.side_effect = Exception("ChromaDB error")
+            rag.indexer.get_random_chunks.side_effect = Exception("ChromaDB error")
+
+            with patch('src.rag.structural_rag.logger') as mock_logger:
+                result = rag._get_exemplar_sentences("test input")
+
+            # Should log warnings, not debug
+            assert mock_logger.warning.call_count >= 1, (
+                "Corpus query failure should be logged at WARNING level"
+            )
 
 
 class TestDefaultRhythmFallback:

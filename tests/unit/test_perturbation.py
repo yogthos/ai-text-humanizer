@@ -87,5 +87,46 @@ class TestPerturbationMatchesTraining:
         )
 
 
+class TestRstripMatchesTraining:
+    """Tests for rstrip matching training distribution (Bug 1 Round 3)."""
+
+    def test_rstrip_matches_training(self):
+        """Word ending with quote or hyphen should NOT have them stripped for matching.
+
+        Training strips only '.,!?;:' but inference was stripping '.,!?;:"\\'- '
+        which changes synonym/adjective matching behavior.
+        """
+        from src.utils.perturbation import perturb_text
+
+        # Word ending with apostrophe — rstrip should NOT remove it
+        # "don't" should match as "don't", not "don"
+        text = "don't won't it's he's"
+        random.seed(42)
+        result = perturb_text(text, perturbation_rate=0.0)
+        # With rate=0, no perturbation — all words preserved
+        assert "don't" in result
+
+        # Word ending with hyphen — should NOT be stripped
+        text2 = 'well-known self-made'
+        random.seed(42)
+        result2 = perturb_text(text2, perturbation_rate=0.0)
+        assert "well-known" in result2
+
+    def test_rstrip_chars_are_exactly_six(self):
+        """The rstrip call should use exactly 6 chars: .,!?;: matching training."""
+        import inspect
+        from src.utils import perturbation
+
+        source = inspect.getsource(perturbation.perturb_text)
+        # Should contain the training-matching rstrip
+        assert "rstrip('.,!?;:')" in source, (
+            "rstrip should use exactly '.,!?;:' to match training script"
+        )
+        # Should NOT contain the extended set
+        assert "rstrip('.,!?;:\"\\'\\-')" not in source.replace(" ", ""), (
+            "rstrip should NOT include quotes or hyphens"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

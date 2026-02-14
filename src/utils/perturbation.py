@@ -67,7 +67,7 @@ def perturb_text(
     should_drop_adjs = drop_adjectives and random.random() < 0.30
 
     for word in words:
-        word_lower = word.lower().rstrip('.,!?;:"\'-')
+        word_lower = word.lower().rstrip('.,!?;:')
 
         # Adjective dropping (per-call decision, not per-word)
         if should_drop_adjs and word_lower in adjectives_to_drop:

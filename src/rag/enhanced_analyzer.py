@@ -164,10 +164,10 @@ class OrganicComplexityProfile:
         # POSITIVE patterns FIRST - what TO DO (more effective than negatives)
         lines.append("=== DO THIS: HUMAN WRITING PATTERNS ===")
         lines.append("• START sentences mid-thought: 'And yet—', 'But here—', 'Strange, that...'")
-        lines.append("• USE sensory anchors: 'The cold seeped...', 'A faint odor of...'")
-        lines.append("• INTERRUPT yourself with em-dashes: 'The truth—if truth it was—'")
+        lines.append("• USE sensory anchors: 'The door opened...', 'A sound from...'")
+        lines.append("• INTERRUPT yourself with em-dashes: 'The answer—if it was one—'")
         lines.append("• VARY wildly: one 5-word fragment, then a 40-word sprawl")
-        lines.append("• EMBED your reaction: 'horrible to relate', 'I shudder to recall'")
+        lines.append("• EMBED your reaction: 'hard to explain', 'worth noting'")
         lines.append("• END abruptly sometimes. Just stop.")
         lines.append("")
 
@@ -227,7 +227,7 @@ class EnhancedStyleProfile:
         # IMPORTANT: Organic complexity guidance comes first for emphasis
         organic_instr = self.organic_complexity.to_instruction()
         if organic_instr:
-            sections.append(f"[ORGANIC COMPLEXITY - CRITICAL FOR HUMAN-LIKE OUTPUT]:\n{organic_instr}")
+            sections.append(f"Style:\n{organic_instr}")
 
         # Syntactic templates
         if self.syntactic_templates:
@@ -306,9 +306,10 @@ class EnhancedStructuralAnalyzer:
     }
 
     SENSORY_ADJECTIVES = {
-        'fetid', 'putrid', 'luminous', 'phosphorescent', 'writhing', 'pulsating',
-        'viscous', 'gelatinous', 'squamous', 'rugose', 'cyclopean', 'eldritch',
-        'gibbous', 'tenebrous', 'crepuscular', 'iridescent', 'opalescent',
+        'rough', 'smooth', 'sharp', 'dull', 'bright', 'dim',
+        'shimmering', 'gleaming', 'luminous', 'phosphorescent',
+        'viscous', 'pulsating', 'crepuscular', 'iridescent', 'opalescent',
+        'fetid', 'putrid', 'writhing',
     }
 
     def __init__(self):

@@ -55,12 +55,6 @@ class StructuralGuidance:
         """
         lines = []
 
-        # Exemplar sentences - show 2-3 examples, no verbose headers
-        if self.exemplar_sentences:
-            lines.append("Example sentences from this voice:")
-            for sent in self.exemplar_sentences[:3]:
-                lines.append(f'- "{sent}"')
-
         # Concise structural patterns (matching training simplicity)
         if self.rhythm_pattern:
             lines.append(f"Rhythm: {self.rhythm_pattern}")
@@ -173,12 +167,7 @@ class StructuralRAG:
         hints = []
 
         if not self._cached_rhythms:
-            # Lovecraft defaults
-            return [
-                "use em-dashes (—) for interruptions and asides",
-                "use semicolons to link related clauses",
-                "occasional ellipsis (...) for trailing thoughts",
-            ]
+            return ["vary punctuation for rhythm"]
 
         # Analyze cached rhythms for punctuation patterns
         dash_count = sum(1 for r in self._cached_rhythms if r.punctuation_density > 0.3)
@@ -275,7 +264,7 @@ class StructuralRAG:
             results = self.indexer.retrieve_similar(self.author, input_text, n=10)
             chunks = [r["text"] for r in results]
         except Exception as e:
-            logger.debug(f"Could not query similar chunks: {e}")
+            logger.warning(f"Could not query similar chunks: {e}")
             chunks = []
 
         # Fall back to random chunks if semantic search returned nothing
@@ -286,7 +275,7 @@ class StructuralRAG:
                     logger.debug(f"Using random chunks as fallback for exemplar sentences")
                     chunks = random_chunks
             except Exception as e:
-                logger.debug(f"Could not get random chunks: {e}")
+                logger.warning(f"Could not get random chunks: {e}")
 
         if not chunks:
             logger.warning(f"No exemplar sentences found for author '{self.author}' — corpus may be empty or unindexed")

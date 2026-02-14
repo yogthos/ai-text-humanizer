@@ -140,6 +140,38 @@ class TestLLMSpeakDictionary:
         assert LLM_SPEAK["cogwheel"] == "gear"
 
 
+class TestEmDashPreservation:
+    """Tests for em-dash preservation (Bug 4 Round 3)."""
+
+    def test_em_dashes_preserved_by_default(self):
+        """Em-dashes should NOT be unconditionally converted to commas/periods."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The truth—if truth it was—haunted him."
+        result, stats = reducer.reduce(text)
+        # Em-dashes should be preserved (they're a signature literary element)
+        assert "—" in result, (
+            f"Em-dashes should be preserved but were converted: '{result}'"
+        )
+
+    def test_excessive_em_dashes_reduced(self):
+        """Only reduce em-dashes if >3 in a single sentence."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The thing—dark—terrible—ancient—nameless—crept forward."
+        result, stats = reducer.reduce(text)
+        # Should still have some em-dashes but not all 5
+        em_count = result.count("—")
+        assert em_count <= 3, (
+            f"Excessive em-dashes should be reduced to <=3 but got {em_count}: '{result}'"
+        )
+
+    def test_single_em_dash_preserved(self):
+        """A single em-dash should always be preserved."""
+        reducer = RepetitionReducer(threshold=3)
+        text = "The cosmos—vast and terrifying—surrounded us."
+        result, stats = reducer.reduce(text)
+        assert "—" in result
+
+
 class TestNoLegitimateWordsInLLMSpeak:
     """Tests for legitimate words removed from LLM_SPEAK (Bug 6)."""
 

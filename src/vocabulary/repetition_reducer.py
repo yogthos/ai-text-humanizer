@@ -427,21 +427,34 @@ class RepetitionReducer:
 
         changes = 0
 
-        # Em dash (—) handling
-        # Parenthetical em dashes -> commas: "The system—which is complex—works"
-        em_paren = re.findall(r'—([^—]{1,50})—', text)
-        for match in em_paren:
-            text = text.replace(f'—{match}—', f', {match}, ', 1)
-            changes += 1
-
-        # Em dash before clause -> period: "This is key—it matters"
-        text, n = re.subn(r'—\s*(it|this|that|they|we|he|she|the|a|an)\b',
-                         lambda m: '. ' + m.group(1).capitalize(), text, flags=re.IGNORECASE)
-        changes += n
-
-        # Remaining em dashes -> comma
-        text, n = re.subn(r'—', ', ', text)
-        changes += n
+        # Em dash (—) handling — preserve by default, only reduce excessive usage
+        # Em-dashes are a signature literary element for many authors
+        # Only reduce if a sentence has >3 em-dashes
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        rebuilt = []
+        for sent in sentences:
+            em_count = sent.count('—')
+            if em_count > 3:
+                # Reduce excess: keep first 2 em-dashes, convert rest to commas
+                kept = 0
+                result_chars = []
+                i = 0
+                while i < len(sent):
+                    if sent[i] == '—':
+                        if kept < 2:
+                            result_chars.append('—')
+                            kept += 1
+                        else:
+                            result_chars.append(',')
+                            changes += 1
+                        i += 1
+                    else:
+                        result_chars.append(sent[i])
+                        i += 1
+                rebuilt.append(''.join(result_chars))
+            else:
+                rebuilt.append(sent)
+        text = ' '.join(rebuilt)
 
         # Semicolon handling - only between independent clauses, not in lists
         # List pattern: "X; Y; and Z" or "X; Y; Z" - keep as commas

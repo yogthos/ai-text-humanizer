@@ -41,6 +41,35 @@ class TestSemanticVerifierSingleton:
         assert v1 is v2
 
 
+class TestPOSConsistency:
+    """Tests for POS tag consistency across extraction points (Bug 6 Round 3)."""
+
+    def test_content_pos_tags_consistent(self):
+        """All content word extraction points should use the same POS set.
+
+        The verifier uses POS tags in 3 places:
+        - _check_sentence_grounding (lines 285, 311)
+        - _check_content_coverage (line 405)
+        All should use the same CONTENT_POS_TAGS constant.
+        """
+        from src.validation.semantic_verifier import CONTENT_POS_TAGS
+
+        expected = {'NOUN', 'VERB', 'ADJ', 'ADV', 'PROPN', 'NUM'}
+        assert CONTENT_POS_TAGS == expected, (
+            f"CONTENT_POS_TAGS should be {expected} but is {CONTENT_POS_TAGS}"
+        )
+
+    def test_content_pos_tags_used_in_source(self):
+        """Verify CONTENT_POS_TAGS is actually used in the source code."""
+        import inspect
+        import src.validation.semantic_verifier as sv
+
+        source = inspect.getsource(sv.SemanticVerifier)
+        assert "CONTENT_POS_TAGS" in source, (
+            "SemanticVerifier should use CONTENT_POS_TAGS constant"
+        )
+
+
 class TestEntityStemMatching:
     """Tests for entity stem matching false positives (Bug 11)."""
 

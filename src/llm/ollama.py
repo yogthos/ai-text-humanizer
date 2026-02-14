@@ -54,7 +54,8 @@ class OllamaProvider(LLMProvider):
         messages: List[Message],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        require_json: bool = False
+        require_json: bool = False,
+        logit_bias: Optional[Dict] = None,
     ) -> LLMResponse:
         """Make API call to Ollama."""
         url = f"{self.base_url}/api/chat"

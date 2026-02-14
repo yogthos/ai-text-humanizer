@@ -18,6 +18,9 @@ from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Unified POS tag set for content word extraction (used in grounding + coverage)
+CONTENT_POS_TAGS = {'NOUN', 'VERB', 'ADJ', 'ADV', 'PROPN', 'NUM'}
+
 # Lazy-loaded models
 _nli_model = None
 _nlp = None
@@ -282,7 +285,7 @@ class SemanticVerifier:
             doc = nlp(src)
             words = set()
             for token in doc:
-                if token.pos_ in {'NOUN', 'VERB', 'ADJ', 'PROPN', 'NUM'} and not token.is_stop:
+                if token.pos_ in CONTENT_POS_TAGS and not token.is_stop:
                     words.add(token.lemma_.lower())
             source_content_words.append(words)
 
@@ -308,7 +311,7 @@ class SemanticVerifier:
             out_doc = nlp(out_sent)
             out_words = set()
             for token in out_doc:
-                if token.pos_ in {'NOUN', 'VERB', 'ADJ', 'PROPN', 'NUM'} and not token.is_stop:
+                if token.pos_ in CONTENT_POS_TAGS and not token.is_stop:
                     out_words.add(token.lemma_.lower())
 
             if not out_words:
@@ -401,8 +404,8 @@ class SemanticVerifier:
         source_doc = nlp(source)
         output_doc = nlp(output)
 
-        # Extract content words (nouns, verbs, adjectives, adverbs)
-        content_pos = {'NOUN', 'VERB', 'ADJ', 'ADV', 'PROPN'}
+        # Extract content words using unified POS tag set
+        content_pos = CONTENT_POS_TAGS
 
         def get_content_words(doc) -> Set[str]:
             words = set()
