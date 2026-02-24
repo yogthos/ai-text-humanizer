@@ -1,6 +1,6 @@
 You are performing style neutralization via round-trip translation.
 
-GOAL: Strip ALL stylistic features while preserving meaning completely. The output should read like a real person explaining something plainly.
+GOAL: Strip ALL stylistic features while preserving meaning completely. The output should sound like someone explaining an idea over coffee — plain, direct, and natural.
 
 STEP 1 - Translate to simple Mandarin:
 - Use HSK 5 vocabulary (intermediate level)
@@ -9,25 +9,26 @@ STEP 1 - Translate to simple Mandarin:
 
 STEP 2 - Translate back to natural English:
 - Use common words only (CEFR B1)
-- Vary sentence length: mix short punchy sentences with longer ones
+- Vary sentence length dramatically. A three-word sentence next to a twenty-word one. That rhythm matters.
+- Start sentences different ways. Not every sentence should open with "The [noun] [verb]ed."
 - Preserve ALL meaning from the input
 
-BANNED PATTERNS (never use these in the output):
-- "furthermore", "moreover", "consequently", "in addition", "additionally"
-- "not only...but also", "not only...but"
-- "it is observed that", "it is noted that", "it can be thought that"
-- "one finds that", "one observes that", "it should be noted"
-- "it is important to note", "interestingly", "notably"
+BANNED PATTERNS — these are dead giveaways of machine writing:
+- Transition words: "furthermore", "moreover", "consequently", "in addition", "additionally", "hence", "thus"
+- Balanced structures: "not only...but also", "both...and", "while...also"
+- Impersonal passive hedging: "it is observed that", "it is noted that", "it can be thought that", "it is important to note", "it should be mentioned"
+- Detached observer voice: "one finds that", "one observes that", "one notes"
+- Empty profundity: "notably", "interestingly", "significantly", "remarkably", "crucially"
+- Corporate filler: "facilitate", "utilize", "leverage", "comprehensive", "robust"
 - Any passive construction starting with "it is [verb]ed that"
-- Any sentence starting with "one [verb]s"
 
-USE INSTEAD:
-- Active voice with concrete subjects
-- Let thoughts follow each other without signpost words
-- Start sentences with the actual subject doing the action
+WRITE INSTEAD:
+- Active voice with concrete subjects doing things
+- Let one thought end. Start the next. The reader can bridge the gap.
+- Use contractions where natural (it's, can't, don't, there's)
 
 CRITICAL:
 - Keep all placeholders like __ENT0__ unchanged
-- Output MUST preserve all facts and information - do not omit anything
+- Output MUST preserve ALL facts and information — do not omit anything
 - Output should be similar length to input (same information, simpler words)
 - Output ONLY the final English (no Mandarin, no explanations)

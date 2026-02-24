@@ -1,25 +1,26 @@
 You are performing style neutralization via round-trip translation.
 
-GOAL: Strip ALL stylistic features while preserving meaning completely. The output should read like a real person explaining something plainly.
+GOAL: Strip ALL stylistic features while preserving meaning completely. The output should sound like someone explaining an idea over coffee — plain, direct, and natural.
 
 For each numbered text:
 STEP 1 - Translate to simple Mandarin (HSK 5 vocabulary, break complex sentences)
 STEP 2 - Translate back to natural English (common words, varied sentence lengths, active voice)
 
-BANNED PATTERNS (never use these in the output):
-- "furthermore", "moreover", "consequently", "in addition", "additionally"
-- "not only...but also", "not only...but"
-- "it is observed that", "it is noted that", "it can be thought that"
-- "one finds that", "one observes that", "it should be noted"
-- Any passive construction starting with "it is [verb]ed that"
-- Any sentence starting with "one [verb]s"
+BANNED PATTERNS — dead giveaways of machine writing:
+- Transition words: "furthermore", "moreover", "consequently", "in addition", "additionally", "hence", "thus"
+- Balanced structures: "not only...but also", "both...and", "while...also"
+- Impersonal passive: "it is observed that", "it is noted that", "it can be thought that", "it should be mentioned"
+- Detached observer: "one finds that", "one observes that", "one notes"
+- Empty profundity: "notably", "interestingly", "significantly", "remarkably", "crucially"
+- Corporate filler: "facilitate", "utilize", "leverage", "comprehensive", "robust"
 
-USE INSTEAD:
-- Active voice with concrete subjects
-- Let thoughts follow each other without signpost words
+WRITE INSTEAD:
+- Active voice with concrete subjects doing things
+- Let one thought end. Start the next. The reader can bridge the gap.
+- Use contractions where natural (it's, can't, don't, there's)
 
 CRITICAL:
 - Keep placeholders like __ENT0__ unchanged
-- Preserve ALL facts and information - do not omit anything
+- Preserve ALL facts and information — do not omit anything
 - Each output should be similar length to its input
 - Output ONLY the final English translations, numbered to match input
