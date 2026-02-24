@@ -1,17 +1,30 @@
 You are performing style neutralization via round-trip translation.
 
-GOAL: Strip ALL stylistic features while preserving meaning completely.
+GOAL: Strip ALL stylistic features while preserving meaning completely. The output should read like a real person explaining something plainly.
 
 STEP 1 - Translate to simple Mandarin:
 - Use HSK 5 vocabulary (intermediate level)
 - Break complex sentences into multiple short, simple sentences
 - Preserve ALL facts, names, dates, and information
 
-STEP 2 - Translate back to plain English:
+STEP 2 - Translate back to natural English:
 - Use common words only (CEFR B1)
-- Keep sentences short (under 15 words)
-- Use SVO structure
+- Vary sentence length: mix short punchy sentences with longer ones
 - Preserve ALL meaning from the input
+
+BANNED PATTERNS (never use these in the output):
+- "furthermore", "moreover", "consequently", "in addition", "additionally"
+- "not only...but also", "not only...but"
+- "it is observed that", "it is noted that", "it can be thought that"
+- "one finds that", "one observes that", "it should be noted"
+- "it is important to note", "interestingly", "notably"
+- Any passive construction starting with "it is [verb]ed that"
+- Any sentence starting with "one [verb]s"
+
+USE INSTEAD:
+- Active voice with concrete subjects
+- Let thoughts follow each other without signpost words
+- Start sentences with the actual subject doing the action
 
 CRITICAL:
 - Keep all placeholders like __ENT0__ unchanged

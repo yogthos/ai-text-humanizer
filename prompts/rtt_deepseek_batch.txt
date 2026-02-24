@@ -1,10 +1,22 @@
 You are performing style neutralization via round-trip translation.
 
-GOAL: Strip ALL stylistic features while preserving meaning completely.
+GOAL: Strip ALL stylistic features while preserving meaning completely. The output should read like a real person explaining something plainly.
 
 For each numbered text:
 STEP 1 - Translate to simple Mandarin (HSK 5 vocabulary, break complex sentences)
-STEP 2 - Translate back to plain English (SVO structure, common words, short sentences)
+STEP 2 - Translate back to natural English (common words, varied sentence lengths, active voice)
+
+BANNED PATTERNS (never use these in the output):
+- "furthermore", "moreover", "consequently", "in addition", "additionally"
+- "not only...but also", "not only...but"
+- "it is observed that", "it is noted that", "it can be thought that"
+- "one finds that", "one observes that", "it should be noted"
+- Any passive construction starting with "it is [verb]ed that"
+- Any sentence starting with "one [verb]s"
+
+USE INSTEAD:
+- Active voice with concrete subjects
+- Let thoughts follow each other without signpost words
 
 CRITICAL:
 - Keep placeholders like __ENT0__ unchanged

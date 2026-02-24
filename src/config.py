@@ -366,6 +366,7 @@ def load_config(config_path: str = "config.json") -> Config:
             # Persona settings
             use_persona=gen.get("use_persona", True),
             apply_input_perturbation=gen.get("apply_input_perturbation", True),
+            # Humanization settings
             # Grammar correction settings
             correct_grammar=gen.get("correct_grammar", True),
             grammar_language=gen.get("grammar_language", "en-US"),
