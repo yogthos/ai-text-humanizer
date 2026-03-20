@@ -1196,27 +1196,29 @@ class StyleTransfer:
                 continue
 
             # Check if paragraph ends incomplete using spaCy
-            if para:
-                # Get the last sentence and check if it's incomplete
-                sentences = split_into_sentences(para)
-                if sentences:
-                    last_sent = sentences[-1]
-                    is_incomplete, reason = is_sentence_incomplete(last_sent)
-                    if is_incomplete and reason != "no ending punctuation":
-                        logger.warning(f"Paragraph ends incomplete ({reason}), truncating: ...{para[-50:]}")
-                        # Keep only complete sentences
-                        complete = get_complete_sentences(para)
-                        if complete:
-                            para = " ".join(complete)
+            sentences = split_into_sentences(para)
+            para_modified = False
+            if sentences:
+                last_sent = sentences[-1]
+                is_incomplete, reason = is_sentence_incomplete(last_sent)
+                if is_incomplete and reason != "no ending punctuation":
+                    logger.warning(f"Paragraph ends incomplete ({reason}), truncating: ...{para[-50:]}")
+                    # Keep only complete sentences
+                    complete = get_complete_sentences(para)
+                    if complete:
+                        para = " ".join(complete)
+                        para_modified = True
+                    else:
+                        # Can't salvage - add period if long enough
+                        if len(para.split()) > 10:
+                            para = para + "."
+                            para_modified = True
                         else:
-                            # Can't salvage - add period if long enough
-                            if len(para.split()) > 10:
-                                para = para + "."
-                            else:
-                                continue
+                            continue
 
             # Check for internal repetition (same sentence repeated)
-            sentences = split_into_sentences(para)
+            if para_modified:
+                sentences = split_into_sentences(para)
             if len(sentences) > 1:
                 unique_sentences = []
                 seen_sents = set()

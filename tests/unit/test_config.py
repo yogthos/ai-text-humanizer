@@ -166,13 +166,28 @@ class TestDefaultConfig:
         assert "mlx" in config["llm"]["providers"]
 
     def test_default_values(self):
-        """Test that Config has sensible defaults."""
+        """Test that Config has sensible defaults matching config.json."""
         config = Config()
 
         assert config.llm.max_retries == 5
         assert config.generation.max_repair_attempts == 5  # default is 5
         assert config.validation.entailment_threshold == 0.7
-        assert config.validation.max_hallucinations_before_reject == 2
+        assert config.validation.max_hallucinations_before_reject == 3
+
+    def test_defaults_match_config_json(self):
+        """Dataclass defaults should match config.json to avoid silent divergence."""
+        from src.config import GenerationConfig, ValidationConfig
+
+        gen = GenerationConfig()
+        val = ValidationConfig()
+
+        # These defaults were out of sync with config.json — verify they match
+        assert gen.restructure_sentences is False, (
+            "restructure_sentences default should be False (matches config.json)"
+        )
+        assert val.max_hallucinations_before_reject == 3, (
+            "max_hallucinations_before_reject default should be 3 (matches config.json)"
+        )
 
 
 class TestLLMConfig:

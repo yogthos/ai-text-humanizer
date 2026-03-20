@@ -90,22 +90,27 @@ class TestEntityStemMatching:
         )
 
     def test_mark_marker_not_matched(self):
-        """'Mark' and 'marker' should not match (length difference > 2)."""
+        """'Mark' and 'marker' should not match (different words)."""
         from src.validation.semantic_verifier import SemanticVerifier
 
         verifier = SemanticVerifier.__new__(SemanticVerifier)
         verifier.grounding_threshold = 0.7
 
-        mark_stem = verifier._get_entity_stem("Mark")
         marker_stem = verifier._get_entity_stem("marker")
-
-        # With length check: |len(mark) - len(marker)| should be > 2
         result = verifier._entity_matches_any_stem("Mark", {marker_stem})
-        # If stems are "mark" vs "mark" (same 4 chars), they'd match
-        # But "marker" stem is longer, so length diff check helps
-        # The key fix is requiring stems within 2 chars
-        if abs(len(mark_stem) - len(marker_stem)) > 2:
-            assert result is False
+        assert result is False, "'Mark' and 'marker' are different words and should not match"
+
+    def test_short_prefix_not_matched(self):
+        """Short stems (< 5 chars) should not match via prefix."""
+        from src.validation.semantic_verifier import SemanticVerifier
+
+        verifier = SemanticVerifier.__new__(SemanticVerifier)
+        verifier.grounding_threshold = 0.7
+
+        # "plan" vs "planet" — short stem prefix match should be rejected
+        planet_stem = verifier._get_entity_stem("planet")
+        result = verifier._entity_matches_any_stem("plan", {planet_stem})
+        assert result is False, "'plan' and 'planet' should not match via short prefix"
 
     def test_communist_communism_matched(self):
         """'Communist' and 'communism' should match (same root)."""

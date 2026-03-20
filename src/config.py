@@ -105,7 +105,7 @@ class GenerationConfig:
     grammar_language: str = "en-US"  # Language variant: "en-US" or "en-GB"
 
     # Sentence restructuring settings
-    restructure_sentences: bool = True  # Enable balanced→inverted restructuring
+    restructure_sentences: bool = False  # Enable balanced→inverted restructuring
     split_sentences: bool = True  # Enable sentence splitting at conjunction points
     max_sentence_length: int = 60  # Words - split sentences longer than this
     sentence_length_variance: float = 0.4  # Variance factor (0.4 = 60%-140% of max)
@@ -140,7 +140,7 @@ class LoRAAdapterConfig:
 class ValidationConfig:
     """Configuration for validation."""
     entailment_threshold: float = 0.7  # Min NLI score for semantic preservation
-    max_hallucinations_before_reject: int = 2  # Trigger repair after this many hallucinations
+    max_hallucinations_before_reject: int = 3  # Trigger repair after this many hallucinations
 
 
 @dataclass

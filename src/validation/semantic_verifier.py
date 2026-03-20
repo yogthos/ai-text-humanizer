@@ -551,9 +551,11 @@ class SemanticVerifier:
             return True
 
         # Check if any stem is a prefix of entity or vice versa
-        # Require stems to match within 2 chars of each other to avoid false positives
+        # Require min 5-char stems for prefix matching to avoid false positives
+        # (e.g., "mark"/"marker", "plan"/"planet" are different words)
         for stem in stems:
-            if abs(len(stem) - len(entity_stem)) <= 2 and (
+            min_len = min(len(stem), len(entity_stem))
+            if min_len >= 5 and abs(len(stem) - len(entity_stem)) <= 2 and (
                 stem.startswith(entity_stem) or entity_stem.startswith(stem)
             ):
                 return True
