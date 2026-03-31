@@ -129,12 +129,21 @@ python restyle.py input.txt -o output.txt --no-verify
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--adapter PATH[:SCALE]` | - | LoRA adapter path with optional scale |
-| `--author NAME` | - | Author name |
+| `--adapter PATH[:SCALE]` | - | LoRA adapter path with optional scale (can repeat to blend) |
+| `--author NAME` | - | Author name (optional if adapter has metadata) |
+| `--temperature FLOAT` | config | Generation temperature (overrides config.json) |
+| `--perspective MODE` | config | Output perspective: `preserve`, `first_person_singular`, `first_person_plural`, `third_person`, `author_voice_third_person` |
+| `--lora-scale FLOAT` | config | LoRA influence scale (overrides config.json) |
 | `--checkpoint FILE` | - | Use specific training checkpoint |
-| `--temperature` | config | Generation temperature (overrides config.json) |
+| `--expand` | false | Enable texture expansion (pre-expand via critic model) |
+| `--no-expand` | false | Disable texture expansion (overrides config.json) |
 | `--no-verify` | false | Skip entailment verification |
 | `--repl` | false | Interactive mode |
+| `--list-adapters` | false | List available LoRA adapters |
+| `--list-rag` | false | List authors indexed in RAG |
+| `--index-corpus FILE` | - | Index a corpus file for RAG (requires `--author`) |
+| `--clear-rag` | false | Clear existing RAG chunks when indexing |
+| `-c, --config PATH` | config.json | Path to config file |
 | `-v` | false | Verbose output |
 
 ### Interactive REPL
@@ -345,9 +354,15 @@ Key settings in `config.json`. All LoRA settings are per-adapter under `lora_ada
 ```json
 {
   "generation": {
+    "expand_for_texture": false,
+    "apply_input_perturbation": true,
+    "use_structural_rag": true,
+    "use_structural_grafting": true,
+    "use_persona": true,
     "lora_adapters": {
       "lora_adapters/lovecraft_32b": {
         "enabled": true,
+        "expand_for_texture": false,
         "scale": 2.0,
         "temperature": 0.7,
         "top_p": 0.95,
@@ -363,21 +378,31 @@ Key settings in `config.json`. All LoRA settings are per-adapter under `lora_ada
         "temperature": 0.8,
         "worldview": "lovecraft_worldview.txt"
       }
-    },
-    "use_structural_rag": true,
-    "use_structural_grafting": true,
-    "use_persona": true
+    }
   }
 }
 ```
 
-| Setting | Description |
-|---------|-------------|
-| `enabled` | Whether this adapter is active (toggle without removing config) |
-| `scale` | LoRA influence (0.0=base only, 1.0=full, >1.0=amplified) |
-| `temperature` | Generation creativity (lower=more coherent) |
-| `worldview` | Persona prompt file in `prompts/` directory |
-| `checkpoint` | Specific checkpoint subdirectory to use (e.g., `checkpoint-600`) |
+#### Generation Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `expand_for_texture` | `false` | Pre-expand content via critic model before LoRA (required for longer output) |
+| `apply_input_perturbation` | `false` | Add 8% input noise to match training distribution |
+| `use_structural_rag` | `true` | Retrieve rhythm patterns from corpus |
+| `use_structural_grafting` | `true` | Copy rhetorical skeletons from similar passages |
+| `use_persona` | `true` | Apply author persona frames |
+
+#### Per-Adapter Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | - | Whether this adapter is active (toggle without removing config) |
+| `expand_for_texture` | global | Per-adapter override (omit to use global setting, CLI flags take priority) |
+| `scale` | `1.0` | LoRA influence (0.0=base only, 1.0=full, >1.0=amplified) |
+| `temperature` | `0.7` | Generation creativity (lower=more coherent) |
+| `worldview` | - | Persona prompt file in `prompts/` directory |
+| `checkpoint` | - | Specific checkpoint subdirectory to use (e.g., `checkpoint-600`) |
 
 List configured adapters and their status:
 
