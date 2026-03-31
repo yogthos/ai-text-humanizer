@@ -66,7 +66,7 @@ class TransferConfig:
     # Verification settings
     verify_entailment: bool = True
     entailment_threshold: float = 0.7
-    max_hallucinations_before_reject: int = 2  # Trigger repair after this many hallucinations
+    max_hallucinations_before_reject: int = 3  # Trigger repair after this many hallucinations
 
     # Repair settings
     max_repair_attempts: int = 5

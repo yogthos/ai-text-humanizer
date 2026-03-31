@@ -141,7 +141,7 @@ class LoRAAdapterConfig:
 class ValidationConfig:
     """Configuration for validation."""
     entailment_threshold: float = 0.7  # Min NLI score for semantic preservation
-    max_hallucinations_before_reject: int = 2  # Trigger repair after this many hallucinations
+    max_hallucinations_before_reject: int = 3  # Trigger repair after this many hallucinations
 
 
 @dataclass
@@ -389,7 +389,7 @@ def load_config(config_path: str = "config.json") -> Config:
     if "validation" in data:
         val_data = data["validation"]
         config.validation.entailment_threshold = val_data.get("entailment_threshold", 0.7)
-        config.validation.max_hallucinations_before_reject = val_data.get("max_hallucinations_before_reject", 2)
+        config.validation.max_hallucinations_before_reject = val_data.get("max_hallucinations_before_reject", 3)
 
     # Sync entailment_threshold: validation → generation when not explicitly set in generation
     if "validation" in data and "generation" not in data:
@@ -471,7 +471,7 @@ def create_default_config() -> Dict:
         },
         "validation": {
             "entailment_threshold": 0.7,
-            "max_hallucinations_before_reject": 2
+            "max_hallucinations_before_reject": 3
         },
         "log_level": "INFO"
     }
