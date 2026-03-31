@@ -134,13 +134,14 @@ class LoRAAdapterConfig:
     load_in_4bit: bool = True  # Use 4-bit quantization (PyTorch with CUDA only)
     load_in_8bit: bool = False  # Use 8-bit quantization (PyTorch with CUDA only)
     hf_adapter_path: Optional[str] = None  # HuggingFace adapter path (if different from local)
+    expand_for_texture: Optional[bool] = None  # Per-adapter override for texture expansion (None = use global)
 
 
 @dataclass
 class ValidationConfig:
     """Configuration for validation."""
     entailment_threshold: float = 0.7  # Min NLI score for semantic preservation
-    max_hallucinations_before_reject: int = 3  # Trigger repair after this many hallucinations
+    max_hallucinations_before_reject: int = 2  # Trigger repair after this many hallucinations
 
 
 @dataclass
@@ -221,7 +222,7 @@ def _parse_llm_provider_config(data: Dict) -> LLMProviderConfig:
 _KNOWN_ADAPTER_FIELDS = {
     "enabled", "scale", "temperature", "top_p", "min_p", "repetition_penalty",
     "max_tokens", "worldview", "fiction_markers", "checkpoint", "backend", "device",
-    "load_in_4bit", "load_in_8bit", "hf_adapter_path",
+    "load_in_4bit", "load_in_8bit", "hf_adapter_path", "expand_for_texture",
 }
 
 
@@ -248,6 +249,7 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         load_in_4bit=data.get("load_in_4bit", True),
         load_in_8bit=data.get("load_in_8bit", False),
         hf_adapter_path=data.get("hf_adapter_path"),
+        expand_for_texture=data.get("expand_for_texture"),
     )
 
 
@@ -371,7 +373,7 @@ def load_config(config_path: str = "config.json") -> Config:
             correct_grammar=gen.get("correct_grammar", True),
             grammar_language=gen.get("grammar_language", "en-US"),
             # Sentence restructuring settings
-            restructure_sentences=gen.get("restructure_sentences", True),
+            restructure_sentences=gen.get("restructure_sentences", False),
             split_sentences=gen.get("split_sentences", True),
             max_sentence_length=gen.get("max_sentence_length", 60),
             sentence_length_variance=gen.get("sentence_length_variance", 0.4),

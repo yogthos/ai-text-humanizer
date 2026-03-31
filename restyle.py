@@ -294,10 +294,13 @@ def transfer_file(
 
     # Determine expand_for_texture: CLI overrides config
     # --expand enables, --no-expand disables, otherwise use config
+    expand_for_texture_explicit = False
     if expand:
         expand_for_texture = True
+        expand_for_texture_explicit = True
     elif no_expand:
         expand_for_texture = False
+        expand_for_texture_explicit = True
     elif app_config:
         expand_for_texture = app_config.generation.expand_for_texture
     else:
@@ -319,6 +322,7 @@ def transfer_file(
             max_expansion_ratio=gen.max_expansion_ratio,
             target_expansion_ratio=gen.target_expansion_ratio,
             expand_for_texture=expand_for_texture,
+            expand_for_texture_explicit=expand_for_texture_explicit,
             # Neutralization
             skip_neutralization=gen.skip_neutralization,
             # Post-processing
@@ -351,6 +355,7 @@ def transfer_file(
             perspective=effective_perspective,
             use_structural_rag=True,  # Default to enabled
             expand_for_texture=expand_for_texture,
+            expand_for_texture_explicit=expand_for_texture_explicit,
         )
 
     # Create critic provider for repairs

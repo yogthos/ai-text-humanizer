@@ -467,7 +467,7 @@ class SemanticVerifier:
 
         # Also extract years (4-digit numbers in parentheses or standalone)
         # These are common hallucination targets for academic text
-        year_pattern = re.compile(r'\b(1[89]\d{2}|20[0-2]\d)\b')  # 1800-2029
+        year_pattern = re.compile(r'\b(1[89]\d{2}|20\d{2})\b')  # 1800-2099
         source_years = set(year_pattern.findall(source))
         output_years = set(year_pattern.findall(output))
 

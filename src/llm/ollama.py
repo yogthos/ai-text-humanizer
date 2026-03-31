@@ -95,7 +95,10 @@ class OllamaProvider(LLMProvider):
                 raise LLMError(error_msg)
 
             # Parse response
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError as e:
+                raise LLMResponseError(f"Invalid JSON in Ollama response: {e}")
 
             content = data.get("message", {}).get("content", "")
             if not content:

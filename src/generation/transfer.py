@@ -89,6 +89,7 @@ class TransferConfig:
     max_expansion_ratio: float = 2.5  # Max output/input word ratio before warning
     target_expansion_ratio: float = 1.5  # Target for LoRA generation (1.5 = 50% expansion for author flourish)
     expand_for_texture: bool = False  # Add stronger expansion prompt for texture/flourishes
+    expand_for_texture_explicit: bool = False  # True when set by CLI flag (takes priority over adapter config)
 
     # Neutralization settings
     skip_neutralization: bool = False  # If True, skip RTT and use original text as input
@@ -102,7 +103,7 @@ class TransferConfig:
     rag_sample_size: int = 300  # Number of corpus chunks to sample for rhythm pattern analysis
 
     # Sentence restructuring settings (convert mechanical patterns to organic)
-    restructure_sentences: bool = True  # Enable balanced→inverted restructuring
+    restructure_sentences: bool = False  # Enable balanced→inverted restructuring
 
     # Sentence splitting settings (break run-on sentences)
     split_sentences: bool = True  # Enable sentence splitting at conjunction points
@@ -228,6 +229,11 @@ class StyleTransfer:
 
         # Get backend configuration from adapter config
         adapter_cfg = get_adapter_config(primary_adapter_path)
+
+        # Apply per-adapter expand_for_texture override if set (CLI flags take priority)
+        if adapter_cfg.expand_for_texture is not None and not self.config.expand_for_texture_explicit:
+            self.config.expand_for_texture = adapter_cfg.expand_for_texture
+            logger.info(f"Using adapter-specific expand_for_texture={adapter_cfg.expand_for_texture}")
 
         # Use factory to create the appropriate generator based on backend
         self.generator = create_style_generator(

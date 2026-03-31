@@ -183,7 +183,8 @@ class SentenceRestructurer:
                 clean_prefix = clean_prefix[:-3]
             inverted = f"{clean_prefix}, {subject.lower()} {after_subject}—{rest.strip()}"
             # Capitalize first letter
-            inverted = inverted[0].upper() + inverted[1:]
+            if inverted:
+                inverted = inverted[0].upper() + inverted[1:]
             return inverted
 
         return sent

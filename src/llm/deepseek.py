@@ -115,7 +115,10 @@ class DeepSeekProvider(LLMProvider):
                 raise LLMError(error_msg)
 
             # Parse response
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError as e:
+                raise LLMResponseError(f"Invalid JSON in DeepSeek response: {e}")
 
             if "choices" not in data or len(data["choices"]) == 0:
                 raise LLMResponseError("No choices in DeepSeek response")

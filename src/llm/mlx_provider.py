@@ -739,7 +739,10 @@ class DeepSeekRTTNeutralizer:
         if response.status_code != 200:
             raise RuntimeError(f"DeepSeek API error: {response.status_code} - {response.text[:200]}")
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise RuntimeError(f"Invalid JSON in DeepSeek RTT response: {e}")
         return data["choices"][0]["message"]["content"].strip()
 
     def _extract_entities(self, text: str) -> tuple:
