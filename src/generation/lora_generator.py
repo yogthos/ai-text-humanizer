@@ -467,10 +467,21 @@ class LoRAStyleGenerator(BaseStyleGenerator):
                 {'role': 'system', 'content': instruction},
                 {'role': 'user', 'content': user_content}
             ]
+
+            # Use a nothink template to avoid <think> tokens that Qwen 3.5
+            # injects by default. The LoRA was trained with qwen3_5_nothink
+            # which does not use thinking tokens.
+            nothink_template = (
+                "{% for message in messages %}"
+                "<|im_start|>{{ message['role'] }}\n{{ message['content'] }}<|im_end|>\n"
+                "{% endfor %}"
+                "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+            )
             prompt = self._tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
-                add_generation_prompt=True
+                add_generation_prompt=True,
+                chat_template=nothink_template,
             )
             logger.debug("Applied chat template to prompt")
 

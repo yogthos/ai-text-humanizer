@@ -12,13 +12,108 @@ Usage:
 
 import argparse
 import json
-import shutil
 from pathlib import Path
 
-import numpy as np
+
+def _detect_model_prefix(input_dir: Path, peft_weights: dict) -> str:
+    """Detect the correct layer key prefix by checking the MLX base model.
+
+    Different architectures use different prefixes:
+      Qwen 2.5:     model.layers.N...
+      Qwen 3.5 MoE: language_model.model.layers.N...
+
+    Returns the prefix string up to and including "layers.N." or empty string
+    if detection fails.
+    """
+    import re
+
+    # Find PEFT adapter_config.json in the input directory
+    peft_config_path = input_dir / "adapter_config.json"
+    if not peft_config_path.exists():
+        print(f"  No adapter_config.json in {input_dir}, skipping prefix detection")
+        return ""
+
+    # Look at a PEFT key to see what prefix it has after stripping base_model.model.
+    sample_peft_key = next(iter(peft_weights))
+    stripped = sample_peft_key
+    if stripped.startswith("base_model.model."):
+        stripped = stripped[len("base_model.model."):]
+
+    # Extract everything before "layers.N."
+    m = re.match(r'(.+?layers\.)\d+\.', stripped)
+    peft_prefix = m.group(1) if m else ""
+
+    # Now check what prefix the MLX model actually uses
+    # Look for safetensors files in common model locations
+    base_model_path = None
+    if peft_config_path.exists():
+        with open(peft_config_path) as f:
+            cfg = json.load(f)
+        candidate = cfg.get("base_model_name_or_path", cfg.get("model", ""))
+        if candidate and Path(candidate).exists():
+            base_model_path = Path(candidate)
+
+    if base_model_path is None:
+        print(f"  Could not find base model to detect prefix, using PEFT prefix: {peft_prefix}")
+        return ""
+
+    # Read a safetensors file from the base model to get actual key names
+    st_files = sorted(base_model_path.glob("*.safetensors"))
+    if not st_files:
+        return ""
+
+    from safetensors import safe_open
+    with safe_open(str(st_files[0]), framework="numpy") as f:
+        model_keys = f.keys()
+        # Find a key with "layers.0."
+        for mk in model_keys:
+            m2 = re.match(r'(.+?layers\.)\d+\.', mk)
+            if m2:
+                mlx_prefix = m2.group(1)
+                if mlx_prefix != peft_prefix:
+                    print(f"  Prefix mismatch: PEFT='{peft_prefix}' MLX='{mlx_prefix}'")
+                    return mlx_prefix
+                else:
+                    print(f"  Prefix matches: '{peft_prefix}'")
+                    return ""
+
+    return ""
 
 
-def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
+def _detect_model_prefix_from_model(model_path: Path, peft_weights: dict) -> str:
+    """Detect prefix by reading actual MLX model safetensors."""
+    import re
+    from safetensors import safe_open
+
+    # Get PEFT prefix
+    sample_key = next(iter(peft_weights))
+    stripped = sample_key
+    if stripped.startswith("base_model.model."):
+        stripped = stripped[len("base_model.model."):]
+    m = re.match(r'(.+?layers\.)\d+\.', stripped)
+    peft_prefix = m.group(1) if m else ""
+
+    # Read MLX model to get its prefix
+    st_files = sorted(model_path.glob("*.safetensors"))
+    if not st_files:
+        print(f"  No safetensors in {model_path}")
+        return ""
+
+    with safe_open(str(st_files[0]), framework="numpy") as f:
+        for mk in f.keys():
+            m2 = re.match(r'(.+?layers\.)\d+\.', mk)
+            if m2:
+                mlx_prefix = m2.group(1)
+                if mlx_prefix != peft_prefix:
+                    print(f"  Prefix mismatch: PEFT='{peft_prefix}' MLX='{mlx_prefix}'")
+                    return mlx_prefix
+                else:
+                    print(f"  Prefix matches: '{peft_prefix}'")
+                    return ""
+    return ""
+
+
+def convert_peft_to_mlx(input_dir: Path, output_dir: Path, mlx_model_path: str = None):
     """Convert PEFT adapter to MLX format."""
     import safetensors.torch as st_torch
     from safetensors.numpy import save_file as save_numpy
@@ -41,17 +136,36 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
         peft_config = json.load(f)
 
     # Convert weights
+    # Need to map PEFT key prefixes to MLX key prefixes.
+    # PEFT format: base_model.model.{mlx_model_prefix}.layers.N.module.lora_A.weight
+    # MLX format:  {mlx_model_prefix}.layers.N.module.lora_a
+    #
+    # The mlx_model_prefix varies by architecture:
+    #   Qwen 2.5:     model.layers.N...
+    #   Qwen 3.5 MoE: language_model.model.layers.N...
+    #
+    # We detect the prefix by looking at the actual model weight names.
+    model_prefix = ""
+    if mlx_model_path and Path(mlx_model_path).exists():
+        # Detect prefix from the actual MLX model weights
+        model_prefix = _detect_model_prefix_from_model(Path(mlx_model_path), peft_weights)
+    else:
+        model_prefix = _detect_model_prefix(input_dir, peft_weights)
+
     mlx_weights = {}
     for peft_key, tensor in peft_weights.items():
-        # Convert key format:
-        # PEFT: base_model.model.model.layers.0.mlp.down_proj.lora_A.weight
-        # MLX:  model.layers.0.mlp.down_proj.lora_a
-
         mlx_key = peft_key
 
-        # Remove base_model.model prefix
+        # Remove base_model.model. prefix (PEFT wrapper)
         if mlx_key.startswith("base_model.model."):
             mlx_key = mlx_key[len("base_model.model."):]
+
+        # If we detected a model prefix mismatch, fix it
+        if model_prefix:
+            # The PEFT key after stripping base_model.model. starts with the
+            # HF model's internal prefix. We need to match the MLX model's prefix.
+            # e.g. PEFT: "model.language_model.layers.0..." -> MLX: "language_model.model.layers.0..."
+            pass  # model_prefix fixup is done below after lora_A/B conversion
 
         # Convert lora_A.weight -> lora_a, lora_B.weight -> lora_b
         mlx_key = mlx_key.replace(".lora_A.weight", ".lora_a")
@@ -64,6 +178,20 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
         np_tensor = np_tensor.T  # Transpose
 
         mlx_weights[mlx_key] = np_tensor
+
+    # Fix key prefixes to match the MLX model's actual weight names
+    # model_prefix is e.g. "language_model.model.layers." (includes trailing "layers.")
+    # We need to replace everything before "layers.N." with the model_prefix
+    if model_prefix:
+        import re
+        fixed_weights = {}
+        for key, val in mlx_weights.items():
+            # Replace everything up to and including the first "layers." with model_prefix
+            # e.g. "model.language_model.layers.0.foo" -> "language_model.model.layers.0.foo"
+            fixed_key = re.sub(r'^.*?layers\.', model_prefix, key, count=1)
+            fixed_weights[fixed_key] = val
+        mlx_weights = fixed_weights
+        print(f"Fixed key prefix to: {model_prefix}")
 
     print(f"Converted {len(mlx_weights)} weight tensors")
 
@@ -78,15 +206,14 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
     alpha = peft_config.get("lora_alpha", 256)
 
     # Auto-detect LoRA target keys from the converted weight names
-    # e.g. "model.layers.0.self_attn.q_proj.lora_a" -> "self_attn.q_proj"
+    # e.g. "language_model.model.layers.0.self_attn.q_proj.lora_a" -> "self_attn.q_proj"
+    import re as _re
     lora_keys = set()
     for key in mlx_weights:
         if ".lora_a" in key or ".lora_b" in key:
-            # Strip "model.layers.N." prefix and ".lora_a"/".lora_b" suffix
             parts = key.replace(".lora_a", "").replace(".lora_b", "")
-            # Remove "model.layers.N." prefix to get module path
-            import re
-            match = re.sub(r"^model\.layers\.\d+\.", "", parts)
+            # Strip everything up to and including "layers.N."
+            match = _re.sub(r"^.*?layers\.\d+\.", "", parts)
             if match != parts:  # successfully stripped
                 lora_keys.add(match)
 
@@ -107,7 +234,8 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
             "dropout": peft_config.get("lora_dropout", 0.0),
             "keys": sorted(lora_keys),
         },
-        "model": peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B"),
+        # Use local MLX model path if provided, otherwise fall back to PEFT config
+        "model": mlx_model_path or peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B"),
         "num_layers": -1,  # -1 means all layers
     }
 
@@ -117,9 +245,10 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
     print(f"Saved MLX config to {mlx_config_path}")
 
     # Create metadata.json
+    base_model_ref = mlx_model_path or peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B")
     metadata = {
         "author": "H.P. Lovecraft",
-        "base_model": peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B"),
+        "base_model": base_model_ref,
         "lora_rank": peft_config.get("r", 64),
         "lora_alpha": peft_config.get("lora_alpha", 256),
         "training_examples": 9371,
@@ -150,9 +279,15 @@ def main():
         required=True,
         help="Path to output MLX adapter directory"
     )
+    parser.add_argument(
+        "--mlx-model",
+        required=False,
+        help="Path to local MLX base model (for prefix detection and config). "
+             "E.g., models/Qwen3.5-35B-A3B-Base-6bit-MLX"
+    )
 
     args = parser.parse_args()
-    convert_peft_to_mlx(args.input, args.output)
+    convert_peft_to_mlx(args.input, args.output, mlx_model_path=args.mlx_model)
 
 
 if __name__ == "__main__":
