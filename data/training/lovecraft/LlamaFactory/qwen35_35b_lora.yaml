@@ -34,6 +34,11 @@ lora_alpha: 128
 lora_dropout: 0.1
 use_rslora: true
 
+# NEFTune: Add random noise to embeddings during training to prevent
+# memorization of exact phrases and force learning generalized style patterns.
+# Alpha 5 is the standard value from the NEFTune paper.
+neftune_noise_alpha: 5.0
+
 ### Dataset
 dataset: lovecraft_sft
 template: qwen3_5_nothink
@@ -45,7 +50,7 @@ preprocessing_num_workers: 16
 ### Output
 output_dir: saves/Qwen3.5-35B-A3B/lora/lovecraft
 logging_steps: 10
-save_steps: 200
+save_steps: 100
 plot_loss: true
 overwrite_output_dir: true
 
@@ -58,7 +63,10 @@ overwrite_output_dir: true
 # Train longer and save checkpoints to pick the best one.
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
-learning_rate: 1.0e-4
+# rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
+# much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
+# instability at this amplification. 5e-5 is safer while still converging.
+learning_rate: 5.0e-5
 num_train_epochs: 3.0
 lr_scheduler_type: cosine
 warmup_ratio: 0.05
