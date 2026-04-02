@@ -14,6 +14,9 @@
 apt update && apt install -y tmux
 tmux new -s train
 
+#attach later
+tmux attach -t train
+
 # CRITICAL: Point HF cache to workspace (root overlay is only 20-50GB, model is ~70GB)
 export HF_HOME=/workspace/huggingface_cache
 mkdir -p $HF_HOME
