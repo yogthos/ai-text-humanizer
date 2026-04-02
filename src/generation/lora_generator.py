@@ -508,6 +508,12 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         else:
             tokens_limit = min(auto_max_tokens, self.config.max_tokens)
 
+        # Ensure <|im_end|> is a stop token (Qwen 3.5 uses it to end assistant turns,
+        # but the base model's tokenizer only has <|endoftext|> as EOS)
+        im_end_id = self._tokenizer.convert_tokens_to_ids("<|im_end|>")
+        if im_end_id and im_end_id not in self._tokenizer.eos_token_ids:
+            self._tokenizer.eos_token_ids.add(im_end_id)
+
         # Generate
         response = generate(
             self._model,
