@@ -76,21 +76,36 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
     # MLX requires: fine_tune_type, lora_parameters, model, num_layers
     rank = peft_config.get("r", 64)
     alpha = peft_config.get("lora_alpha", 256)
+
+    # Auto-detect LoRA target keys from the converted weight names
+    # e.g. "model.layers.0.self_attn.q_proj.lora_a" -> "self_attn.q_proj"
+    lora_keys = set()
+    for key in mlx_weights:
+        if ".lora_a" in key or ".lora_b" in key:
+            # Strip "model.layers.N." prefix and ".lora_a"/".lora_b" suffix
+            parts = key.replace(".lora_a", "").replace(".lora_b", "")
+            # Remove "model.layers.N." prefix to get module path
+            import re
+            match = re.sub(r"^model\.layers\.\d+\.", "", parts)
+            if match != parts:  # successfully stripped
+                lora_keys.add(match)
+
+    # Fall back to PEFT target_modules if auto-detect fails
+    if not lora_keys:
+        lora_keys = set(peft_config.get("target_modules", [
+            "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
+            "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+        ]))
+
+    print(f"Detected LoRA keys: {sorted(lora_keys)}")
+
     mlx_config = {
         "fine_tune_type": "lora",
         "lora_parameters": {
             "rank": rank,
             "scale": alpha / rank,  # MLX scale = alpha / rank
             "dropout": peft_config.get("lora_dropout", 0.0),
-            "keys": [
-                "self_attn.q_proj",
-                "self_attn.k_proj",
-                "self_attn.v_proj",
-                "self_attn.o_proj",
-                "mlp.gate_proj",
-                "mlp.up_proj",
-                "mlp.down_proj",
-            ]
+            "keys": sorted(lora_keys),
         },
         "model": peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B"),
         "num_layers": -1,  # -1 means all layers
@@ -107,7 +122,7 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path):
         "base_model": peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B"),
         "lora_rank": peft_config.get("r", 64),
         "lora_alpha": peft_config.get("lora_alpha", 256),
-        "training_examples": 8840,
+        "training_examples": 9371,
         "converted_from": str(input_dir),
     }
 

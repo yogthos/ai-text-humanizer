@@ -1,0 +1,10 @@
+{
+  "lovecraft_sft": {
+    "file_name": "train_sft.jsonl",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}
