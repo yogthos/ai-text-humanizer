@@ -642,12 +642,47 @@ def load_intermediate(path: Path, stage: str = "items") -> List[Tuple[str, str]]
     return items
 
 
+def load_snowflake_topics(topics_file: Optional[str] = None) -> List[str]:
+    """Load snowflake topics from an external file or fall back to MUNDANE_TOPICS.
+
+    The external file should be a Python file with a list variable (BOOK_TOPICS
+    or MUNDANE_TOPICS). This allows per-author topic customization — e.g. conceptual
+    topics for Russell vs mundane activities for Lovecraft.
+
+    Args:
+        topics_file: Path to a Python file containing a topic list variable.
+
+    Returns:
+        List of topic strings.
+    """
+    if topics_file:
+        topics_path = Path(topics_file)
+        if topics_path.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("topics", topics_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            # Look for BOOK_TOPICS first, then MUNDANE_TOPICS, then any list
+            for attr in ["BOOK_TOPICS", "MUNDANE_TOPICS", "TOPICS"]:
+                if hasattr(mod, attr):
+                    topics = getattr(mod, attr)
+                    logger.info(f"Loaded {len(topics)} snowflake topics from {topics_file} ({attr})")
+                    return topics
+            logger.warning(f"No topic list found in {topics_file}, using defaults")
+        else:
+            logger.warning(f"Topics file not found: {topics_file}, using defaults")
+
+    logger.info(f"Using default MUNDANE_TOPICS ({len(MUNDANE_TOPICS)} topics)")
+    return MUNDANE_TOPICS
+
+
 def expand_corpus_with_variations(
     paragraphs: List[str],
     author: str,
     workers: int = 4,
     skip_variation: bool = False,
     skip_perspective: bool = False,
+    snowflake_topics: Optional[List[str]] = None,
 ) -> List[Tuple[str, str]]:
     """Expand corpus using enhanced Triad strategy with perspective variations.
 
@@ -693,11 +728,12 @@ def expand_corpus_with_variations(
     logger.info(f"Creating {len(paragraphs)} snowflake (topic swap) variations...")
     logger.info(f"Robustness entries: {len(paragraphs)} (will use heavy input perturbation)")
 
-    # Entry 2: Snowflake (mundane topic swap)
+    # Entry 2: Snowflake (topic swap)
     # Prepare all variation tasks
+    topics_pool = snowflake_topics or MUNDANE_TOPICS
     tasks = []
     for idx, para in enumerate(paragraphs):
-        topic = random.choice(MUNDANE_TOPICS)
+        topic = random.choice(topics_pool)
         tasks.append((idx, para, topic))
 
     snowflake_count = 0
@@ -1893,6 +1929,10 @@ def main():
                         help="Output format: llama_factory (default) or mlx")
     parser.add_argument("--skip-curation", action="store_true",
                         help="Skip curation step (corpus is already curated, one paragraph per double-newline)")
+    parser.add_argument("--snowflake-topics", type=str, default=None,
+                        help="Path to Python file with custom snowflake topics list "
+                             "(e.g., data/training/russell/snowflake_topics.py). "
+                             "Falls back to built-in MUNDANE_TOPICS if not specified.")
 
     args = parser.parse_args()
 
@@ -1902,6 +1942,9 @@ def main():
     overall_start = time.time()
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load custom snowflake topics if provided
+    snowflake_topics = load_snowflake_topics(args.snowflake_topics)
 
     variation_counts = {}
 
@@ -1973,6 +2016,7 @@ def main():
             workers=args.workers,
             skip_variation=args.skip_variation,
             skip_perspective=args.skip_perspective,
+            snowflake_topics=snowflake_topics,
         )
 
         for _, vtype in expanded:
@@ -2041,6 +2085,7 @@ def main():
             workers=args.workers,
             skip_variation=args.skip_variation,
             skip_perspective=args.skip_perspective,
+            snowflake_topics=snowflake_topics,
         )
 
         for _, vtype in expanded:
