@@ -15,15 +15,24 @@ finetuning_type: lora
 #   - Linear attention: in_proj_qkv, in_proj_z, in_proj_b, in_proj_a, out_proj (DeltaNet layers)
 #   - Shared expert: gate_proj, up_proj, down_proj
 #   - Router gate + shared_expert_gate
-# Routed expert nn.Parameter tensors are NOT targeted (intentional --
-# research shows attention + shared experts + router matches full adaptation)
+# Routed expert nn.Parameter tensors are NOT targeted (PEFT can't target
+# fused nn.Parameter without target_parameters; attention + shared expert
+# should be sufficient with high enough rank).
 lora_target: all
 
-# Rank 16: MoE experts have 512-dim intermediates, rank 64 is excessive.
-# Alpha = 2x rank is the standard safe ratio for MoE models.
-lora_rank: 16
-lora_alpha: 32
-lora_dropout: 0.05
+# Rank 128: Style transfer requires high rank to capture sentence structure,
+# rhythm, and vocabulary patterns. RunPod Nabokov study found rank 256 optimal
+# for literary style; rank 16 showed "minimal stylistic influence."
+# The LoRA targets attention (2048-4096 dim), not 512-dim expert intermediates,
+# so high rank is not excessive.
+#
+# rsLoRA: CRITICAL for high rank. Standard LoRA scales by alpha/rank, which
+# kills gradient flow at high ranks. rsLoRA scales by alpha/sqrt(rank) instead,
+# unlocking the capacity that higher rank provides.
+lora_rank: 128
+lora_alpha: 128
+lora_dropout: 0.1
+use_rslora: true
 
 ### Dataset
 dataset: lovecraft_sft
@@ -36,19 +45,21 @@ preprocessing_num_workers: 16
 ### Output
 output_dir: saves/Qwen3.5-35B-A3B/lora/lovecraft
 logging_steps: 10
-save_steps: 100
+save_steps: 200
 plot_loss: true
 overwrite_output_dir: true
 
 ### Training
 # Dataset: 9,371 entries
-# Effective batch size: 1 * 16 = 16
-# Steps per epoch: 9,371 / 16 = ~586
-# 2 epochs = ~1,172 steps (MoE overfits faster than dense models)
+# Effective batch size: 1 * 8 = 8 (smaller batch = spikier gradients, better for style)
+# Steps per epoch: 9,371 / 8 = ~1,171
+# 3 epochs = ~3,514 steps
+# Previous run (2 epochs, rank 16) had loss still declining — model hadn't converged.
+# Train longer and save checkpoints to pick the best one.
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 8
 learning_rate: 1.0e-4
-num_train_epochs: 2.0
+num_train_epochs: 3.0
 lr_scheduler_type: cosine
 warmup_ratio: 0.05
 bf16: true
@@ -58,7 +69,7 @@ bf16: true
 val_size: 0.05
 per_device_eval_batch_size: 1
 eval_strategy: steps
-eval_steps: 100
+eval_steps: 200
 
 ### Optimization
 # Do NOT use quantization_bit: 4 -- QLoRA breaks MoE expert layers
@@ -82,11 +93,12 @@ optim: adamw_torch
 #    This produces a ~26GB model that fits comfortably in 64GB unified memory.
 #
 # 2. Convert the PEFT LoRA adapter to MLX format:
+#    MUST pass --mlx-model to fix key prefix and model path in config.
 #
 #    python scripts/convert_peft_to_mlx.py \
-#        --peft-path saves/Qwen3.5-35B-A3B/lora/lovecraft \
-#        --mlx-model models/Qwen3.5-35B-A3B-Base-6bit-MLX \
-#        --output lora_adapters/lovecraft_35b_mlx
+#        --input saves/Qwen3.5-35B-A3B/lora/lovecraft \
+#        --output lora_adapters/lovecraft_35b_mlx \
+#        --mlx-model models/Qwen3.5-35B-A3B-Base-6bit-MLX
 #
 # 3. Run inference locally:
 #
