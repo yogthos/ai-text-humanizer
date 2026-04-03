@@ -42,9 +42,8 @@ neftune_noise_alpha: 5.0
 ### Dataset
 dataset: russell_sft
 template: qwen3_5_nothink
-# 4096 gives headroom for Russell's longer argumentative passages.
-# Only 6 entries exceed 2048 tokens, but packing benefits from longer context.
-cutoff_len: 4096
+# 2048 is sufficient — only 6 entries exceed this. 4096 caused OOM with rank 128.
+cutoff_len: 2048
 packing: true
 overwrite_cache: true
 preprocessing_num_workers: 16
@@ -58,11 +57,12 @@ overwrite_output_dir: true
 
 ### Training
 # Dataset: 10,263 entries
-# Effective batch size: 1 * 8 = 8 (smaller batch = spikier gradients, better for style)
-# Steps per epoch: 10,263 / 8 = ~1,283
-# 3 epochs = ~3,849 steps
+# Effective batch size: 1 * 4 = 4 (smaller batch = spikier gradients, better for style)
+# Steps per epoch: 10,263 / 4 = ~2,566
+# 3 epochs = ~7,698 steps
+# Reduced from 8 to fit rank 128 in A100 80GB VRAM.
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
 # rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
 # much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
 # instability at this amplification. 5e-5 is safer while still converging.
