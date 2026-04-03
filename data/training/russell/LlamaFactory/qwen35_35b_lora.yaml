@@ -62,7 +62,8 @@ overwrite_output_dir: true
 # Steps per epoch: 10,263 / 8 = ~1,283
 # 3 epochs = ~3,849 steps
 # 2x H100 80GB gives enough VRAM for rank 256 + cutoff 4096.
-per_device_train_batch_size: 1
+# Batch 2 per GPU — 2x H100 has headroom. Effective batch = 2 * 8 = 16.
+per_device_train_batch_size: 2
 gradient_accumulation_steps: 8
 # rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
 # much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
