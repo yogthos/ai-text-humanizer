@@ -42,9 +42,9 @@ neftune_noise_alpha: 5.0
 ### Dataset
 dataset: russell_sft
 template: qwen3_5_nothink
-# 4096 to capture Russell's longer argumentative structures.
-# Requires 2x H100 80GB (160GB total VRAM).
-cutoff_len: 4096
+# 2048 — DDP replicates model on each GPU so per-GPU VRAM is unchanged.
+# 4096 OOMs even on H100 80GB with rank 256. Only 6 entries exceed 2048.
+cutoff_len: 2048
 packing: true
 overwrite_cache: true
 preprocessing_num_workers: 16
@@ -62,8 +62,9 @@ overwrite_output_dir: true
 # Steps per epoch: 10,263 / 8 = ~1,283
 # 3 epochs = ~3,849 steps
 # 2x H100 80GB gives enough VRAM for rank 256 + cutoff 4096.
-# Batch 2 per GPU — 2x H100 has headroom. Effective batch = 2 * 8 = 16.
-per_device_train_batch_size: 2
+# Batch 1 per GPU — DDP replicates full 70GB model on each GPU,
+# so per-GPU memory is same as single-GPU. 2x H100 gives 2x throughput.
+per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
 # rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
 # much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
