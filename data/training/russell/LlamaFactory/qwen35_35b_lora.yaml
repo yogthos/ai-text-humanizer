@@ -29,8 +29,8 @@ lora_target: all
 # rsLoRA: CRITICAL for high rank. Standard LoRA scales by alpha/rank, which
 # kills gradient flow at high ranks. rsLoRA scales by alpha/sqrt(rank) instead,
 # unlocking the capacity that higher rank provides.
-lora_rank: 128
-lora_alpha: 128
+lora_rank: 256
+lora_alpha: 256
 lora_dropout: 0.1
 use_rslora: true
 
@@ -42,8 +42,9 @@ neftune_noise_alpha: 5.0
 ### Dataset
 dataset: russell_sft
 template: qwen3_5_nothink
-# 2048 is sufficient — only 6 entries exceed this. 4096 caused OOM with rank 128.
-cutoff_len: 2048
+# 4096 to capture Russell's longer argumentative structures.
+# Requires 2x H100 80GB (160GB total VRAM).
+cutoff_len: 4096
 packing: true
 overwrite_cache: true
 preprocessing_num_workers: 16
@@ -57,12 +58,12 @@ overwrite_output_dir: true
 
 ### Training
 # Dataset: 10,263 entries
-# Effective batch size: 1 * 4 = 4 (smaller batch = spikier gradients, better for style)
-# Steps per epoch: 10,263 / 4 = ~2,566
-# 3 epochs = ~7,698 steps
-# Reduced from 8 to fit rank 128 in A100 80GB VRAM.
+# Effective batch size: 1 * 8 = 8 (smaller batch = spikier gradients, better for style)
+# Steps per epoch: 10,263 / 8 = ~1,283
+# 3 epochs = ~3,849 steps
+# 2x H100 80GB gives enough VRAM for rank 256 + cutoff 4096.
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 8
 # rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
 # much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
 # instability at this amplification. 5e-5 is safer while still converging.
