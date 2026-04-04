@@ -66,13 +66,13 @@ overwrite_output_dir: true
 # so per-GPU memory is same as single-GPU. 2x H100 gives 2x throughput.
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
-# rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
-# much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
-# instability at this amplification. 5e-5 is safer while still converging.
-learning_rate: 5.0e-5
+# rsLoRA with rank 256 gives effective scaling of alpha/sqrt(256) = 16x.
+# 5e-5 caused gradient explosion at step 10 (loss 132k then 0.0 for all remaining steps).
+# 1e-5 with 10% warmup should stabilize. If still explodes, try 5e-6.
+learning_rate: 1.0e-5
 num_train_epochs: 3.0
 lr_scheduler_type: cosine
-warmup_ratio: 0.05
+warmup_ratio: 0.10
 bf16: true
 
 ### Evaluation
