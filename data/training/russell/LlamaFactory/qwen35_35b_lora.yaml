@@ -62,14 +62,11 @@ overwrite_output_dir: true
 
 ### Training
 # Dataset: 10,263 entries
-# Effective batch size: 1 * 8 = 8 (smaller batch = spikier gradients, better for style)
+# DDP doubles effective batch: 2 GPUs × 1 batch × 4 accum = 8 global batch
 # Steps per epoch: 10,263 / 8 = ~1,283
 # 3 epochs = ~3,849 steps
-# 2x H100 80GB gives enough VRAM for rank 256 + cutoff 4096.
-# Batch 1 per GPU — DDP replicates full 70GB model on each GPU,
-# so per-GPU memory is same as single-GPU. 2x H100 gives 2x throughput.
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
 # With alpha=16 and rsLoRA, effective scaling = 1.0x.
 # Learning rate 2e-5 is safe for 35B LoRA at neutral scaling.
 learning_rate: 2.0e-5
