@@ -33,6 +33,9 @@ mkdir -p $HF_DATASETS_CACHE
 # Install LlamaFactory from git (0.9.5.dev0+ has qwen3_5 templates)
 pip install "llamafactory[torch] @ git+https://github.com/hiyouga/LLaMA-Factory.git"
 
+# needed for paged_adamw_8bit
+pip install bitsandbytes
+
 # Install transformers 5.2.0 (first version with Qwen 3.5 support,
 # also the max version LlamaFactory 0.9.5.dev0 accepts)
 pip install transformers==5.2.0 bitsandbytes
