@@ -29,8 +29,12 @@ lora_target: all
 # rsLoRA: CRITICAL for high rank. Standard LoRA scales by alpha/rank, which
 # kills gradient flow at high ranks. rsLoRA scales by alpha/sqrt(rank) instead,
 # unlocking the capacity that higher rank provides.
+#
+# IMPORTANT: With rsLoRA, effective scaling = alpha/sqrt(rank).
+# alpha=256 gives scaling = 256/16 = 16x — caused gradient explosion.
+# alpha=sqrt(rank)=16 gives scaling = 16/16 = 1.0 — the neutral value.
 lora_rank: 256
-lora_alpha: 256
+lora_alpha: 16
 lora_dropout: 0.1
 use_rslora: true
 
@@ -66,13 +70,17 @@ overwrite_output_dir: true
 # so per-GPU memory is same as single-GPU. 2x H100 gives 2x throughput.
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
-# rsLoRA with rank 256 gives effective scaling of alpha/sqrt(256) = 16x.
-# 5e-5 caused gradient explosion at step 10 (loss 132k then 0.0 for all remaining steps).
-# 1e-5 with 10% warmup should stabilize. If still explodes, try 5e-6.
-learning_rate: 1.0e-5
+# With alpha=16 and rsLoRA, effective scaling = 1.0x.
+# Learning rate 2e-5 is safe for 35B LoRA at neutral scaling.
+learning_rate: 2.0e-5
 num_train_epochs: 3.0
 lr_scheduler_type: cosine
+# 10% warmup gives optimizer time to build stable variance statistics
+# before full LR kicks in — critical for MoE router stability.
 warmup_ratio: 0.10
+# Gradient clipping: MoE routers produce outlier gradients in early training.
+# max_grad_norm 0.3 truncates spikes before they corrupt weights.
+max_grad_norm: 0.3
 bf16: true
 
 ### Evaluation
