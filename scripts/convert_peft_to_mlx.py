@@ -174,8 +174,8 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path, mlx_model_path: str =
         # Convert tensor to numpy and transpose
         # PEFT: lora_A is [rank, in_features], lora_B is [out_features, rank]
         # MLX:  lora_a is [in_features, rank], lora_b is [rank, out_features]
-        np_tensor = tensor.numpy()
-        np_tensor = np_tensor.T  # Transpose
+        # safetensors.torch returns torch tensors; bf16 can't go to numpy directly
+        np_tensor = tensor.float().numpy().T  # bf16→f32→numpy, then transpose
 
         mlx_weights[mlx_key] = np_tensor
 
