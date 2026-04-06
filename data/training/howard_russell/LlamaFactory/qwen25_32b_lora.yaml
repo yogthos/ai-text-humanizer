@@ -112,8 +112,9 @@ eval_steps: 200
 #   - Optimizer states (8-bit): ~1.5GB
 #   - Activations (gc+packing): ~6-10GB
 #
-# Requires H100 80GB or A100 80GB. For smaller GPUs, uncomment quantization_bit: 4.
-# quantization_bit: 4   # fallback for <80GB VRAM
+# bf16 LoRA OOMs on A100 80GB with rank 256 targeting all linear modules
+# (79.16GB used, 0.09GB free during backward pass). QLoRA 4-bit is required.
+quantization_bit: 4
 flash_attn: fa2
 gradient_checkpointing: true
 # 8-bit optimizer for rank 256 × all linear modules (saves ~6GB vs 32-bit)
