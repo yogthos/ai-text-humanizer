@@ -62,7 +62,7 @@ train_on_prompt: true
 ### Output
 output_dir: saves/Qwen2.5-32B/lora/howard_russell
 logging_steps: 10
-save_steps: 200
+save_steps: 100
 plot_loss: true
 overwrite_output_dir: true
 
@@ -99,7 +99,7 @@ max_grad_norm: 1.0
 val_size: 0.05
 per_device_eval_batch_size: 1
 eval_strategy: steps
-eval_steps: 200
+eval_steps: 100
 
 ### Optimization
 # bf16 LoRA (no quantization) — preserves signal fidelity for style transfer.
