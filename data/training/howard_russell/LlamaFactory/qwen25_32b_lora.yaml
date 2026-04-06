@@ -83,8 +83,10 @@ overwrite_output_dir: true
 # Learning rate: 1e-5 for deeper pattern imprinting.
 # With alpha/rank = 2.0, effective LR at LoRA weights is 2e-5 — sweet spot
 # for style transfer where subtle activation patterns matter.
+# With 2x A100 80GB + DeepSpeed ZeRO-3: model sharded across GPUs (~40GB each).
+# Effective batch = 2 GPUs × 1 batch × 8 accum = 16.
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 8
 learning_rate: 1.0e-5
 num_train_epochs: 3.0
 lr_scheduler_type: cosine
@@ -112,13 +114,16 @@ eval_steps: 200
 #   - Optimizer states (8-bit): ~1.5GB
 #   - Activations (gc+packing): ~6-10GB
 #
-# bf16 LoRA OOMs on A100 80GB with rank 256 targeting all linear modules
-# (79.16GB used, 0.09GB free during backward pass). QLoRA 4-bit is required.
-quantization_bit: 4
+# bf16 LoRA OOMs on single A100 80GB with rank 256 all-linear (79.16/79.25GB).
+# Requires 2x A100 80GB with DeepSpeed ZeRO-3 to shard model across GPUs.
+# quantization_bit: 4   # fallback for single-GPU (reduces quality)
 flash_attn: fa2
 gradient_checkpointing: true
-# 8-bit optimizer for rank 256 × all linear modules (saves ~6GB vs 32-bit)
-optim: paged_adamw_8bit
+# DeepSpeed ZeRO-3: shards model + optimizer + gradients across 2 GPUs.
+# Each GPU holds ~40GB instead of 80GB. Config file handles shard settings.
+deepspeed: data/training/howard_russell/LlamaFactory/ds_z3_config.json
+# With ZeRO-3, use standard AdamW (DeepSpeed manages optimizer partitioning)
+optim: adamw_torch
 
 # =============================================================================
 # POST-TRAINING
