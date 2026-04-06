@@ -896,7 +896,8 @@ def create_overlapping_chunks(paragraphs: List[Tuple[str, str]], config: Overlap
     logger.info(f"Processing {len(paragraphs)} paragraphs into chunks...")
     logger.info(f"Variation types: {list(by_type.keys())}")
     logger.info(f"Target chunk size: {config.min_words}-{config.max_words} words")
-    logger.info(f"NOTE: Overlapping only for 'original' type (continuous narrative)")
+    if len(by_type) > 1 or "original" not in by_type:
+        logger.info(f"NOTE: Overlapping only for 'original' type (continuous narrative)")
 
     all_chunks = []
 
@@ -1035,6 +1036,21 @@ def get_rtt_neutralizer(provider: str = None, batch_size: int = None):
         _rtt_lock = threading.Lock()
         logger.info(f"RTT neutralizer ready: {type(_rtt_neutralizer).__name__}")
     return _rtt_neutralizer, _rtt_lock
+
+
+def clean_neutral_text(text: str) -> str:
+    """Clean RTT output artifacts.
+
+    Fixes:
+    - Leading punctuation (". " prefix from RTT chunk boundaries)
+    - Trailing whitespace
+    - Double spaces
+    """
+    # Strip leading punctuation and whitespace
+    text = re.sub(r'^[\s.,;:!?\-–—]+', '', text)
+    # Fix double spaces
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()
 
 
 def neutralize_text(styled_text: str, max_retries: int = 2, monotone: bool = True) -> Optional[str]:
@@ -1376,25 +1392,24 @@ def strip_modifiers(text: str) -> str:
     """Strip adjectives and adverbs, leaving only nouns/verbs (Information Dropout).
 
     Forces the model to hallucinate stylistic details rather than copy them.
+    Uses token.text_with_ws to preserve original whitespace and contractions
+    (spaCy splits "doesn't" into ["does", "n't"] — using text_with_ws keeps
+    the original spacing so contractions re-join correctly).
     """
     nlp = get_nlp()
     doc = nlp(text)
-    tokens = []
+    parts = []
 
     for token in doc:
         # Keep nouns, verbs, and essential function words
-        if token.pos_ in ['NOUN', 'VERB', 'PROPN', 'AUX', 'DET', 'ADP', 'CCONJ', 'SCONJ', 'PUNCT', 'PRON', 'NUM']:
-            tokens.append(token.text)
-        elif token.pos_ in ['ADJ', 'ADV']:
+        if token.pos_ in ['ADJ', 'ADV']:
             continue  # Drop modifiers
         else:
-            # Keep other tokens (particles, etc.)
-            tokens.append(token.text)
+            parts.append(token.text_with_ws)
 
-    # Clean up whitespace around punctuation
-    result = ' '.join(tokens)
-    result = re.sub(r'\s+([.,!?;:])', r'\1', result)
-    result = re.sub(r'\s+', ' ', result)
+    result = ''.join(parts)
+    # Clean up double spaces from dropped tokens
+    result = re.sub(r'  +', ' ', result)
     return result.strip()
 
 
@@ -1408,26 +1423,21 @@ def remove_concrete_nouns(text: str) -> str:
 
     Replaces concrete nouns with [THING] placeholder, forcing the model
     to generate the author's characteristic metaphors and imagery.
+    Uses token.text_with_ws to preserve contractions and original spacing.
     """
     nlp = get_nlp()
     doc = nlp(text)
-    tokens = []
+    parts = []
 
     for token in doc:
         # Replace concrete nouns with generic placeholders
-        if token.pos_ == 'NOUN' and token.ent_type_ == '':
-            # Keep abstract nouns, replace concrete ones
-            if is_concrete_noun(token.text):
-                tokens.append('[THING]')
-            else:
-                tokens.append(token.text)
+        if token.pos_ == 'NOUN' and token.ent_type_ == '' and is_concrete_noun(token.text):
+            parts.append('[THING]' + token.whitespace_)
         else:
-            tokens.append(token.text)
+            parts.append(token.text_with_ws)
 
-    # Clean up whitespace
-    result = ' '.join(tokens)
-    result = re.sub(r'\s+([.,!?;:])', r'\1', result)
-    result = re.sub(r'\s+', ' ', result)
+    result = ''.join(parts)
+    result = re.sub(r'  +', ' ', result)
     return result.strip()
 
 
@@ -1795,6 +1805,7 @@ def generate_training_data(
                 # Process results
                 for (idx, styled_text, vtype), neutral in zip(batch, neutrals):
                     if neutral:
+                        neutral = clean_neutral_text(neutral)
                         word_count = len(styled_text.split())
 
                         # Many-to-One: Create 3 input variants per anchor
@@ -1867,6 +1878,7 @@ def generate_training_data(
                     logger.warning(f"  [{idx}] ✗ All {max_individual_retries} retries exhausted ({len(styled_text.split())}w)")
 
                 if neutral:
+                    neutral = clean_neutral_text(neutral)
                     word_count = len(styled_text.split())
 
                     # Many-to-One: Create 3 input variants per anchor

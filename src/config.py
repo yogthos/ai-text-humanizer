@@ -135,6 +135,9 @@ class LoRAAdapterConfig:
     load_in_8bit: bool = False  # Use 8-bit quantization (PyTorch with CUDA only)
     hf_adapter_path: Optional[str] = None  # HuggingFace adapter path (if different from local)
     expand_for_texture: Optional[bool] = None  # Per-adapter override for texture expansion (None = use global)
+    perspective: Optional[str] = None  # Per-adapter perspective override (None = use global)
+    verify_entailment: Optional[bool] = None  # Per-adapter verification override (None = use global/CLI)
+    merge_paragraphs: Optional[int] = None  # Merge short paragraphs to reach this minimum word count before LoRA
 
 
 @dataclass
@@ -223,6 +226,7 @@ _KNOWN_ADAPTER_FIELDS = {
     "enabled", "scale", "temperature", "top_p", "min_p", "repetition_penalty",
     "max_tokens", "worldview", "fiction_markers", "checkpoint", "backend", "device",
     "load_in_4bit", "load_in_8bit", "hf_adapter_path", "expand_for_texture",
+    "perspective", "verify_entailment", "merge_paragraphs",
 }
 
 
@@ -250,6 +254,9 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         load_in_8bit=data.get("load_in_8bit", False),
         hf_adapter_path=data.get("hf_adapter_path"),
         expand_for_texture=data.get("expand_for_texture"),
+        perspective=data.get("perspective"),
+        verify_entailment=data.get("verify_entailment"),
+        merge_paragraphs=data.get("merge_paragraphs"),
     )
 
 

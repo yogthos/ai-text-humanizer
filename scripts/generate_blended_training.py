@@ -1,37 +1,40 @@
 #!/usr/bin/env python3
 """Generate training data for a blended author style (e.g., "Howard Russell").
 
-Takes blended paragraphs produced by experiment_blend_sentences.py, neutralizes
-them via RTT, and outputs JSONL training data compatible with generate_flat_training.py.
+Takes blended paragraphs produced by experiment_blend_sentences.py and feeds them
+through the same training pipeline as generate_flat_training.py: overlapping chunks,
+RTT neutralization, snowflake topic variations, many-to-one input variants, persona
+frames, perturbation.
 
 Pipeline:
-1. Load blended paragraphs (from JSON output of blending experiment)
-2. RTT-neutralize each paragraph to create training inputs
-3. Apply persona frames from the blended worldview file
-4. Apply perturbation to match training distribution
-5. Output JSONL in LLaMA-Factory format
+1. Load blended paragraphs (from JSON)
+2. Create overlapping chunks (style lives in transitions)
+3. Optionally generate snowflake topic variations via LLM
+4. Feed all chunks through generate_flat_training.py's generate_training_data()
+   which handles: RTT, many-to-one variants, persona frames, perturbation, output
 
 Usage:
+    # Full pipeline (overlapping chunks + RTT + snowflakes) — run on server
     python scripts/generate_blended_training.py \
-        --blended data/blended/russell_lovecraft_mood_v4.json \
+        --blended data/blended/howard_russell_corpus_full.json \
         --author "Howard Russell" \
-        --output data/training/howard_russell \
-        --format llama_factory
+        --output data/training/howard_russell/LlamaFactory
+
+    # Skip snowflakes (faster, ~2x fewer examples)
+    python scripts/generate_blended_training.py \
+        --blended data/blended/howard_russell_corpus_full.json \
+        --author "Howard Russell" \
+        --output data/training/howard_russell/LlamaFactory \
+        --skip-snowflakes
 """
 
 import argparse
 import json
 import logging
-import os
 import random
-import re
 import sys
-import time
-import threading
 from pathlib import Path
-from typing import List, Optional
-
-import requests
+from typing import List, Tuple
 
 # Project setup
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -42,403 +45,216 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
-for _lib in ("httpx", "httpcore", "urllib3", "sentence_transformers",
-             "transformers", "huggingface_hub"):
-    logging.getLogger(_lib).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
+# Import the real training pipeline
+from scripts.generate_flat_training import (
+    MUNDANE_TOPICS,
+    OverlapConfig,
+    PERSONA_FRAMES,
+    create_overlapping_chunks,
+    create_topic_variation,
+    generate_training_data,
+)
+
 
 # =============================================================================
-# Persona Frames (loaded from worldview file)
+# Custom Snowflake Topics (matched to the book's actual content domains)
 # =============================================================================
+
+# These topics match what the LoRA will encounter at inference (chapters 5-11).
+# Mixed with MUNDANE_TOPICS to maintain both topic-independence and domain-relevance.
+BOOK_TOPICS = [
+    # Neuroscience & consciousness (Chapter 5)
+    "how neurons form memories through synaptic strengthening",
+    "the brain's prediction engine and its role in perception",
+    "why consciousness might be an emergent property of information processing",
+    "the recursive nature of self-awareness in biological systems",
+    "how homeostasis drives all voluntary action",
+    "the simulation engine inside every animal brain",
+    "why the hard problem of consciousness resists material explanation",
+    "how the brain constructs a model of itself",
+    # Communication & theory of mind (Chapter 6)
+    "how organisms evolved to communicate at a distance",
+    "the energy economics of cooperation versus competition",
+    "how theory of mind enables both empathy and manipulation",
+    "why language activates mental models rather than transmitting meaning directly",
+    "the paradox of shared understanding through ambiguous symbols",
+    "how deception became an evolutionary catalyst for intelligence",
+    # Memes & cultural evolution (Chapter 7)
+    "how ideas replicate and mutate like genes in a population",
+    "substrate independence and why patterns matter more than material",
+    "the computational universality of neural systems",
+    "how cultural selection operates on memes through social networks",
+    "the cost of integrating new ideas into an existing worldview",
+    "why information patterns are the fundamental unit of reality",
+    # Dialectics & social systems (Chapter 8)
+    "how contradictions in a system drive its transformation",
+    "why material conditions determine the shape of ideas and institutions",
+    "the dialectical relationship between technology and social organization",
+    "how societies function as metaorganisms with emergent properties",
+    "why unrestrained markets produce metabolic dysfunction in the social body",
+    "the tension between individual freedom and collective coordination",
+    "how the mode of production shapes consciousness",
+    # AI & computation (Chapter 9)
+    "why artificial minds need embodied experience to achieve understanding",
+    "the problem of creating meaningful scarcity in a virtual environment",
+    "how shared context between humans and machines enables safe AI",
+    "why genetic algorithms mirror biological evolution in digital substrates",
+    "the challenge of grounding language in sensory reality",
+    "whether artificial consciousness requires subjective experience",
+    # Cosmic perspective (Chapter 10)
+    "why post-biological intelligence may dominate the cosmos",
+    "the narrow window during which biological and digital minds can communicate",
+    "how exponential technological change compresses centuries into decades",
+    "why the Fermi paradox may be explained by the nature of intelligence itself",
+    "the transition from biological to synthetic minds as an evolutionary inevitability",
+    # General analytical/philosophical (cross-cutting)
+    "how fractal patterns repeat across scales from cells to civilizations",
+    "the distinction between what can be observed and what can be inferred",
+    "why reductionism fails to capture emergent properties",
+    "how selection pressure operates on any self-replicating pattern",
+    "the relationship between entropy and the emergence of complexity",
+]
+
 
 def load_persona_frames(worldview_path: Path) -> dict:
-    """Load persona frames from a worldview file.
+    """Load persona frames from a worldview file into PERSONA_FRAMES dict.
 
-    Returns dict with 'narrative' and 'conceptual' lists.
+    For blended authors, we merge narrative and conceptual frames into BOTH
+    content type keys. This bypasses the content classifier's narrative bias
+    (which tags Russell's analytical text as narrative due to past-tense verbs
+    and person entities like "Kant", "Plato"). Every Howard Russell frame was
+    designed to blend analytical rigor with Lovecraftian dread — they all work
+    on both narrative and conceptual content.
+
+    Observed bug in previous runs: classifier put 88.5% of examples in narrative
+    frames and only 11.5% in conceptual frames, despite most content being
+    analytical philosophy. Merging ensures uniform access to all 15 frames.
     """
     text = worldview_path.read_text(encoding="utf-8")
 
-    frames = {"narrative": [], "conceptual": []}
+    narrative_frames = []
+    conceptual_frames = []
     current_section = None
 
     for line in text.split("\n"):
         line = line.strip()
         if line == "[PERSONA_FRAMES_NARRATIVE]":
             current_section = "narrative"
-            continue
         elif line == "[PERSONA_FRAMES_CONCEPTUAL]":
             current_section = "conceptual"
-            continue
         elif line == "---":
             continue
         elif line and current_section:
-            frames[current_section].append(line)
+            if current_section == "narrative":
+                narrative_frames.append(line)
+            else:
+                conceptual_frames.append(line)
 
-    logger.info(f"Loaded {len(frames['narrative'])} narrative + "
-                f"{len(frames['conceptual'])} conceptual frames")
+    # Merge: both content type keys get all frames
+    all_frames = narrative_frames + conceptual_frames
+    frames = {"narrative": all_frames, "conceptual": all_frames}
+
+    logger.info(f"Loaded {len(narrative_frames)} narrative + "
+                f"{len(conceptual_frames)} conceptual frames "
+                f"(merged into unified pool of {len(all_frames)} for both content types)")
     return frames
 
 
-# =============================================================================
-# Content Classification (reuse from training pipeline)
-# =============================================================================
-
-def classify_content_type(text: str) -> str:
-    """Classify text as 'narrative' or 'conceptual'.
-
-    Simple heuristic: narrative has more past-tense verbs, proper nouns,
-    temporal markers. Conceptual has more present-tense, abstract nouns,
-    logical connectors.
-    """
-    narrative_markers = [
-        r'\b(was|were|had|came|went|saw|found|heard|felt|said|told)\b',
-        r'\b(then|suddenly|afterward|meanwhile|finally)\b',
-        r'\b(I|he|she|they|we)\s+(was|were|had|did|could|would)\b',
-    ]
-    conceptual_markers = [
-        r'\b(is|are|has|does|can|must|should|would|may|might)\b',
-        r'\b(therefore|however|moreover|nevertheless|consequently)\b',
-        r'\b(if|whether|unless|although|because|since|while)\b',
-        r'\b(concept|principle|theory|argument|proposition|question)\b',
-    ]
-
-    narrative_score = sum(
-        len(re.findall(p, text, re.IGNORECASE))
-        for p in narrative_markers
-    )
-    conceptual_score = sum(
-        len(re.findall(p, text, re.IGNORECASE))
-        for p in conceptual_markers
-    )
-
-    return "narrative" if narrative_score > conceptual_score else "conceptual"
-
-
-# =============================================================================
-# Constraints (same as generate_flat_training.py)
-# =============================================================================
-
-ALWAYS_CONSTRAINTS = [
-    "Do not use: 'Moreover', 'Furthermore', 'Therefore', 'Thus', 'Hence', "
-    "'In conclusion', 'It is important to note', 'It is worth noting', "
-    "'This highlights', 'This underscores', 'In essence', 'Ultimately'.",
-    "Do not hedge. Avoid: 'arguably', 'it could be said', 'one might argue', "
-    "'perhaps it is', 'it seems that'. State things directly.",
-]
-
-FREQUENT_CONSTRAINTS = [
-    "Do not start with a topic sentence. Start with a sensory detail, a question, or mid-thought.",
-    "Do not use numbered lists or 'Firstly/Secondly/Thirdly' structures.",
-]
-
-ROTATING_CONSTRAINTS = [
-    "Use fragments. Interrupt yourself with dashes (\u2014).",
-    "Let ideas collide without transition words.",
-    "Do not explain. Imply.",
-    "Use at least one rhetorical question.",
-    "Interrupt yourself with a parenthetical thought.",
-    "Start the paragraph with a conjunction (But, And, Yet, So).",
-    "Be biased. Be opinionated. Do not balance your argument.",
-    "Vary sentence lengths dramatically. Follow a long sentence with a short one.",
-    "Use concrete nouns instead of abstractions. Not 'the concept' but the thing itself.",
-    "End on an image or action, not a summary.",
-]
-
-
-def build_instruction(
-    persona_frame: str,
-    word_count: int,
-    styled_text: str = None,
-) -> str:
-    """Build a training instruction with persona frame and constraints."""
-    instruction = f"{persona_frame}\n\nWrite approximately {word_count} words."
-
-    # Skeleton 50% of the time
-    if styled_text and random.random() < 0.50:
-        skeleton = extract_simple_skeleton(styled_text)
-        if skeleton:
-            instruction = f"{instruction}\n\nFollow this structure: {skeleton}"
-
-    # Constraints
-    constraints = list(ALWAYS_CONSTRAINTS)
-    for c in FREQUENT_CONSTRAINTS:
-        if random.random() < 0.70:
-            constraints.append(c)
-    if random.random() < 0.40:
-        constraints.append(random.choice(ROTATING_CONSTRAINTS))
-
-    constraints_text = "\n".join(f"[CONSTRAINT]: {c}" for c in constraints)
-    return f"{instruction}\n\n{constraints_text}"
-
-
-def extract_simple_skeleton(text: str) -> Optional[str]:
-    """Extract a simple rhetorical skeleton from text."""
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    if len(sentences) < 3:
-        return None
-
-    moves = []
-    for s in sentences[:6]:  # first 6 sentences max
-        s_lower = s.lower()
-        if any(w in s_lower for w in ["but", "however", "yet", "although"]):
-            moves.append("[Counter-argument]")
-        elif any(w in s_lower for w in ["because", "since", "for this reason"]):
-            moves.append("[Causal reasoning]")
-        elif "?" in s:
-            moves.append("[Question]")
-        elif any(w in s_lower for w in ["i saw", "i heard", "i felt", "there was", "there came"]):
-            moves.append("[Observation]")
-        elif any(w in s_lower for w in ["consider", "suppose", "imagine", "let us"]):
-            moves.append("[Thought experiment]")
-        else:
-            moves.append("[Claim]")
-
-    # Deduplicate consecutive identical moves
-    deduped = [moves[0]]
-    for m in moves[1:]:
-        if m != deduped[-1]:
-            deduped.append(m)
-
-    if len(deduped) < 2:
-        return None
-
-    return " \u2192 ".join(deduped)
-
-
-# =============================================================================
-# Perturbation (simplified from generate_flat_training.py)
-# =============================================================================
-
-SYNONYMS = {
-    "big": ["large", "huge"], "small": ["little", "tiny"],
-    "good": ["fine", "decent"], "bad": ["poor", "terrible"],
-    "said": ["stated", "remarked"], "think": ["believe", "consider"],
-    "show": ["reveal", "demonstrate"], "give": ["provide", "offer"],
-    "make": ["create", "produce"], "use": ["employ", "utilize"],
-    "see": ["observe", "notice"], "know": ["understand", "realize"],
-    "very": ["quite", "extremely"], "really": ["truly", "genuinely"],
-}
-
-
-def perturb_text(text: str, rate: float = 0.08) -> str:
-    """Apply random perturbations to text."""
-    words = text.split()
-    result = []
-    droppable = {"the", "a", "an", "very", "really", "just", "quite"}
-
-    for word in words:
-        if random.random() > rate:
-            result.append(word)
-            continue
-
-        word_lower = word.lower().rstrip(".,!?;:")
-        choice = random.random()
-
-        if choice < 0.4 and word_lower in SYNONYMS:
-            syn = random.choice(SYNONYMS[word_lower])
-            if word[0].isupper():
-                syn = syn.capitalize()
-            result.append(syn + word[len(word_lower):])
-        elif choice < 0.7 and word.lower() in droppable:
-            pass
-        elif len(word) > 3:
-            i = random.randint(1, len(word) - 2)
-            word = word[:i] + word[i + 1] + word[i] + word[i + 2:]
-            result.append(word)
-        else:
-            result.append(word)
-
-    return " ".join(result)
-
-
-# =============================================================================
-# RTT Neutralization
-# =============================================================================
-
-def call_deepseek(prompt: str, system: str = "", max_retries: int = 3) -> str:
-    """Call DeepSeek API."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY environment variable not set")
-
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
-
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                "https://api.deepseek.com/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "deepseek-chat",
-                    "messages": messages,
-                    "temperature": 0.1,
-                    "max_tokens": 4096,
-                },
-                timeout=120,
-            )
-            response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-            raise
-
-
-def neutralize_text(text: str) -> Optional[str]:
-    """Neutralize text via LLM paraphrase (simpler than full RTT for experiments).
-
-    Strips style while preserving all facts and structure.
-    """
-    system = """You are a text neutralizer. Rewrite the input in plain, neutral English.
-Preserve ALL facts, arguments, and logical structure.
-Remove all stylistic flourishes, atmospheric language, and distinctive vocabulary.
-Use simple, clear sentences. Do not add or remove information.
-Output only the neutralized text."""
-
-    prompt = f"Neutralize this text:\n\n{text}"
-    return call_deepseek(prompt, system)
-
-
-# =============================================================================
-# Main Pipeline
-# =============================================================================
-
-def generate_training_data(
-    blended_paragraphs: List[dict],
+def generate_snowflakes(
+    paragraphs: List[str],
     author: str,
-    persona_frames: dict,
-    output_dir: Path,
-    output_format: str = "llama_factory",
-):
-    """Generate training data from blended paragraphs."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    train_path = output_dir / "train.jsonl"
+    topics: List[str],
+    max_snowflakes: int = 0,
+    workers: int = 4,
+) -> List[Tuple[str, str]]:
+    """Generate snowflake topic variations for blended paragraphs.
 
-    examples = []
-    failed = 0
+    Uses a mix of book-specific topics and mundane topics.
+    Returns list of (varied_paragraph, "snowflake") tuples.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for i, para in enumerate(blended_paragraphs):
-        # Use the most processed version
-        styled_text = para.get("transplanted_text") or para.get("aligned_text") or para["text"]
-        word_count = len(styled_text.split())
+    # Interleave book topics and mundane topics (60/40 split)
+    all_topics = list(topics)
+    random.shuffle(all_topics)
+    mundane = list(MUNDANE_TOPICS)
+    random.shuffle(mundane)
 
-        logger.info(f"[{i+1}/{len(blended_paragraphs)}] Neutralizing ({word_count} words)...")
+    topic_pool = []
+    bi, mi = 0, 0
+    while bi < len(all_topics) or mi < len(mundane):
+        if bi < len(all_topics) and (random.random() < 0.6 or mi >= len(mundane)):
+            topic_pool.append(all_topics[bi])
+            bi += 1
+        elif mi < len(mundane):
+            topic_pool.append(mundane[mi])
+            mi += 1
 
-        # RTT neutralize
-        try:
-            neutral = neutralize_text(styled_text)
-        except Exception as e:
-            logger.warning(f"  Neutralization failed: {e}")
-            failed += 1
-            continue
+    # Cycle through topics
+    import itertools
+    topic_iter = itertools.cycle(topic_pool)
 
-        if not neutral:
-            failed += 1
-            continue
+    tasks = []
+    for para in paragraphs:
+        if max_snowflakes and len(tasks) >= max_snowflakes:
+            break
+        tasks.append((para, next(topic_iter)))
 
-        # Classify content type
-        content_type = classify_content_type(styled_text)
-        frames = persona_frames.get(content_type, persona_frames["narrative"])
+    logger.info(f"Generating {len(tasks)} snowflake variations ({workers} workers)...")
+    logger.info(f"  Topic pool: {len(topics)} book topics + {len(MUNDANE_TOPICS)} mundane topics")
+    results = []
 
-        # Generate training example
-        persona_frame = random.choice(frames)
-        instruction = build_instruction(persona_frame, word_count, styled_text)
-        perturbed = perturb_text(neutral)
+    def _make_variation(args):
+        para, topic = args
+        return create_topic_variation(para, author, topic)
 
-        if output_format == "llama_factory":
-            example = {
-                "instruction": instruction,
-                "input": perturbed,
-                "output": styled_text,
-            }
-        else:
-            prompt = f"{instruction}\n\n{perturbed}\n###\n"
-            example = {
-                "text": prompt + styled_text,
-                "prompt": prompt,
-                "word_count": word_count,
-                "variation_type": "blended_original",
-            }
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_make_variation, t): i for i, t in enumerate(tasks)}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            if done % 50 == 0:
+                logger.info(f"  Snowflakes: {done}/{len(tasks)} ({len(results)} ok)")
+            result = future.result()
+            if result:
+                results.append((result, "snowflake"))
 
-        examples.append(example)
+    logger.info(f"  Generated {len(results)}/{len(tasks)} snowflake variations")
+    return results
 
-        # Also create a snowflake-style variant: same output, info-dropout input
-        # Strip adjectives/adverbs from neutral text
-        words = neutral.split()
-        stripped = []
-        skip_words = {
-            "great", "small", "large", "old", "new", "good", "bad", "long",
-            "short", "dark", "light", "strange", "ancient", "terrible",
-            "horrible", "beautiful", "quiet", "loud", "vast", "immense",
-            "enormous", "peculiar", "odd", "weird", "deep", "pale", "faint",
-        }
-        for w in words:
-            if w.lower().rstrip(".,!?;:") not in skip_words:
-                stripped.append(w)
-        stripped_text = " ".join(stripped)
-
-        persona_frame2 = random.choice(frames)
-        instruction2 = build_instruction(persona_frame2, word_count, styled_text)
-        perturbed2 = perturb_text(stripped_text, rate=0.05)
-
-        if output_format == "llama_factory":
-            variant = {
-                "instruction": instruction2,
-                "input": perturbed2,
-                "output": styled_text,
-            }
-        else:
-            prompt2 = f"{instruction2}\n\n{perturbed2}\n###\n"
-            variant = {
-                "text": prompt2 + styled_text,
-                "prompt": prompt2,
-                "word_count": word_count,
-                "variation_type": "blended_info_dropout",
-            }
-
-        examples.append(variant)
-        logger.info(f"  OK: 2 examples ({content_type})")
-
-    # Shuffle and write
-    random.shuffle(examples)
-    with open(train_path, "w", encoding="utf-8") as f:
-        for ex in examples:
-            f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-
-    logger.info(f"\nDone! {len(examples)} examples written to {train_path}")
-    logger.info(f"  ({failed} paragraphs failed neutralization)")
-
-    return examples
-
-
-# =============================================================================
-# CLI
-# =============================================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate blended-style training data"
+        description="Generate blended-style training data using full RTT pipeline"
     )
     parser.add_argument("--blended", type=Path, required=True,
-                        help="Path to blended paragraphs JSON from experiment_blend_sentences.py")
+                        help="Path to blended paragraphs JSON")
     parser.add_argument("--author", type=str, default="Howard Russell",
                         help="Blended author name (default: Howard Russell)")
     parser.add_argument("--worldview", type=Path,
                         default=PROJECT_ROOT / "prompts" / "howard_russell_worldview.txt",
                         help="Path to worldview file with persona frames")
     parser.add_argument("--output", type=Path, required=True,
-                        help="Output directory for training data")
+                        help="Output directory (train.jsonl written here)")
     parser.add_argument("--format", choices=["llama_factory", "mlx"],
                         default="llama_factory",
                         help="Output format (default: llama_factory)")
+    parser.add_argument("--skip-snowflakes", action="store_true",
+                        help="Skip snowflake topic variations (faster)")
+    parser.add_argument("--snowflake-workers", type=int, default=4,
+                        help="Parallel workers for snowflake generation (default: 4)")
+    parser.add_argument("--min-chunk-words", type=int, default=40,
+                        help="Min words per chunk (default: 40 — chapters p25 = 61w, "
+                             "40 captures the short-paragraph tail)")
+    parser.add_argument("--max-chunk-words", type=int, default=100,
+                        help="Max words per chunk (default: 100 — chapters median 75w, "
+                             "p90 111w. Produces chunks averaging ~94w matching inference)")
+    parser.add_argument("--overlap-sentences", type=int, default=2,
+                        help="Sentences overlapping between adjacent chunks (default: 2)")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from existing output file")
 
     args = parser.parse_args()
 
@@ -448,18 +264,102 @@ def main():
         blended = json.load(f)
     logger.info(f"  {len(blended)} paragraphs loaded")
 
-    # Load persona frames
+    # Load and register persona frames
     logger.info(f"Loading persona frames from {args.worldview}")
     frames = load_persona_frames(args.worldview)
+    PERSONA_FRAMES[args.author] = frames
 
-    # Generate training data
-    generate_training_data(
-        blended_paragraphs=blended,
-        author=args.author,
-        persona_frames=frames,
-        output_dir=args.output,
-        output_format=args.format,
+    # Extract styled text from blended paragraphs
+    # Use the most processed version: transplanted > aligned > raw
+    styled_paragraphs = []
+    for para in blended:
+        text = para.get("transplanted_text") or para.get("aligned_text") or para["text"]
+        styled_paragraphs.append(text)
+
+    total_words = sum(len(p.split()) for p in styled_paragraphs)
+    logger.info(f"  {total_words:,} total words across {len(styled_paragraphs)} paragraphs")
+
+    # =========================================================================
+    # Step 1: Word-based overlapping chunks (matches proven Lovecraft pipeline)
+    #
+    # Uses create_overlapping_chunks() from generate_flat_training.py — the SAME
+    # function that produced the working Lovecraft adapter. Key properties:
+    #   - Chunks of 150-400 words (200-530 tokens), capturing multi-sentence arcs
+    #   - 2-sentence overlap at chunk boundaries (moderate, ~1.2× exposure)
+    #   - Cross-paragraph spans: treats the corpus as a flat sentence stream
+    #
+    # Why cross-paragraph spans are OK for a blended corpus:
+    #   - Each blended paragraph is a self-contained Russell+Lovecraft unit
+    #   - Chunks spanning boundaries teach style invariance across topics
+    #     (same lesson snowflakes teach, extended to within-sequence variation)
+    #   - The Lovecraft adapter was trained this way and works in production
+    #   - The base model's attention handles topic boundaries; the LoRA only
+    #     modulates style
+    # =========================================================================
+    overlap_config = OverlapConfig(
+        min_words=args.min_chunk_words,
+        max_words=args.max_chunk_words,
+        overlap_sentences=args.overlap_sentences,
     )
+
+    raw_entries = [(p, "original") for p in styled_paragraphs]
+    chunks = create_overlapping_chunks(raw_entries, overlap_config)
+    logger.info(f"Chunking: {len(styled_paragraphs)} blended paragraphs → {len(chunks)} chunks "
+                f"(min {args.min_chunk_words}w, max {args.max_chunk_words}w, "
+                f"{args.overlap_sentences}-sentence overlap)")
+
+    # =========================================================================
+    # Step 2: Generate snowflake topic variations
+    # Uses book-specific topics (60%) + mundane topics (40%)
+    # =========================================================================
+    if not args.skip_snowflakes:
+        # Extract just the text from original-type chunks for snowflake generation
+        original_texts = [text for text, vtype in chunks if vtype == "original"]
+        snowflakes = generate_snowflakes(
+            original_texts, args.author,
+            topics=BOOK_TOPICS,
+            workers=args.snowflake_workers,
+        )
+        chunks.extend(snowflakes)
+        logger.info(f"After snowflakes: {len(chunks)} total chunks")
+    else:
+        logger.info(f"Snowflakes skipped. Total chunks: {len(chunks)}")
+
+    # =========================================================================
+    # Step 3: Add robustness entries (heavy perturbation variants)
+    # =========================================================================
+    original_texts = [text for text, vtype in chunks if vtype == "original"]
+    n_robustness = min(len(original_texts) // 3, len(original_texts))
+    robustness = [(p, "robustness") for p in random.sample(original_texts, n_robustness)]
+    chunks.extend(robustness)
+    logger.info(f"  + {len(robustness)} robustness entries = {len(chunks)} total")
+
+    # Shuffle
+    random.shuffle(chunks)
+
+    # =========================================================================
+    # Step 4: Generate training data using the real pipeline
+    # Handles: RTT neutralization, many-to-one variants (standard + info_dropout
+    # + abstract), persona frames, perturbation, lexical bleed filtering
+    # =========================================================================
+    output_path = args.output / "train.jsonl"
+    logger.info(f"\nStarting training data generation → {output_path}")
+
+    n_originals = sum(1 for _, vtype in chunks if vtype == "original")
+    n_other = len(chunks) - n_originals
+    expected = int(n_originals * 3 * 0.9 + n_other * 0.9)
+    logger.info(f"Expected output: ~{expected} training examples")
+    logger.info(f"  ({n_originals} originals × 3 variants + {n_other} snowflake/robustness × 1)")
+
+    n_written = generate_training_data(
+        chunks=chunks,
+        author=args.author,
+        output_path=output_path,
+        output_format=args.format,
+        resume=args.resume,
+    )
+
+    logger.info(f"\nDone! {n_written} training examples written to {output_path}")
 
 
 if __name__ == "__main__":

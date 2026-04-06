@@ -230,7 +230,10 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path, mlx_model_path: str =
         "fine_tune_type": "lora",
         "lora_parameters": {
             "rank": rank,
-            "scale": alpha / rank,  # MLX scale = alpha / rank
+            # MLX doesn't support rsLoRA — it applies scale directly as a multiplier.
+            # If rsLoRA was used in training, effective scale = alpha/sqrt(rank).
+            # If standard LoRA, effective scale = alpha/rank.
+            "scale": alpha / (rank ** 0.5) if peft_config.get("use_rslora", False) else alpha / rank,
             "dropout": peft_config.get("lora_dropout", 0.0),
             "keys": sorted(lora_keys),
         },

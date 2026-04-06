@@ -316,15 +316,22 @@ class VocabTransplanter:
             "mechanical", "static", "dynamic", "linear", "angular",
             "parallel", "perpendicular", "horizontal", "vertical",
             "spatial", "temporal", "structural", "functional",
+            "electromagnetic", "gravitational", "convertible", "radiant",
+            "discontinuous", "instantaneous", "infinitesimal",
             # Logical/structural
             "logical", "necessary", "sufficient", "possible", "impossible",
             "valid", "invalid", "true", "false", "correct", "incorrect",
             "essential", "fundamental", "basic", "intrinsic", "extrinsic",
+            "propositional", "hypothetical", "assertoric", "deductive",
+            "inductive", "causal", "relational", "contravariant", "covariant",
+            # Latin/philosophical terms (must not be split from phrases)
+            "priori", "posteriori", "facto", "hoc", "fortiori",
             # Prefixes/classifiers
             "non", "pre", "post", "semi", "anti", "sub", "super",
             # Measurement/comparison
             "equal", "identical", "opposite", "inverse", "proportional",
             "singular", "plural", "separate", "independent", "dependent",
+            "diverse", "compatible", "incompatible", "convertible",
             # Positional
             "internal", "external", "upper", "lower", "inner", "outer",
             "primary", "secondary", "initial", "final", "former", "latter",
@@ -340,6 +347,8 @@ class VocabTransplanter:
             # Grammatical/linguistic terms
             "verbal", "nominal", "adverbial", "conditional", "subjunctive",
             "indicative", "tactual", "visual", "auditory", "olfactory",
+            # Science-specific nouns spaCy may tag as ADJ
+            "ether", "aether",
         }
         if lemma in technical or text_lower in technical:
             return False
@@ -413,13 +422,16 @@ class VocabTransplanter:
         # Build replacement text
         result_tokens = [t.text_with_ws for t in tokens]
 
-        # Curated atmospheric Lovecraft vocabulary by noun-category
-        # These are words that genuinely shift mood toward cosmic horror
+        # Curated atmospheric Lovecraft vocabulary by noun-category.
+        # ONLY true adjectives — no participial forms (-ing, -ed) that break
+        # grammar when used as attributive modifiers (e.g., "crumbling with
+        # the scent" is wrong; "cyclopean with the scent" is fine because
+        # cyclopean is a true adjective).
         atmo_vocab = {
             "physical": [
-                "cyclopean", "crumbling", "monolithic", "cavernous", "labyrinthine",
-                "decaying", "moss-grown", "lichened", "windowless", "sunken",
-                "tottering", "mouldering", "fungoid", "rugose", "pitted",
+                "cyclopean", "monolithic", "cavernous", "labyrinthine",
+                "windowless", "sunken", "fungoid", "rugose", "pitted",
+                "sepulchral", "subterranean", "basaltic", "hewn", "vast",
             ],
             "abstract": [
                 "nameless", "unnameable", "blasphemous", "forbidden", "accursed",
@@ -427,23 +439,28 @@ class VocabTransplanter:
                 "eldritch", "unwholesome", "malign", "noxious", "damnable",
             ],
             "entity": [
-                "gaunt", "cadaverous", "pallid", "wizened", "hunched",
-                "hollow-eyed", "spectral", "ghoulish", "shambling", "withered",
-                "hooded", "cowled", "furtive", "skulking", "haggard",
+                "gaunt", "cadaverous", "pallid", "wizened", "spectral",
+                "ghoulish", "furtive", "haggard", "sallow", "wan",
+                "lupine", "aquiline", "gaunt", "emaciated", "corpulent",
             ],
             "temporal": [
-                "immemorial", "antediluvian", "primordial", "aeon-dead", "forgotten",
+                "immemorial", "antediluvian", "primordial", "forgotten",
                 "primal", "prehistoric", "hoary", "timeless", "ageless",
                 "elder", "ancient", "archaic", "primeval", "olden",
             ],
             "sensory": [
                 "fetid", "phosphorescent", "luminous", "tenebrous", "gibbous",
                 "noisome", "acrid", "sulphurous", "viscous", "gelatinous",
-                "pallid", "livid", "leprous", "iridescent", "opalescent",
+                "pallid", "livid", "iridescent", "opalescent", "crepuscular",
             ],
         }
 
         for idx, token, word_type, category in to_replace:
+            # 70% use atmospheric vocab, 30% keep original — adds vocabulary range
+            # so the model doesn't learn that EVERY adjective must be Lovecraftian
+            if random.random() > 0.70:
+                continue  # keep original adjective
+
             candidates = atmo_vocab.get(category, atmo_vocab["abstract"])
             replacement = random.choice(candidates)
 
@@ -572,6 +589,97 @@ def extract_paragraphs(text: str, min_words: int = 40) -> List[str]:
     return paragraphs
 
 
+# Words that typically signal a new thought/sub-topic when they start a sentence
+TRANSITION_WORDS = {
+    "But", "Yet", "However", "Nevertheless", "Nonetheless", "Still",
+    "Moreover", "Furthermore", "Besides", "Indeed", "Thus", "Hence",
+    "Therefore", "Consequently", "Accordingly", "Now", "Then", "Again",
+    "Meanwhile", "Afterward", "Later", "Finally", "First", "Second",
+    "Third", "Firstly", "Secondly", "Thirdly", "Lastly",
+}
+
+
+def decompose_paragraph(paragraph: str, target_min: int = 60, target_max: int = 100) -> List[str]:
+    """Split a long paragraph into shorter sub-paragraphs at natural boundaries.
+
+    Uses greedy sentence accumulation with preference for transition-word breaks.
+    A sentence starting with "But", "However", "Thus", "Moreover", etc. signals
+    a natural stopping point — if the accumulated window is already in the target
+    range, break there. Otherwise keep accumulating until forced to break.
+
+    Returns list of sub-paragraphs in target_min..target_max word range.
+    Returns empty list if paragraph is too short to decompose.
+    """
+    sentences = split_into_sentences(paragraph)
+    if len(sentences) < 4:
+        return []
+
+    total_words = sum(len(s.split()) for s in sentences)
+    if total_words < target_max + target_min:
+        return []  # not enough material for multiple sub-paragraphs
+
+    sub_paragraphs = []
+    window = []
+    window_wc = 0
+
+    for i, sent in enumerate(sentences):
+        sw = len(sent.split())
+        is_transition = False
+        if i > 0:
+            first_word = sent.split()[0].rstrip(",.:;!?") if sent.split() else ""
+            is_transition = first_word in TRANSITION_WORDS
+
+        # Break decision: if we're at a transition point and window is in target range, break BEFORE adding
+        if is_transition and target_min <= window_wc <= target_max:
+            sub_paragraphs.append(" ".join(window))
+            window = [sent]
+            window_wc = sw
+            continue
+
+        # Forced break: adding this sentence would exceed target_max and we're already in range
+        if window_wc + sw > target_max and window_wc >= target_min:
+            sub_paragraphs.append(" ".join(window))
+            window = [sent]
+            window_wc = sw
+            continue
+
+        # Otherwise accumulate
+        window.append(sent)
+        window_wc += sw
+
+    # Flush remaining window if it meets minimum
+    if window_wc >= target_min:
+        sub_paragraphs.append(" ".join(window))
+
+    return sub_paragraphs
+
+
+def augment_with_short_variants(paragraphs: List[str], target_min: int = 60,
+                                 target_max: int = 100) -> List[str]:
+    """Augment a paragraph list with short variants from long paragraphs.
+
+    Keeps all original paragraphs AND adds decomposed sub-paragraphs for those
+    long enough to be usefully split. The sub-paragraphs are real author text
+    (sentences lifted verbatim from the original) but at shorter lengths.
+
+    Returns augmented list with originals + short variants.
+    """
+    augmented = list(paragraphs)  # keep all originals
+    n_added = 0
+
+    for para in paragraphs:
+        wc = len(para.split())
+        if wc < target_max * 1.5:
+            continue  # not worth decomposing
+
+        sub_paras = decompose_paragraph(para, target_min=target_min, target_max=target_max)
+        augmented.extend(sub_paras)
+        n_added += len(sub_paras)
+
+    logger.info(f"  Decomposition added {n_added} short variants from long paragraphs")
+    return augmented
+
+
 def build_sentence_index(
     text: str,
     author: str,
@@ -680,15 +788,24 @@ def stitch_interleave(
         n_to_insert = min(n_to_insert, max_insertions)
 
     # Score each insertion point by best available similarity
-    insertion_candidates = []
+    # Build a list of (position, candidate_list) sorted by best similarity
+    scored_positions = []
     for idx, candidates in compatible_map.items():
         if candidates:
-            best = candidates[0]
-            insertion_candidates.append((idx, best[0], best[1]))
+            scored_positions.append((idx, candidates))
+    scored_positions.sort(key=lambda x: x[1][0][1], reverse=True)
 
-    # Sort by similarity and take top n
-    insertion_candidates.sort(key=lambda x: x[2], reverse=True)
-    selected = insertion_candidates[:n_to_insert]
+    # Greedily select, deduplicating by sentence text
+    selected = []
+    used_texts = set()
+    for idx, candidates in scored_positions:
+        if len(selected) >= n_to_insert:
+            break
+        for sent, sim in candidates:
+            if sent.text not in used_texts:
+                selected.append((idx, sent, sim))
+                used_texts.add(sent.text)
+                break
     selected.sort(key=lambda x: x[0])  # re-sort by position for stable insertion
 
     # Build stitched paragraph
@@ -727,15 +844,23 @@ def stitch_replace(
     if max_insertions > 0:
         n_to_replace = min(n_to_replace, max_insertions)
 
-    # Find best replacements
-    replacement_candidates = []
+    # Find best replacements, deduplicating by sentence text
+    scored_positions = []
     for idx, candidates in compatible_map.items():
         if candidates and candidates[0][1] > 0.3:  # higher threshold for replacement
-            replacement_candidates.append((idx, candidates[0][0], candidates[0][1]))
+            scored_positions.append((idx, candidates))
+    scored_positions.sort(key=lambda x: x[1][0][1], reverse=True)
 
-    replacement_candidates.sort(key=lambda x: x[2], reverse=True)
-    selected = replacement_candidates[:n_to_replace]
-    replace_indices = {s[0] for s in selected}
+    selected = []
+    used_texts = set()
+    for idx, candidates in scored_positions:
+        if len(selected) >= n_to_replace:
+            break
+        for sent, sim in candidates:
+            if sent.text not in used_texts:
+                selected.append((idx, sent, sim))
+                used_texts.add(sent.text)
+                break
 
     result = []
     insertion_points = []
@@ -940,6 +1065,7 @@ def blend_paragraphs(
         target_mode = next(mode_iter)
         modes_to_try = [target_mode] + [m for m in config.insertion_modes if m != target_mode]
 
+        blend_succeeded = False
         for mode in modes_to_try:
             stitch_fn = STITCH_STRATEGIES[mode]
             stitched, ins_points, supp_sents, sim_scores = stitch_fn(
@@ -949,6 +1075,15 @@ def blend_paragraphs(
 
             if not supp_sents:
                 continue  # no compatible sentences found for this mode
+
+            # Skip if average similarity is too low — prevents forced pairings
+            # where semantic distance is too vast. Falls through to unblended
+            # fallback below so the base author paragraph isn't wasted.
+            avg_sim = np.mean(sim_scores)
+            if avg_sim < 0.40:
+                if verbose:
+                    logger.debug(f"  Weak blend: avg similarity {avg_sim:.3f} < 0.40, try next mode")
+                continue
 
             stitched_text = " ".join(stitched)
 
@@ -985,6 +1120,7 @@ def blend_paragraphs(
                 vocab_replacements=vocab_reps,
             )
             results.append(result)
+            blend_succeeded = True
 
             # Mark supplementary sentences as used
             for s in supp_sents:
@@ -998,6 +1134,43 @@ def blend_paragraphs(
                 )
 
             break  # use first successful mode per paragraph
+
+        # Fallback: if no mode produced an acceptable blend, keep the primary
+        # paragraph as an unblended entry. The base author text is still valid
+        # training material — it contributes vocabulary diversity and range
+        # without the forced stylistic collision of a weak blend. The styles
+        # have already been deemed compatible at the corpus level; individual
+        # paragraph mismatches shouldn't waste real author prose.
+        if not blend_succeeded:
+            # Apply vocab transplant even to unblended paragraphs so the
+            # atmospheric vocabulary appears consistently across training
+            transplanted = None
+            vocab_reps = []
+            if transplanter:
+                try:
+                    transplanted, vocab_reps = transplanter.transplant(para_text)
+                except Exception as e:
+                    logger.warning(f"Transplant failed on unblended: {e}")
+
+            result = BlendedParagraph(
+                text=para_text,
+                aligned_text=None,
+                transplanted_text=transplanted,
+                primary_author=primary_author,
+                supplementary_author=supplementary_author,
+                primary_sentences=sentences,
+                supplementary_sentences=[],
+                insertion_mode="unblended",
+                insertion_points=[],
+                similarity_scores=[],
+                source_paragraph=para_text,
+                vocab_replacements=vocab_reps,
+            )
+            results.append(result)
+
+            if verbose:
+                logger.debug(f"  [unblended] Kept primary paragraph {len(results)}: "
+                             f"no strong blend available, {len(sentences)} sentences")
 
     return results
 
@@ -1140,6 +1313,17 @@ def main():
                         help="Minimum cosine similarity for compatibility (default: 0.15)")
     parser.add_argument("--max-insertions", type=int, default=0,
                         help="Max supplementary sentences per paragraph (0 = no cap)")
+    parser.add_argument("--min-sentences", type=int, default=4,
+                        help="Min sentences per primary paragraph (default: 4)")
+    parser.add_argument("--max-sentences", type=int, default=20,
+                        help="Max sentences per primary paragraph (default: 20)")
+    parser.add_argument("--decompose-long", action="store_true",
+                        help="Split long paragraphs at natural boundaries to create "
+                             "short variants matching target inference length")
+    parser.add_argument("--short-target-min", type=int, default=60,
+                        help="Min words for decomposed short variants (default: 60)")
+    parser.add_argument("--short-target-max", type=int, default=100,
+                        help="Max words for decomposed short variants (default: 100)")
     parser.add_argument("--modes", nargs="+",
                         choices=["interleave", "replace", "append"],
                         default=["interleave", "replace", "append"],
@@ -1163,6 +1347,8 @@ def main():
         blend_ratio=args.blend_ratio,
         max_insertions=args.max_insertions,
         min_similarity=args.min_similarity,
+        min_paragraph_sentences=args.min_sentences,
+        max_paragraph_sentences=args.max_sentences,
         insertion_modes=args.modes,
     )
 
@@ -1175,6 +1361,16 @@ def main():
     primary_text, primary_source = load_corpus_text(args.primary)
     primary_paragraphs = extract_paragraphs(primary_text)
     logger.info(f"  {len(primary_paragraphs)} paragraphs")
+
+    # Augment with short variants (split long paragraphs at natural boundaries)
+    # This creates short training examples matching the target chapter length range
+    if args.decompose_long:
+        primary_paragraphs = augment_with_short_variants(
+            primary_paragraphs,
+            target_min=args.short_target_min,
+            target_max=args.short_target_max,
+        )
+        logger.info(f"  {len(primary_paragraphs)} paragraphs after decomposition")
 
     # Split each paragraph into sentences
     primary_sentences_list = [split_into_sentences(p) for p in primary_paragraphs]

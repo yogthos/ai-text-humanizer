@@ -91,6 +91,10 @@ class TransferConfig:
     expand_for_texture: bool = False  # Add stronger expansion prompt for texture/flourishes
     expand_for_texture_explicit: bool = False  # True when set by CLI flag (takes priority over adapter config)
 
+    # Paragraph merging — merge short paragraphs to reach minimum word count
+    # LoRAs produce better rhythm/burstiness with longer input blocks (~200+ words)
+    merge_paragraphs: Optional[int] = None  # None = no merging, int = min words per block
+
     # Neutralization settings
     skip_neutralization: bool = False  # If True, skip RTT and use original text as input
 
@@ -230,10 +234,22 @@ class StyleTransfer:
         # Get backend configuration from adapter config
         adapter_cfg = get_adapter_config(primary_adapter_path)
 
-        # Apply per-adapter expand_for_texture override if set (CLI flags take priority)
+        # Apply per-adapter overrides if set (CLI flags take priority)
         if adapter_cfg.expand_for_texture is not None and not self.config.expand_for_texture_explicit:
             self.config.expand_for_texture = adapter_cfg.expand_for_texture
             logger.info(f"Using adapter-specific expand_for_texture={adapter_cfg.expand_for_texture}")
+
+        if adapter_cfg.perspective is not None:
+            self.config.perspective = adapter_cfg.perspective
+            logger.info(f"Using adapter-specific perspective={adapter_cfg.perspective}")
+
+        if adapter_cfg.verify_entailment is not None:
+            self.config.verify_entailment = adapter_cfg.verify_entailment
+            logger.info(f"Using adapter-specific verify_entailment={adapter_cfg.verify_entailment}")
+
+        if adapter_cfg.merge_paragraphs is not None:
+            self.config.merge_paragraphs = adapter_cfg.merge_paragraphs
+            logger.info(f"Using adapter-specific merge_paragraphs={adapter_cfg.merge_paragraphs}")
 
         # Use factory to create the appropriate generator based on backend
         self.generator = create_style_generator(
@@ -1066,6 +1082,43 @@ class StyleTransfer:
         if not paragraphs:
             logger.warning("No content paragraphs found")
             return text, self._transfer_stats
+
+        # Merge short paragraphs into larger blocks for better LoRA rhythm.
+        # LoRAs produce more natural sentence variation with 200+ word inputs.
+        if self.config.merge_paragraphs:
+            min_words = self.config.merge_paragraphs
+            merged = []
+            current_block = []
+            current_words = 0
+
+            for para in paragraphs:
+                para_words = len(para.split())
+                # Always keep headings separate
+                if self.config.pass_headings_unchanged and len(para.strip().split('\n')) == 1 and is_heading(para.strip()):
+                    if current_block:
+                        merged.append('\n\n'.join(current_block))
+                        current_block = []
+                        current_words = 0
+                    merged.append(para)
+                    continue
+
+                current_block.append(para)
+                current_words += para_words
+
+                if current_words >= min_words:
+                    merged.append('\n\n'.join(current_block))
+                    current_block = []
+                    current_words = 0
+
+            # Flush remaining — merge with last block if too small
+            if current_block:
+                if merged and current_words < min_words // 2 and not is_heading(merged[-1].strip()):
+                    merged[-1] = merged[-1] + '\n\n' + '\n\n'.join(current_block)
+                else:
+                    merged.append('\n\n'.join(current_block))
+
+            logger.info(f"Merged {len(paragraphs)} paragraphs into {len(merged)} blocks (min_words={min_words})")
+            paragraphs = merged
 
         # Extract document context for improved generation and critique
         if self.config.use_document_context:

@@ -1,0 +1,98 @@
+### Model
+# Qwen3.5-35B-A3B-Base: MoE model, 35B total params, 3B active per token
+# 256 routed experts + shared expert per layer, Gated DeltaNet hybrid attention
+# MUST use Base, not Instruct -- instruct models are biased in output style
+model_name_or_path: Qwen/Qwen3.5-35B-A3B-Base
+trust_remote_code: true
+
+### Method
+stage: sft
+do_train: true
+finetuning_type: lora
+
+# lora_target: all applies LoRA to all nn.Linear modules:
+#   - Attention: q_proj, k_proj, v_proj, o_proj (softmax layers)
+#   - Linear attention: in_proj_qkv, in_proj_z, in_proj_b, in_proj_a, out_proj (DeltaNet layers)
+#   - Shared expert: gate_proj, up_proj, down_proj
+#   - Router gate + shared_expert_gate
+lora_target: all
+
+# Rank 256 with rsLoRA: Same as Russell adapter. Style transfer requires high
+# rank to capture sentence structure, rhythm, and vocabulary patterns.
+# alpha=sqrt(rank)=16 gives scaling = 16/16 = 1.0 — the neutral value.
+lora_rank: 256
+lora_alpha: 16
+lora_dropout: 0.1
+use_rslora: true
+
+# NEFTune: Random noise in embeddings prevents memorization of exact phrases.
+neftune_noise_alpha: 5.0
+
+### Dataset
+# Howard Russell: Blended Russell (substance) + Lovecraft (style) corpus
+# Currently 100 starter examples; regenerate with full RTT + snowflakes
+# on server to reach ~3,850 examples for production training.
+dataset: howard_russell_sft
+template: qwen3_5_nothink
+cutoff_len: 2048
+packing: true
+overwrite_cache: true
+preprocessing_num_workers: 16
+
+### Output
+output_dir: saves/Qwen3.5-35B-A3B/lora/howard_russell
+logging_steps: 10
+save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+
+### Training
+# Dataset: ~5,600 examples from 1556 blended paragraphs
+#   (1556 originals × 3 variants + ~1090 snowflakes + 518 robustness, ~10% loss)
+#   Includes 456 short-paragraph (60-150w) entries for chapter-matching lengths
+# DDP: 2 GPUs × 1 batch × 4 accum = 8 global batch
+# Steps per epoch: ~700
+# 3 epochs: ~2,100 steps
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 2.0e-5
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.10
+max_grad_norm: 0.3
+bf16: true
+
+### Evaluation
+val_size: 0.05
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 200
+
+### Optimization
+flash_attn: sdpa
+gradient_checkpointing: true
+optim: paged_adamw_8bit
+
+# =============================================================================
+# POST-TRAINING: Convert for local MLX inference (M1 Max 64GB)
+# =============================================================================
+#
+# 1. Quantize base model to 6-bit MLX (already done if other adapters exist):
+#
+#    python -m mlx_lm convert \
+#        --hf-path Qwen/Qwen3.5-35B-A3B-Base \
+#        --mlx-path models/Qwen3.5-35B-A3B-Base-6bit-MLX \
+#        -q --q-bits 6
+#
+# 2. Convert the PEFT LoRA adapter to MLX format:
+#
+#    python scripts/convert_peft_to_mlx.py \
+#        --input saves/Qwen3.5-35B-A3B/lora/howard_russell \
+#        --output lora_adapters/howard_russell_35b_mlx \
+#        --mlx-model models/Qwen3.5-35B-A3B-Base-6bit-MLX
+#
+# 3. Run inference locally:
+#
+#    python restyle.py input.md -o output.md \
+#        --adapter lora_adapters/howard_russell_35b_mlx \
+#        --author "Howard Russell"

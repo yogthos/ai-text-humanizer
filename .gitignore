@@ -53,3 +53,8 @@ models/
 # Logs
 logs/*.md
 !logs/.gitkeep
+data/training/howard_russell/LlamaFactory/train.jsonl
+data/blended/howard_russell_corpus_full.json
+data/blended/howard_russell_forward.json
+data/blended/howard_russell_reverse.json
+data/blended/howard_russell_short.json
