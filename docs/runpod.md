@@ -7,11 +7,12 @@ For training concepts and hyperparameter rationale, see `style_transfer_training
 
 | Config | GPU | Use Case |
 |--------|-----|----------|
-| 1x A100 80GB SXM | Qwen 2.5-32B QLoRA (rank 256, ~35GB) | ~$1.64/hr |
-| 2x H100 80GB SXM | Qwen 3.5-35B bf16 (rank 256, ~80GB per GPU) | ~$3.29/hr each |
+| 1x A100 80GB | Qwen 2.5-32B QLoRA 4-bit (rank 256, ~35GB) | ~$1.64/hr |
+| 2x A100 80GB | Qwen 2.5-32B bf16 + DeepSpeed ZeRO-3 (rank 256, ~40GB/GPU) | ~$3.28/hr |
+| 2x H100 80GB | Qwen 3.5-35B bf16 (rank 256, ~80GB per GPU) | ~$6.58/hr |
 
 - **Container disk**: 20GB default is fine
-- **Volume disk**: 150GB+ (model weights + checkpoints)
+- **Volume disk**: 200GB+ (model weights + checkpoints — ZeRO-3 checkpoints are ~29GB each)
 - **Template**: RunPod PyTorch 2.x (CUDA 12.x)
 
 ## Setup
@@ -86,6 +87,57 @@ tail -f saves/Qwen2.5-32B/lora/howard_russell/trainer_log.jsonl
 
 First 10-20 steps: loss should be in the 1-3 range and declining. If loss spikes above
 1000 or drops to 0.0, the config has a problem.
+
+## Grabbing a Mid-Training Checkpoint
+
+You can download and test any checkpoint while training continues. Useful for
+evaluating epoch 1 quality without stopping a 3-epoch run.
+
+```bash
+# Find available checkpoints
+ls saves/Qwen2.5-32B/lora/howard_russell/checkpoint-*
+
+# Package just the adapter weights (skip optimizer state which is ~25GB)
+cd saves/Qwen2.5-32B/lora/howard_russell/checkpoint-3600
+tar czf /workspace/checkpoint-3600-adapter.tar.gz \
+    adapter_model.safetensors adapter_config.json \
+    tokenizer* chat_template* special_tokens*
+```
+
+Download locally, then convert and test:
+
+```bash
+# Convert PEFT → MLX
+python scripts/convert_peft_to_mlx.py \
+    --input /path/to/checkpoint-3600 \
+    --output lora_adapters/howard_russell_25_32b_mlx \
+    --mlx-model models/Qwen2.5-32B-Base-4bit-MLX
+
+# Test on a chapter paragraph
+python restyle.py input.md -o output.md \
+    --adapter lora_adapters/howard_russell_25_32b_mlx
+```
+
+**Epoch boundaries** (with ~3,641 steps per epoch):
+- Epoch 1: checkpoint-3600 or checkpoint-3700
+- Epoch 2: checkpoint-7300
+- Epoch 3: final (checkpoint-10900)
+
+### Checkpoint Disk Management
+
+DeepSpeed ZeRO-3 checkpoints are **~29GB each** (includes optimizer state shards).
+With `save_steps: 100`, disk fills fast. Options:
+
+```bash
+# Option 1: Add to yaml before training
+save_total_limit: 3
+
+# Option 2: Background cleanup during training (if yaml can't be changed)
+while true; do bash /workspace/revenant/scripts/cleanup_checkpoints.sh; sleep 300; done &
+
+# Option 3: Manual cleanup
+ls -d saves/Qwen2.5-32B/lora/howard_russell/checkpoint-* | sort -t- -k2 -n | head -n -3 | xargs rm -rf
+```
 
 ## Upload Adapter
 
