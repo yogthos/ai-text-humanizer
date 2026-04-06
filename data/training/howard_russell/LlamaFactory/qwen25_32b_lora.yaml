@@ -121,7 +121,7 @@ flash_attn: fa2
 gradient_checkpointing: true
 # DeepSpeed ZeRO-3: shards model + optimizer + gradients across 2 GPUs.
 # Each GPU holds ~40GB instead of 80GB. Config file handles shard settings.
-deepspeed: data/training/howard_russell/LlamaFactory/ds_z3_config.json
+deepspeed: ds_z3_config.json
 # With ZeRO-3, use standard AdamW (DeepSpeed manages optimizer partitioning)
 optim: adamw_torch
 
