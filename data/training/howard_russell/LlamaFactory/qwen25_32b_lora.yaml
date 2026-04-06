@@ -63,6 +63,7 @@ train_on_prompt: true
 output_dir: saves/Qwen2.5-32B/lora/howard_russell
 logging_steps: 10
 save_steps: 100
+save_total_limit: 3
 plot_loss: true
 overwrite_output_dir: true
 
