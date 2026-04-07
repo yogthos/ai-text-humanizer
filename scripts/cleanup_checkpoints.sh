@@ -3,7 +3,7 @@
 # Avoids deleting during active saves by checking for write locks.
 # Run as cron or background loop.
 CHECKPOINT_DIR="saves/Qwen2.5-32B/lora/howard_russell"
-KEEP=3
+KEEP=5
 
 cd /workspace/revenant 2>/dev/null || cd /workspace/howard_russell 2>/dev/null || exit 0
 
