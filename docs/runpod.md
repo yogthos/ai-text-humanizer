@@ -33,6 +33,12 @@ mkdir -p $HF_DATASETS_CACHE
 pip install "llamafactory[torch] @ git+https://github.com/hiyouga/LLaMA-Factory.git"
 pip install bitsandbytes
 
+# Flash Attention 2 (optional but ~20% faster training)
+pip install flash-attn --no-build-isolation
+
+# DeepSpeed (required for 2x GPU ZeRO-3 sharding)
+pip install deepspeed
+
 # For Qwen 3.5 ONLY — pin transformers version:
 # pip install transformers==5.2.0
 
