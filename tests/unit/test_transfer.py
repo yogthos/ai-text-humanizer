@@ -29,10 +29,7 @@ class TestTransferConfig:
         assert config.max_tokens == 512
         assert config.temperature is None  # None means use lora config
         assert config.top_p == 0.9
-        assert config.verify_entailment is True
-        assert config.entailment_threshold == 0.7
-        assert config.max_repair_attempts == 5
-        assert config.reduce_repetition is True
+        assert config.verify_semantic_fidelity is True
 
     def test_custom_values(self):
         """Test that custom values are applied."""
@@ -40,11 +37,11 @@ class TestTransferConfig:
 
         config = TransferConfig(
             temperature=0.8,
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
         )
 
         assert config.temperature == 0.8
-        assert config.verify_entailment is False
+        assert config.verify_semantic_fidelity is False
 
     def test_perspective_options(self):
         """Test perspective configuration."""
@@ -83,8 +80,6 @@ class TestTransferStats:
         stats = TransferStats()
 
         assert stats.paragraphs_processed == 0
-        assert stats.paragraphs_repaired == 0
-        assert stats.words_replaced == 0
         assert stats.total_time_seconds == 0.0
 
     def test_to_dict(self):
@@ -93,8 +88,6 @@ class TestTransferStats:
 
         stats = TransferStats(
             paragraphs_processed=5,
-            paragraphs_repaired=1,
-            words_replaced=10,
             total_time_seconds=45.5,
             avg_time_per_paragraph=9.1,
             entailment_scores=[0.8, 0.9, 0.85, 0.75, 0.95],
@@ -103,8 +96,6 @@ class TestTransferStats:
         d = stats.to_dict()
 
         assert d["paragraphs_processed"] == 5
-        assert d["paragraphs_repaired"] == 1
-        assert d["words_replaced"] == 10
         assert d["total_time_seconds"] == 45.5
         assert d["avg_time_per_paragraph"] == 9.1
         assert d["avg_entailment_score"] == 0.85  # Average of scores
@@ -146,7 +137,7 @@ class TestStyleTransfer:
         """Test initialization with adapter path."""
         from src.generation.transfer import StyleTransfer, TransferConfig
 
-        config = TransferConfig(verify_entailment=False)
+        config = TransferConfig(verify_semantic_fidelity=False)
 
         transfer = StyleTransfer(
             adapter_path="lora_adapters/test",
@@ -163,7 +154,7 @@ class TestStyleTransfer:
         """Test initialization without adapter (base model only)."""
         from src.generation.transfer import StyleTransfer, TransferConfig
 
-        config = TransferConfig(verify_entailment=False)
+        config = TransferConfig(verify_semantic_fidelity=False)
 
         transfer = StyleTransfer(
             adapter_path=None,
@@ -179,7 +170,7 @@ class TestStyleTransfer:
         """Test that text ending with period is unchanged."""
         from src.generation.transfer import StyleTransfer, TransferConfig
 
-        config = TransferConfig(verify_entailment=False)
+        config = TransferConfig(verify_semantic_fidelity=False)
         transfer = StyleTransfer(
             adapter_path=None,
             author_name="Test",
@@ -197,7 +188,7 @@ class TestStyleTransfer:
         """Test that incomplete text gets period added."""
         from src.generation.transfer import StyleTransfer, TransferConfig
 
-        config = TransferConfig(verify_entailment=False)
+        config = TransferConfig(verify_semantic_fidelity=False)
         transfer = StyleTransfer(
             adapter_path=None,
             author_name="Test",
@@ -211,51 +202,12 @@ class TestStyleTransfer:
         assert result.endswith(".")
 
     @patch('src.generation.transfer.create_style_generator')
-    def test_clean_repair_output_basic(self, mock_generator_class, mock_critic):
-        """Test that clean_repair_output handles empty and simple text."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        config = TransferConfig(verify_entailment=False)
-        transfer = StyleTransfer(
-            adapter_path=None,
-            author_name="Test",
-            critic_provider=mock_critic,
-            config=config,
-        )
-
-        # Empty text should return empty
-        assert transfer._clean_repair_output("") == ""
-        assert transfer._clean_repair_output("   ") == ""
-
-        # Normal text should pass through
-        text = "This is normal text without any LLM prefixes."
-        result = transfer._clean_repair_output(text)
-        assert result == text
-
-    @patch('src.generation.transfer.create_style_generator')
-    def test_clean_repair_output_strips_whitespace(self, mock_generator_class, mock_critic):
-        """Test that clean_repair_output strips whitespace."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        config = TransferConfig(verify_entailment=False)
-        transfer = StyleTransfer(
-            adapter_path=None,
-            author_name="Test",
-            critic_provider=mock_critic,
-            config=config,
-        )
-
-        text = "  Some text with leading and trailing spaces.  "
-        result = transfer._clean_repair_output(text)
-        assert result == "Some text with leading and trailing spaces."
-
-    @patch('src.generation.transfer.create_style_generator')
     def test_transfer_paragraph_skips_short(self, mock_generator_class, mock_critic):
         """Test that short paragraphs are skipped."""
         from src.generation.transfer import StyleTransfer, TransferConfig
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             min_paragraph_words=10,
         )
         transfer = StyleTransfer(
@@ -278,7 +230,7 @@ class TestStyleTransfer:
         """Test getting partial results after interruption."""
         from src.generation.transfer import StyleTransfer, TransferConfig
 
-        config = TransferConfig(verify_entailment=False)
+        config = TransferConfig(verify_semantic_fidelity=False)
         transfer = StyleTransfer(
             adapter_path=None,
             author_name="Test",
@@ -318,7 +270,7 @@ class TestDocumentTransfer:
         mock_critic.provider_name = "mock"
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             skip_neutralization=True,
             use_document_context=False,
             min_paragraph_words=5,
@@ -354,7 +306,7 @@ class TestDocumentTransfer:
         mock_critic.provider_name = "mock"
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             pass_headings_unchanged=True,
             skip_neutralization=True,
             min_paragraph_words=5,
@@ -387,7 +339,7 @@ class TestDocumentTransfer:
         mock_critic.provider_name = "mock"
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             skip_neutralization=True,
             min_paragraph_words=3,
         )
@@ -415,99 +367,6 @@ class TestDocumentTransfer:
 # Tests for Repetition Reduction Integration
 # =============================================================================
 
-class TestRepetitionReduction:
-    """Tests for repetition reduction in transfer."""
-
-    @patch('src.generation.transfer.create_style_generator')
-    def test_repetition_reducer_applied(self, mock_generator_class):
-        """Test that repetition reducer is applied to output."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        mock_generator = MagicMock()
-        mock_generator.generate.return_value = "The amazing amazing text."
-        mock_generator_class.return_value = mock_generator
-
-        mock_critic = MagicMock()
-        mock_critic.provider_name = "mock"
-
-        config = TransferConfig(
-            verify_entailment=False,
-            reduce_repetition=True,
-            repetition_threshold=2,
-            skip_neutralization=True,
-            min_paragraph_words=3,
-        )
-        transfer = StyleTransfer(
-            adapter_path=None,
-            author_name="Test",
-            critic_provider=mock_critic,
-            config=config,
-        )
-
-        assert transfer.repetition_reducer is not None
-
-    @patch('src.generation.transfer.create_style_generator')
-    def test_repetition_reducer_disabled(self, mock_generator_class):
-        """Test that repetition reducer can be disabled."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        mock_critic = MagicMock()
-        mock_critic.provider_name = "mock"
-
-        config = TransferConfig(
-            verify_entailment=False,
-            reduce_repetition=False,
-        )
-        transfer = StyleTransfer(
-            adapter_path=None,
-            author_name="Test",
-            critic_provider=mock_critic,
-            config=config,
-        )
-
-        assert transfer.repetition_reducer is None
-
-
-# =============================================================================
-# Tests for Repair Prompt Format (Bug 10)
-# =============================================================================
-
-class TestRepairPromptFormat:
-    """Tests for _repair_missing_entities passing raw_prompt (Bug 10)."""
-
-    @patch('src.generation.transfer.create_style_generator')
-    def test_repair_passes_raw_prompt(self, mock_generator_class):
-        """Repair should pass raw_prompt=True to generator.generate()."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        mock_generator = MagicMock()
-        mock_generator.generate.return_value = "Repaired text with Entity Name included."
-        mock_generator_class.return_value = mock_generator
-
-        mock_critic = MagicMock()
-        mock_critic.provider_name = "mock"
-
-        config = TransferConfig(verify_entailment=False, repair_temperature=0.3)
-        transfer = StyleTransfer(
-            adapter_path=None,
-            author_name="Test",
-            critic_provider=mock_critic,
-            config=config,
-        )
-
-        result = transfer._repair_missing_entities(
-            source="Original text with Entity Name.",
-            output="Styled text missing entities.",
-            missing_entities=["Entity Name"],
-        )
-
-        # Verify raw_prompt=True was passed
-        call_kwargs = mock_generator.generate.call_args
-        assert call_kwargs.kwargs.get('raw_prompt') is True or \
-               (len(call_kwargs.args) > 0 and True in call_kwargs.args), \
-               "raw_prompt=True should be passed to generator.generate()"
-
-
 # =============================================================================
 # Tests for Word Count Tracking (Bug 1)
 # =============================================================================
@@ -528,17 +387,13 @@ class TestWordCountTracking:
         mock_critic.provider_name = "mock"
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             skip_neutralization=True,
             perspective="first_person_singular",
             use_persona=False,
             apply_input_perturbation=False,
             use_structural_rag=False,
             use_structural_grafting=False,
-            reduce_repetition=False,
-            restructure_sentences=False,
-            split_sentences=False,
-            correct_grammar=False,
             min_paragraph_words=3,
             target_expansion_ratio=1.0,
         )
@@ -577,17 +432,13 @@ class TestWordCountTracking:
         mock_critic.provider_name = "mock"
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             skip_neutralization=False,
             perspective="preserve",
             use_persona=False,
             apply_input_perturbation=False,
             use_structural_rag=False,
             use_structural_grafting=False,
-            reduce_repetition=False,
-            restructure_sentences=False,
-            split_sentences=False,
-            correct_grammar=False,
             min_paragraph_words=3,
             target_expansion_ratio=1.0,
         )
@@ -625,17 +476,13 @@ class TestWordCountTracking:
         mock_critic.provider_name = "mock"
 
         config = TransferConfig(
-            verify_entailment=False,
+            verify_semantic_fidelity=False,
             skip_neutralization=True,
             perspective="preserve",
             use_persona=False,
             apply_input_perturbation=True,
             use_structural_rag=False,
             use_structural_grafting=False,
-            reduce_repetition=False,
-            restructure_sentences=False,
-            split_sentences=False,
-            correct_grammar=False,
             min_paragraph_words=3,
             target_expansion_ratio=1.0,
         )
@@ -677,35 +524,6 @@ class TestDocumentContextDisabled:
         )
 
 
-class TestRepairSkipLogging:
-    """Tests for Bug 6 Round 5: Silent repair skip when no missing entities."""
-
-    def test_repair_skip_logged_when_no_missing_entities(self):
-        """When needs_repair=True but missing_entities is empty, should log info."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        with patch.object(StyleTransfer, '__init__', lambda self, **kwargs: None):
-            st = StyleTransfer.__new__(StyleTransfer)
-            st.config = TransferConfig()
-            st.config.verify_entailment = True
-            st.config.max_hallucinations_before_reject = 0  # any hallucination triggers
-
-            # Create a mock semantic result: hallucinations > threshold but no missing entities
-            mock_result = MagicMock()
-            mock_result.hallucination_count = 5
-            mock_result.missing_entities = []  # empty
-            mock_result.fabricated_entities = []
-            mock_result.get_issues.return_value = ["hallucinations"]
-
-            # Verify the condition is correctly detectable
-            needs_repair = (
-                mock_result.hallucination_count > st.config.max_hallucinations_before_reject
-            )
-            assert needs_repair is True
-            assert not mock_result.missing_entities
-            # The fix adds an elif log for this case
-
-
 class TestCleanedIndexValueError:
     """Tests for _cleanup_document_paragraphs not raising ValueError on mutated paragraphs."""
 
@@ -720,7 +538,7 @@ class TestCleanedIndexValueError:
         mock_critic = MagicMock()
         mock_critic.provider_name = "mock"
 
-        config = TransferConfig(verify_entailment=False, min_paragraph_words=3)
+        config = TransferConfig(verify_semantic_fidelity=False, min_paragraph_words=3)
         transfer = StyleTransfer(
             adapter_path=None,
             author_name="Test",
@@ -735,46 +553,6 @@ class TestCleanedIndexValueError:
         # This should not raise ValueError
         result = transfer._cleanup_document_paragraphs([para1, para2])
         assert len(result) >= 1
-
-
-class TestRepairRetryContinue:
-    """Tests for repair retry using continue instead of break on exception."""
-
-    @patch('src.generation.transfer.create_style_generator')
-    def test_repair_continues_after_transient_error(self, mock_generator_class):
-        """Transient errors should not abort all repair attempts."""
-        from src.generation.transfer import StyleTransfer, TransferConfig
-
-        mock_generator = MagicMock()
-        # First call raises, second returns valid repair (>10 words required)
-        mock_generator.generate.side_effect = [
-            RuntimeError("transient API error"),
-            "Repaired text that includes Entity Name along with sufficient additional context words here.",
-        ]
-        mock_generator_class.return_value = mock_generator
-
-        mock_critic = MagicMock()
-        mock_critic.provider_name = "mock"
-
-        config = TransferConfig(verify_entailment=False, repair_temperature=0.3)
-        transfer = StyleTransfer(
-            adapter_path=None,
-            author_name="Test",
-            critic_provider=mock_critic,
-            config=config,
-        )
-
-        result = transfer._repair_missing_entities(
-            source="Original text with Entity Name.",
-            output="Styled text without the entity.",
-            missing_entities=["Entity Name"],
-            max_attempts=3,
-        )
-
-        # Should have tried at least twice (not broken on first error)
-        assert mock_generator.generate.call_count >= 2
-        # Should have returned the repaired text from second attempt
-        assert "Entity Name" in result
 
 
 class TestIdentityCheckVariable:
@@ -796,39 +574,6 @@ class TestIdentityCheckVariable:
             "Identity check should compare against content_for_generation, not paragraph_clean"
 
 
-class TestHallucinationThresholdOperator:
-    """Bug: Hallucination repair uses > instead of >= for threshold comparison."""
-
-    def test_threshold_triggers_at_exact_count(self):
-        """Repair should trigger when hallucination_count == max_hallucinations_before_reject."""
-        from src.generation.transfer import TransferConfig
-
-        config = TransferConfig(max_hallucinations_before_reject=2)
-        # With >=, repair triggers at count 2 (the configured max)
-        # With >, repair only triggers at count 3
-        assert config.max_hallucinations_before_reject == 2
-
-        # Simulate the threshold check as it should work
-        hallucination_count = 2
-        needs_repair = hallucination_count >= config.max_hallucinations_before_reject
-        assert needs_repair, "Repair should trigger when count equals threshold"
-
-
-class TestMaxSentenceLengthDefault:
-    """Bug: TransferConfig defaults max_sentence_length to 50 but
-    GenerationConfig defaults to 60."""
-
-    def test_transfer_config_default_matches_generation_config(self):
-        """TransferConfig default should match GenerationConfig for max_sentence_length."""
-        from src.generation.transfer import TransferConfig
-        from src.config import GenerationConfig
-
-        transfer_default = TransferConfig().max_sentence_length
-        generation_default = GenerationConfig().max_sentence_length
-        assert transfer_default == generation_default, (
-            f"TransferConfig default ({transfer_default}) != "
-            f"GenerationConfig default ({generation_default})"
-        )
 
 
 class TestReferenceMarkerWordCount:
@@ -865,19 +610,6 @@ class TestReferenceMarkerWordCount:
         assert "source_words = len(paragraph_clean.split())" in source or \
                "source_words = len(paragraph_clean.split())" in source.replace(" ", ""), \
             "Expansion ratio check uses paragraph (with refs) instead of paragraph_clean"
-
-    def test_repair_uses_clean_source(self):
-        """_repair_missing_entities should receive text without reference markers."""
-        import inspect
-        from src.generation.transfer import StyleTransfer
-
-        source = inspect.getsource(StyleTransfer.transfer_paragraph)
-        # The repair call should pass paragraph_clean or original_for_verification
-        assert "source=paragraph," not in source, (
-            "Repair receives paragraph (with refs) — "
-            "should use paragraph_clean (refs stripped)"
-        )
-
 
 class TestDeadCodeLoraInputWords:
     """Bug: lora_input_words computed but never used in transfer_paragraph."""

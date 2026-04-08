@@ -1,13 +1,13 @@
 """Style transfer pipeline using LoRA with RTT neutralization.
 
 This module provides a style transfer pipeline that uses LoRA-adapted models
-for consistent style transfer with entailment validation.
+for consistent style transfer with semantic fidelity validation.
 
 Pipeline:
 1. RTT neutralization (English → Mandarin HSK5 → Plain English) to strip style
 2. Pass neutralized text to LoRA for style application
-3. Validate styled output via NLI entailment
-4. Apply repetition reduction to fix LLM-speak
+3. Validate semantic fidelity via DeepSeek (single-step replacement for
+   NLI verification, repair loops, grammar correction, and repetition reduction)
 """
 
 from dataclasses import dataclass, field
@@ -63,18 +63,8 @@ class TransferConfig:
     temperature: Optional[float] = None  # None = use lora config, float = CLI override
     top_p: float = 0.9
 
-    # Verification settings
-    verify_entailment: bool = True
-    entailment_threshold: float = 0.7
-    max_hallucinations_before_reject: int = 3  # Trigger repair after this many hallucinations
-
-    # Repair settings
-    max_repair_attempts: int = 5
-    repair_temperature: float = 0.3  # Lower temperature for repair attempts
-
-    # Post-processing settings
-    reduce_repetition: bool = True
-    repetition_threshold: int = 3  # Words used 3+ times get replaced
+    # Semantic fidelity validation (single DeepSeek call replaces NLI + repair + grammar + repetition)
+    verify_semantic_fidelity: bool = True
 
     # Content handling
     pass_headings_unchanged: bool = True  # Don't transform headings
@@ -106,17 +96,6 @@ class TransferConfig:
     use_structural_grafting: bool = True  # Enable Structural Grafting for argument skeletons
     rag_sample_size: int = 300  # Number of corpus chunks to sample for rhythm pattern analysis
 
-    # Sentence restructuring settings (convert mechanical patterns to organic)
-    restructure_sentences: bool = False  # Enable balanced→inverted restructuring
-
-    # Sentence splitting settings (break run-on sentences)
-    split_sentences: bool = True  # Enable sentence splitting at conjunction points
-    max_sentence_length: int = 60  # Words - split sentences longer than this
-    sentence_length_variance: float = 0.4  # Variance factor (0.4 = 60%-140% of max)
-
-    # Grammar correction settings (final post-processing pass)
-    correct_grammar: bool = True  # Enable style-safe grammar correction
-    grammar_language: str = "en-US"  # Language variant: "en-US" or "en-GB"
 
     # Persona settings (subjective voice to defeat AI detection)
     use_persona: bool = True  # Enable persona-based prompting
@@ -129,11 +108,6 @@ class TransferStats:
     """Statistics from a transfer operation."""
 
     paragraphs_processed: int = 0
-    paragraphs_repaired: int = 0
-    words_replaced: int = 0
-    sentences_restructured: int = 0
-    sentences_split: int = 0
-    grammar_corrections: int = 0
     total_time_seconds: float = 0.0
     avg_time_per_paragraph: float = 0.0
     entailment_scores: List[float] = field(default_factory=list)
@@ -142,11 +116,6 @@ class TransferStats:
         """Convert to dictionary."""
         return {
             "paragraphs_processed": self.paragraphs_processed,
-            "paragraphs_repaired": self.paragraphs_repaired,
-            "words_replaced": self.words_replaced,
-            "sentences_restructured": self.sentences_restructured,
-            "sentences_split": self.sentences_split,
-            "grammar_corrections": self.grammar_corrections,
             "total_time_seconds": round(self.total_time_seconds, 2),
             "avg_time_per_paragraph": round(self.avg_time_per_paragraph, 2),
             "avg_entailment_score": round(
@@ -162,8 +131,7 @@ class StyleTransfer:
 
     1. RTT neutralize input (English → Mandarin → English)
     2. Pass neutralized text to LoRA for style application
-    3. Validate via NLI entailment
-    4. Apply repetition reduction
+    3. Validate semantic fidelity via DeepSeek
 
     Example usage:
         transfer = StyleTransfer(
@@ -244,8 +212,8 @@ class StyleTransfer:
             logger.info(f"Using adapter-specific perspective={adapter_cfg.perspective}")
 
         if adapter_cfg.verify_entailment is not None:
-            self.config.verify_entailment = adapter_cfg.verify_entailment
-            logger.info(f"Using adapter-specific verify_entailment={adapter_cfg.verify_entailment}")
+            self.config.verify_semantic_fidelity = adapter_cfg.verify_entailment
+            logger.info(f"Using adapter-specific verify_semantic_fidelity={adapter_cfg.verify_entailment}")
 
         if adapter_cfg.merge_paragraphs is not None:
             self.config.merge_paragraphs = adapter_cfg.merge_paragraphs
@@ -263,40 +231,6 @@ class StyleTransfer:
             load_in_8bit=adapter_cfg.load_in_8bit,
         )
 
-        # Initialize repetition reducer for post-processing
-        self.repetition_reducer = None
-        if self.config.reduce_repetition:
-            from ..vocabulary.repetition_reducer import RepetitionReducer
-            self.repetition_reducer = RepetitionReducer(
-                threshold=self.config.repetition_threshold
-            )
-
-        # Initialize sentence restructurer for organic complexity
-        self.sentence_restructurer = None
-        if self.config.restructure_sentences:
-            from ..vocabulary.sentence_restructurer import SentenceRestructurer
-            self.sentence_restructurer = SentenceRestructurer()
-
-        # Initialize sentence splitter for run-on sentences
-        self.sentence_splitter = None
-        if self.config.split_sentences:
-            from ..vocabulary.sentence_splitter import SentenceSplitter, SentenceSplitterConfig
-            splitter_config = SentenceSplitterConfig(
-                max_sentence_length=self.config.max_sentence_length,
-                length_variance=self.config.sentence_length_variance,
-            )
-            self.sentence_splitter = SentenceSplitter(splitter_config)
-
-        # Initialize grammar corrector for final post-processing
-        self.grammar_corrector = None
-        if self.config.correct_grammar:
-            from ..vocabulary.grammar_corrector import GrammarCorrector, GrammarCorrectorConfig
-            grammar_config = GrammarCorrectorConfig(language=self.config.grammar_language)
-            self.grammar_corrector = GrammarCorrector(grammar_config)
-
-        # Set up entailment verifier if requested
-        if self.config.verify_entailment and self.verify_fn is None:
-            self.verify_fn = self._create_default_verifier()
 
         # Initialize RTT neutralizer (local MLX model)
         self._rtt_neutralizer = None
@@ -510,75 +444,6 @@ class StyleTransfer:
             logger.warning(f"Perspective conversion failed: {e}")
             return text
 
-    def _create_default_verifier(self) -> Callable[[str, str], float]:
-        """Create default entailment verifier."""
-        try:
-            import sys
-            import os
-            import warnings
-            import logging
-            from io import StringIO
-
-            # Disable tqdm before importing sentence_transformers
-            os.environ["TQDM_DISABLE"] = "1"
-            from sentence_transformers import CrossEncoder
-
-            # Suppress all output during model loading (position_ids mismatch report)
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                # Suppress transformers logging
-                transformers_logger = logging.getLogger("transformers")
-                old_level = transformers_logger.level
-                transformers_logger.setLevel(logging.ERROR)
-                # Suppress stdout/stderr during loading (for LOAD REPORT)
-                old_stdout, old_stderr = sys.stdout, sys.stderr
-                sys.stdout = StringIO()
-                sys.stderr = StringIO()
-                try:
-                    model = CrossEncoder(
-                        "cross-encoder/nli-deberta-v3-small",
-                        max_length=512,
-                    )
-                finally:
-                    sys.stdout, sys.stderr = old_stdout, old_stderr
-                    transformers_logger.setLevel(old_level)
-
-            def verify(original: str, output: str) -> float:
-                """Verify content preservation via entailment."""
-                import numpy as np
-
-                # Check if output entails original content
-                scores = model.predict([(original, output)], show_progress_bar=False)
-
-                # Model returns raw logits [contradiction, neutral, entailment]
-                # Apply softmax to convert to probabilities
-                if len(scores.shape) > 1:
-                    logits = scores[0]
-                else:
-                    logits = scores
-
-                # Softmax to get probabilities
-                exp_scores = np.exp(logits - np.max(logits))  # subtract max for numerical stability
-                probs = exp_scores / np.sum(exp_scores)
-
-                # Return entailment probability (index 2)
-                return float(probs[2]) if len(probs) > 2 else float(probs[-1])
-
-            logger.debug("Using NLI-based entailment verification")
-            return verify
-
-        except ImportError:
-            logger.warning(
-                "sentence-transformers not available, using similarity fallback"
-            )
-            return self._similarity_verifier
-
-    def _similarity_verifier(self, original: str, output: str) -> float:
-        """Fallback verifier using keyword overlap."""
-        from ..utils.nlp import compute_semantic_similarity
-
-        return compute_semantic_similarity(original, output)
-
     def transfer_paragraph(
         self,
         paragraph: str,
@@ -771,70 +636,33 @@ class StyleTransfer:
             logger.warning(f"LoRA over-expanded: {lora_words} words vs {source_words} source ({lora_words/source_words:.0%})")
 
         # ========================================
-        # STEP 3: Validate styled output (if enabled)
+        # STEP 3: Semantic fidelity validation (if enabled)
         # ========================================
-        logger.info(f"BEFORE VALIDATION: {len(output.split())} words")
-        if self.config.verify_entailment:
-            from ..validation.semantic_verifier import verify_semantic_preservation
-            # Use original (pre-expansion) text for verification
-            # We only require the output to preserve the ORIGINAL meaning,
-            # not the texture added by the critic
-            semantic_result = verify_semantic_preservation(
-                source=original_for_verification,
-                output=output,
-                threshold=self.config.entailment_threshold,
+        # Single DeepSeek call replaces NLI verification, repair loop,
+        # grammar correction, and repetition reduction
+        if self.config.verify_semantic_fidelity:
+            from ..validation.semantic_fidelity import validate_semantic_fidelity
+            logger.info(f"SEMANTIC FIDELITY: validating {len(output.split())} words")
+            fidelity = validate_semantic_fidelity(
+                original=original_for_verification,
+                restyled=output,
+                critic_provider=self.critic_provider,
             )
-
-            # Log any issues detected
-            issues = semantic_result.get_issues()
-            if issues:
-                logger.info(f"Semantic issues detected: {', '.join(issues)}")
-
-            # Check for fabricated content (years, citations)
-            if semantic_result.fabricated_entities:
-                fabricated_str = ', '.join(semantic_result.fabricated_entities[:5])
-                logger.info(f"Fabricated content: {fabricated_str}")
-
-            # Trigger repair ONLY for actual hallucinations, not for "missing" entities
-            # Missing entities are often just paraphrases (e.g., "roughly" → "about")
-            # The repair process generates from original source, which loses styled expansion
-            needs_repair = (
-                semantic_result.hallucination_count >= self.config.max_hallucinations_before_reject
-            )
-
-            if needs_repair and semantic_result.missing_entities:
-                logger.info(
-                    f"Triggering repair: {semantic_result.hallucination_count} hallucinations, "
-                    f"{len(semantic_result.missing_entities)} missing entities"
-                )
-                output = self._repair_missing_entities(
-                    source=paragraph_clean,
-                    output=output,
-                    missing_entities=semantic_result.missing_entities,
-                    max_attempts=self.config.max_repair_attempts,
-                )
-                logger.info(f"AFTER REPAIR: {len(output.split())} words")
-            elif needs_repair:
-                logger.info(
-                    f"Repair warranted ({semantic_result.hallucination_count} hallucinations) "
-                    f"but no missing entities to repair"
-                )
+            if fidelity.was_modified:
+                logger.info(f"SEMANTIC FIDELITY: {len(fidelity.changes)} fixes applied")
+            output = fidelity.corrected
 
         # Ensure output ends with complete sentence
-        logger.info(f"BEFORE _ensure_complete_ending: {len(output.split())} words")
         output = self._ensure_complete_ending(output)
-        logger.info(f"AFTER _ensure_complete_ending: {len(output.split())} words")
 
         # ========================================
         # STEP 4: Reinject references [^N]
         # ========================================
-        # References were extracted in STEP 0 and are now reattached
-        # based on entity matching (e.g., "Einstein" -> "Einstein[^1]")
         if ref_map.has_references():
             output = reinject_references(output, ref_map)
             logger.debug(f"Reinjected {len(ref_map.references)} references")
 
-        # Verify if configured
+        # Score via verify_fn if configured (for stats tracking)
         score = 1.0
         if self.verify_fn:
             score = self.verify_fn(original_for_verification, output)
@@ -870,46 +698,6 @@ class StyleTransfer:
 
         overlap = len(input_words & output_words)
         return overlap / len(input_words)
-
-    def _clean_repair_output(self, text: str) -> str:
-        """Clean repair output of meta-commentary and apologies.
-
-        LLMs often prefix repairs with "I apologize" or "Here is the corrected version".
-        This strips those out to get just the repaired text.
-        """
-        import re
-
-        text = text.strip()
-        if not text:
-            return text
-
-        # Remove common LLM prefixes
-        prefixes_to_remove = [
-            r'^I apologize[^.]*\.\s*',
-            r'^Here is the corrected[^.]*[:.]\s*',
-            r'^Here\'s the corrected[^.]*[:.]\s*',
-            r'^The corrected text[^.]*[:.]\s*',
-            r'^Corrected version[^.]*[:.]\s*',
-            r'^Let me (fix|correct)[^.]*\.\s*',
-            r'^I\'ve (fixed|corrected)[^.]*\.\s*',
-            r'^Sure,?\s*(here[^.]*)?[:.]\s*',
-            r'^Of course[^.]*[:.]\s*',
-        ]
-
-        for pattern in prefixes_to_remove:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-
-        # Also remove trailing meta-commentary
-        suffixes_to_remove = [
-            r'\s*I hope this[^.]*\.$',
-            r'\s*Let me know[^.]*\.$',
-            r'\s*Is there anything[^.]*\.$',
-        ]
-
-        for pattern in suffixes_to_remove:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-
-        return text.strip()
 
     def _clean_punctuation_artifacts(self, text: str) -> str:
         """Clean up punctuation artifacts from LoRA output and post-processing.
@@ -988,69 +776,6 @@ class StyleTransfer:
         # Fallback: add period to entire text
         return text + '.'
 
-    def _repair_missing_entities(
-        self,
-        source: str,
-        output: str,
-        missing_entities: List[str],
-        max_attempts: int = 3,
-    ) -> str:
-        """Repair output to include missing entities.
-
-        Uses LoRA generator to re-generate with entity hints while
-        maintaining author voice.
-
-        Args:
-            source: Original source text.
-            output: Styled output to repair.
-            missing_entities: List of entity strings to include.
-            max_attempts: Max repair attempts.
-
-        Returns:
-            Repaired output text.
-        """
-        if not self.generator or not missing_entities:
-            return output
-
-        for attempt in range(max_attempts):
-            logger.debug(
-                f"Repair attempt {attempt + 1}/{max_attempts}: "
-                f"{len(missing_entities)} entities missing"
-            )
-
-            try:
-                # Create repair content with entity hints
-                entity_hint = f"[MUST INCLUDE: {', '.join(missing_entities)}]"
-                repair_content = f"{entity_hint}\n\n{source}"
-
-                target_words = len(output.split())
-                repaired = self.generator.generate(
-                    content=repair_content,
-                    author=self.author,
-                    target_words=target_words,
-                    temperature=self.config.repair_temperature,
-                    raw_prompt=True,
-                )
-
-                if repaired and len(repaired.split()) > 10:
-                    # Check if repair includes missing entities
-                    repaired_lower = repaired.lower()
-                    entities_found = sum(1 for e in missing_entities if e.lower() in repaired_lower)
-
-                    if entities_found >= len(missing_entities) * 0.5:
-                        logger.debug(f"Repair found {entities_found}/{len(missing_entities)} entities")
-                        return repaired
-                    else:
-                        logger.debug(f"Repair only found {entities_found}/{len(missing_entities)} entities")
-                else:
-                    logger.warning("Repair produced empty/short output")
-
-            except Exception as e:
-                logger.warning(f"Repair attempt {attempt + 1} failed: {e}")
-                continue
-
-        return output  # Return original if repair failed
-
     def transfer_document(
         self,
         text: str,
@@ -1071,10 +796,6 @@ class StyleTransfer:
         self._transfer_start_time = time.time()
         self._transfer_outputs = []
         self._transfer_stats = TransferStats()
-
-        # Reset repetition reducer for new document
-        if self.repetition_reducer:
-            self.repetition_reducer.reset()
 
         # Split into paragraphs
         paragraphs = split_into_paragraphs(text)
@@ -1149,26 +870,6 @@ class StyleTransfer:
             else:
                 output, score = self.transfer_paragraph(para, previous, self._transfer_stats)
 
-            # Apply repetition reduction only to transformed content, not headings
-            if self.repetition_reducer and not is_heading_para:
-                output, reduction_stats = self.repetition_reducer.reduce(output)
-                self._transfer_stats.words_replaced += reduction_stats.replacements_made
-
-            # Apply sentence restructuring for organic complexity
-            if self.sentence_restructurer and not is_heading_para:
-                output, restructure_stats = self.sentence_restructurer.restructure(output)
-                self._transfer_stats.sentences_restructured += restructure_stats.inversions_applied
-
-            # Apply sentence splitting to break run-on sentences
-            if self.sentence_splitter and not is_heading_para:
-                output, split_stats = self.sentence_splitter.split(output)
-                self._transfer_stats.sentences_split += split_stats.total_splits
-
-            # Apply grammar correction as final step (after sentence splitting)
-            if self.grammar_corrector and not is_heading_para:
-                output, grammar_stats = self.grammar_corrector.correct(output)
-                self._transfer_stats.grammar_corrections += grammar_stats.corrections_applied
-
             para_time = time.time() - para_start
             logger.debug(f"Paragraph {i+1}: {para_time:.1f}s, score={score:.2f}")
 
@@ -1177,9 +878,6 @@ class StyleTransfer:
 
             self._transfer_stats.paragraphs_processed += 1
             self._transfer_stats.entailment_scores.append(score)
-
-            if score < self.config.entailment_threshold:
-                self._transfer_stats.paragraphs_repaired += 1
 
             # Notify callback with completed paragraph
             if on_paragraph:
@@ -1191,33 +889,6 @@ class StyleTransfer:
             self._transfer_stats.total_time_seconds / self._transfer_stats.paragraphs_processed
             if self._transfer_stats.paragraphs_processed > 0 else 0
         )
-
-        # Log repetition reduction summary
-        if self.repetition_reducer and self._transfer_stats.words_replaced > 0:
-            overused = self.repetition_reducer.get_overused_words(limit=5)
-            if overused:
-                logger.info(
-                    f"Repetition reduction: {self._transfer_stats.words_replaced} replacements, "
-                    f"top overused: {', '.join(w for w, _ in overused)}"
-                )
-
-        # Log sentence restructuring summary
-        if self.sentence_restructurer and self._transfer_stats.sentences_restructured > 0:
-            logger.info(
-                f"Sentence restructuring: {self._transfer_stats.sentences_restructured} inversions applied"
-            )
-
-        # Log sentence splitting summary
-        if self.sentence_splitter and self._transfer_stats.sentences_split > 0:
-            logger.info(
-                f"Sentence splitting: {self._transfer_stats.sentences_split} sentences split"
-            )
-
-        # Log grammar correction summary
-        if self.grammar_corrector and self._transfer_stats.grammar_corrections > 0:
-            logger.info(
-                f"Grammar correction: {self._transfer_stats.grammar_corrections} corrections applied"
-            )
 
         logger.info(
             f"Transfer complete: {self._transfer_stats.paragraphs_processed} paragraphs in "
