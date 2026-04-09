@@ -5,7 +5,7 @@ The restyled text was produced by a style-transfer model. Its sentence structure
 A change is ONLY justified when:
 - A factual proposition from the original has NO equivalent in the restyled text. A proposition is a concrete claim: what something IS, what it DOES, what CAUSED what.
 - A statement's meaning is REVERSED or WRONG (wrong subject, wrong object, opposite claim)
-- There is broken grammar (missing verb, subject-verb disagreement, dangling modifier)
+- There is broken grammar (missing verb, subject-verb disagreement, wrong article e.g. "an" before a consonant, dangling modifier, pronoun-antecedent mismatch)
 
 A change is NOT justified when:
 - Different words express the same proposition ("searching" and "grepping" both mean the same thing, "complete" and "exhaustive" both mean the same thing)
