@@ -448,7 +448,6 @@ class StyleTransfer:
         self,
         paragraph: str,
         previous: Optional[str] = None,
-        stats: Optional['TransferStats'] = None,
     ) -> Tuple[str, float]:
         """Transfer a single paragraph with graph-based validation.
 
@@ -463,7 +462,6 @@ class StyleTransfer:
         Args:
             paragraph: Source paragraph.
             previous: Previous output paragraph for continuity.
-            stats: Optional stats object to update.
 
         Returns:
             Tuple of (styled_paragraph, entailment_score).
@@ -659,7 +657,9 @@ class StyleTransfer:
         # STEP 4: Reinject references [^N]
         # ========================================
         if ref_map.has_references():
-            output = reinject_references(output, ref_map)
+            output, dropped_refs = reinject_references(output, ref_map)
+            if dropped_refs:
+                logger.warning(f"Lost {len(dropped_refs)} references during style transfer: {dropped_refs}")
             logger.debug(f"Reinjected {len(ref_map.references)} references")
 
         # Score via verify_fn if configured (for stats tracking)
@@ -868,7 +868,7 @@ class StyleTransfer:
                 output = para
                 score = 1.0
             else:
-                output, score = self.transfer_paragraph(para, previous, self._transfer_stats)
+                output, score = self.transfer_paragraph(para, previous)
 
             para_time = time.time() - para_start
             logger.debug(f"Paragraph {i+1}: {para_time:.1f}s, score={score:.2f}")

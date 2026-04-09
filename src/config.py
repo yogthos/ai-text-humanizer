@@ -119,7 +119,6 @@ class LoRAAdapterConfig:
 
 
 @dataclass
-@dataclass
 class StyleConfig:
     """Configuration for style transfer settings."""
     perspective: str = "preserve"  # preserve, first_person_singular, first_person_plural, third_person, author_voice_third_person

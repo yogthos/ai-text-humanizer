@@ -242,7 +242,7 @@ def transfer_file(
     adapters: list,
     author: str,
     config_path: str = "config.json",
-    temperature: float = 0.2,
+    temperature: float = None,
     perspective: str = None,
     verify: bool = True,
     verbose: bool = False,
