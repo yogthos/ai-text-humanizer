@@ -107,12 +107,13 @@ class CorpusIndexer:
         """Get or create ChromaDB client."""
         if self._client is None:
             chromadb = get_chromadb()
+            settings = chromadb.Settings(anonymized_telemetry=False)
             if self.persist_dir:
                 os.makedirs(self.persist_dir, exist_ok=True)
-                self._client = chromadb.PersistentClient(path=self.persist_dir)
+                self._client = chromadb.PersistentClient(path=self.persist_dir, settings=settings)
                 logger.info(f"Using persistent ChromaDB at: {self.persist_dir}")
             else:
-                self._client = chromadb.Client()
+                self._client = chromadb.Client(settings=settings)
                 logger.info("Using in-memory ChromaDB")
         return self._client
 
