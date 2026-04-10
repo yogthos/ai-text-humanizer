@@ -113,7 +113,7 @@ def _detect_model_prefix_from_model(model_path: Path, peft_weights: dict) -> str
     return ""
 
 
-def convert_peft_to_mlx(input_dir: Path, output_dir: Path, mlx_model_path: str = None):
+def convert_peft_to_mlx(input_dir: Path, output_dir: Path, mlx_model_path: str = None, author: str = None):
     """Convert PEFT adapter to MLX format."""
     import safetensors.torch as st_torch
     from safetensors.numpy import save_file as save_numpy
@@ -250,11 +250,10 @@ def convert_peft_to_mlx(input_dir: Path, output_dir: Path, mlx_model_path: str =
     # Create metadata.json
     base_model_ref = mlx_model_path or peft_config.get("base_model_name_or_path", "Qwen/Qwen2.5-32B")
     metadata = {
-        "author": "H.P. Lovecraft",
+        "author": author or "Unknown",
         "base_model": base_model_ref,
         "lora_rank": peft_config.get("r", 64),
         "lora_alpha": peft_config.get("lora_alpha", 256),
-        "training_examples": 9371,
         "converted_from": str(input_dir),
     }
 
@@ -288,9 +287,14 @@ def main():
         help="Path to local MLX base model (for prefix detection and config). "
              "E.g., models/Qwen3.5-35B-A3B-Base-6bit-MLX"
     )
+    parser.add_argument(
+        "--author",
+        required=False,
+        help="Author name for adapter metadata (e.g., 'Howard Russell')"
+    )
 
     args = parser.parse_args()
-    convert_peft_to_mlx(args.input, args.output, mlx_model_path=args.mlx_model)
+    convert_peft_to_mlx(args.input, args.output, mlx_model_path=args.mlx_model, author=args.author)
 
 
 if __name__ == "__main__":
