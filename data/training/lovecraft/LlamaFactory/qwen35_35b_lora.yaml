@@ -1,0 +1,126 @@
+### Model
+# Qwen3.5-35B-A3B-Base: MoE model, 35B total params, 3B active per token
+# 256 routed experts + shared expert per layer, Gated DeltaNet hybrid attention
+# MUST use Base, not Instruct -- instruct models are biased in output style
+model_name_or_path: Qwen/Qwen3.5-35B-A3B-Base
+trust_remote_code: true
+
+### Method
+stage: sft
+do_train: true
+finetuning_type: lora
+
+# lora_target: all applies LoRA to all nn.Linear modules:
+#   - Attention: q_proj, k_proj, v_proj, o_proj (softmax layers)
+#   - Linear attention: in_proj_qkv, in_proj_z, in_proj_b, in_proj_a, out_proj (DeltaNet layers)
+#   - Shared expert: gate_proj, up_proj, down_proj
+#   - Router gate + shared_expert_gate
+# Routed expert nn.Parameter tensors are NOT targeted (PEFT can't target
+# fused nn.Parameter without target_parameters; attention + shared expert
+# should be sufficient with high enough rank).
+lora_target: all
+
+# Rank 128: Style transfer requires high rank to capture sentence structure,
+# rhythm, and vocabulary patterns. RunPod Nabokov study found rank 256 optimal
+# for literary style; rank 16 showed "minimal stylistic influence."
+# The LoRA targets attention (2048-4096 dim), not 512-dim expert intermediates,
+# so high rank is not excessive.
+#
+# rsLoRA: CRITICAL for high rank. Standard LoRA scales by alpha/rank, which
+# kills gradient flow at high ranks. rsLoRA scales by alpha/sqrt(rank) instead,
+# unlocking the capacity that higher rank provides.
+lora_rank: 128
+lora_alpha: 128
+lora_dropout: 0.1
+use_rslora: true
+
+# NEFTune: Add random noise to embeddings during training to prevent
+# memorization of exact phrases and force learning generalized style patterns.
+# Alpha 5 is the standard value from the NEFTune paper.
+neftune_noise_alpha: 5.0
+
+### Dataset
+dataset: lovecraft_sft
+template: qwen3_5_nothink
+cutoff_len: 2048
+packing: true
+overwrite_cache: true
+preprocessing_num_workers: 16
+
+### Output
+output_dir: saves/Qwen3.5-35B-A3B/lora/lovecraft
+logging_steps: 10
+save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+
+### Training
+# Dataset: 9,371 entries
+# Effective batch size: 1 * 8 = 8 (smaller batch = spikier gradients, better for style)
+# Steps per epoch: 9,371 / 8 = ~1,171
+# 3 epochs = ~3,514 steps
+# Previous run (2 epochs, rank 16) had loss still declining — model hadn't converged.
+# Train longer and save checkpoints to pick the best one.
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+# rsLoRA with rank 128 gives effective scaling of alpha/sqrt(128) ≈ 11.3x,
+# much larger than standard LoRA's 1.0x. Learning rate 1e-4 risks gradient
+# instability at this amplification. 5e-5 is safer while still converging.
+learning_rate: 5.0e-5
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+
+### Evaluation
+# Auto-split 5% for validation monitoring (no separate files needed)
+val_size: 0.05
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 200
+
+### Optimization
+# Do NOT use quantization_bit: 4 -- QLoRA breaks MoE expert layers
+# (bitsandbytes can't handle fused expert nn.Parameter tensors cleanly)
+# Use bf16 LoRA instead. Requires ~74GB VRAM (A100 80GB recommended).
+flash_attn: sdpa
+gradient_checkpointing: true
+optim: adamw_torch
+
+# =============================================================================
+# POST-TRAINING: Convert for local MLX inference (M1 Max 64GB)
+# =============================================================================
+#
+# 1. Quantize base model to 6-bit MLX (no pre-made 6-bit Base on HuggingFace):
+#
+#    python -m mlx_lm.convert \
+#        --hf-path Qwen/Qwen3.5-35B-A3B-Base \
+#        --mlx-path models/Qwen3.5-35B-A3B-Base-6bit-MLX \
+#        -q --q-bits 6
+#
+#    This produces a ~26GB model that fits comfortably in 64GB unified memory.
+#
+# 2. Convert the PEFT LoRA adapter to MLX format:
+#    MUST pass --mlx-model to fix key prefix and model path in config.
+#
+#    python scripts/convert_peft_to_mlx.py \
+#        --input saves/Qwen3.5-35B-A3B/lora/lovecraft \
+#        --output lora_adapters/lovecraft_35b_mlx \
+#        --mlx-model models/Qwen3.5-35B-A3B-Base-6bit-MLX
+#
+# 3. Run inference locally:
+#
+#    python restyle.py input.md -o output.md \
+#        --adapter lora_adapters/lovecraft_35b_mlx \
+#        --author "H.P. Lovecraft"
+#
+# Memory budget at inference:
+#   ~26 GB  base model (6-bit)
+#   ~0.1 GB LoRA adapter
+#   ~2-4 GB KV cache (depends on context length)
+#   -------
+#   ~30 GB  total, leaving ~34 GB headroom
+#
+# Optional: TurboQuant KV cache compression (not yet in mlx-lm, PR #1067)
+#   would further reduce KV cache by ~4x, useful for long documents.
+#   Only affects 10/40 layers (full-attention) due to DeltaNet hybrid arch.

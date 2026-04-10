@@ -250,7 +250,7 @@ class BaseStyleGenerator(ABC):
         # 7. Remove sentences containing fiction-specific markers (hallucinations)
         # Markers are loaded from adapter config (no hardcoded author content)
         if self.fiction_markers:
-            fiction_pattern = re.compile('|'.join(self.fiction_markers), re.IGNORECASE)
+            fiction_pattern = re.compile('|'.join(re.escape(m) for m in self.fiction_markers), re.IGNORECASE)
 
             # Split into sentences and filter
             sentences = re.split(r'(?<=[.!?])\s+', response)

@@ -1128,9 +1128,16 @@ class DeepSeekRTTNeutralizer:
 
                 except Exception as e:
                     logger.warning(f"Worker error: {e}")
-                    # Put items back in queue
+                    # Put items back in queue with incremented retry count
                     for item in batch_items:
-                        work_queue.put(item)
+                        orig_idx, text, retry_count = item
+                        retry_counts[orig_idx] += 1
+                        if retry_counts[orig_idx] >= max_retries:
+                            with completed_lock:
+                                final_failures[0] += 1
+                                logger.debug(f"[{orig_idx}] Failed after {max_retries} attempts (worker error)")
+                        else:
+                            work_queue.put((orig_idx, text, retry_counts[orig_idx]))
 
             with workers_lock:
                 active_workers[0] -= 1

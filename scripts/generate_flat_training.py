@@ -642,12 +642,47 @@ def load_intermediate(path: Path, stage: str = "items") -> List[Tuple[str, str]]
     return items
 
 
+def load_snowflake_topics(topics_file: Optional[str] = None) -> List[str]:
+    """Load snowflake topics from an external file or fall back to MUNDANE_TOPICS.
+
+    The external file should be a Python file with a list variable (BOOK_TOPICS
+    or MUNDANE_TOPICS). This allows per-author topic customization — e.g. conceptual
+    topics for Russell vs mundane activities for Lovecraft.
+
+    Args:
+        topics_file: Path to a Python file containing a topic list variable.
+
+    Returns:
+        List of topic strings.
+    """
+    if topics_file:
+        topics_path = Path(topics_file)
+        if topics_path.exists():
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("topics", topics_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            # Look for BOOK_TOPICS first, then MUNDANE_TOPICS, then any list
+            for attr in ["BOOK_TOPICS", "MUNDANE_TOPICS", "TOPICS"]:
+                if hasattr(mod, attr):
+                    topics = getattr(mod, attr)
+                    logger.info(f"Loaded {len(topics)} snowflake topics from {topics_file} ({attr})")
+                    return topics
+            logger.warning(f"No topic list found in {topics_file}, using defaults")
+        else:
+            logger.warning(f"Topics file not found: {topics_file}, using defaults")
+
+    logger.info(f"Using default MUNDANE_TOPICS ({len(MUNDANE_TOPICS)} topics)")
+    return MUNDANE_TOPICS
+
+
 def expand_corpus_with_variations(
     paragraphs: List[str],
     author: str,
     workers: int = 4,
     skip_variation: bool = False,
     skip_perspective: bool = False,
+    snowflake_topics: Optional[List[str]] = None,
 ) -> List[Tuple[str, str]]:
     """Expand corpus using enhanced Triad strategy with perspective variations.
 
@@ -693,11 +728,12 @@ def expand_corpus_with_variations(
     logger.info(f"Creating {len(paragraphs)} snowflake (topic swap) variations...")
     logger.info(f"Robustness entries: {len(paragraphs)} (will use heavy input perturbation)")
 
-    # Entry 2: Snowflake (mundane topic swap)
+    # Entry 2: Snowflake (topic swap)
     # Prepare all variation tasks
+    topics_pool = snowflake_topics or MUNDANE_TOPICS
     tasks = []
     for idx, para in enumerate(paragraphs):
-        topic = random.choice(MUNDANE_TOPICS)
+        topic = random.choice(topics_pool)
         tasks.append((idx, para, topic))
 
     snowflake_count = 0
@@ -860,7 +896,8 @@ def create_overlapping_chunks(paragraphs: List[Tuple[str, str]], config: Overlap
     logger.info(f"Processing {len(paragraphs)} paragraphs into chunks...")
     logger.info(f"Variation types: {list(by_type.keys())}")
     logger.info(f"Target chunk size: {config.min_words}-{config.max_words} words")
-    logger.info(f"NOTE: Overlapping only for 'original' type (continuous narrative)")
+    if len(by_type) > 1 or "original" not in by_type:
+        logger.info(f"NOTE: Overlapping only for 'original' type (continuous narrative)")
 
     all_chunks = []
 
@@ -999,6 +1036,21 @@ def get_rtt_neutralizer(provider: str = None, batch_size: int = None):
         _rtt_lock = threading.Lock()
         logger.info(f"RTT neutralizer ready: {type(_rtt_neutralizer).__name__}")
     return _rtt_neutralizer, _rtt_lock
+
+
+def clean_neutral_text(text: str) -> str:
+    """Clean RTT output artifacts.
+
+    Fixes:
+    - Leading punctuation (". " prefix from RTT chunk boundaries)
+    - Trailing whitespace
+    - Double spaces
+    """
+    # Strip leading punctuation and whitespace
+    text = re.sub(r'^[\s.,;:!?\-–—]+', '', text)
+    # Fix double spaces
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()
 
 
 def neutralize_text(styled_text: str, max_retries: int = 2, monotone: bool = True) -> Optional[str]:
@@ -1197,6 +1249,28 @@ PERSONA_FRAMES = {
             "You are explaining a complex idea to a friend at a loud dinner party. Be vivid and punchy. Avoid academic jargon. Use physical objects on the table as metaphors.",
         ],
     },
+    "Bertrand Russell": {
+        "narrative": [
+            # The "Witness to History" Frame
+            "You are recounting a historical event you observed firsthand. Describe the facts with clarity and precision, but let your moral conviction show through the selection of details.",
+            # The "Personal Reflection" Frame
+            "You are writing an autobiographical passage about an experience that shaped your thinking. Be direct, candid, and unsparing in your self-assessment.",
+            # The "Cautionary Account" Frame
+            "You are describing a sequence of events that illustrates a larger principle about human nature or society. Let the facts speak, but arrange them so the conclusion is inescapable.",
+        ],
+        "conceptual": [
+            # The "Philosophical Argument" Frame
+            "You are constructing a philosophical argument for an educated general audience. State the position clearly, consider the strongest objection, and dismantle it with precision. Do not hedge or equivocate.",
+            # The "Debunking" Frame
+            "You are dismantling a widely held belief that you consider to be nonsense. Be direct and incisive. Use concrete examples to expose the absurdity of the position. Allow yourself dry wit.",
+            # The "Exposition" Frame
+            "You are explaining a difficult concept to an intelligent reader who lacks specialist knowledge. Be clear and precise without being condescending. Use analogies drawn from common experience.",
+            # The "Materialist Case" Frame
+            "You are making the case that a phenomenon commonly attributed to mysterious or supernatural causes has a straightforward material explanation. Be methodical, assertive, and spare no sacred cows.",
+            # The "Sceptical Inquiry" Frame
+            "You are examining a claim with rigorous scepticism. Distinguish what is known from what is merely assumed. Demand evidence and reject appeals to authority or tradition.",
+        ],
+    },
 }
 
 # =============================================================================
@@ -1318,25 +1392,24 @@ def strip_modifiers(text: str) -> str:
     """Strip adjectives and adverbs, leaving only nouns/verbs (Information Dropout).
 
     Forces the model to hallucinate stylistic details rather than copy them.
+    Uses token.text_with_ws to preserve original whitespace and contractions
+    (spaCy splits "doesn't" into ["does", "n't"] — using text_with_ws keeps
+    the original spacing so contractions re-join correctly).
     """
     nlp = get_nlp()
     doc = nlp(text)
-    tokens = []
+    parts = []
 
     for token in doc:
         # Keep nouns, verbs, and essential function words
-        if token.pos_ in ['NOUN', 'VERB', 'PROPN', 'AUX', 'DET', 'ADP', 'CCONJ', 'SCONJ', 'PUNCT', 'PRON', 'NUM']:
-            tokens.append(token.text)
-        elif token.pos_ in ['ADJ', 'ADV']:
+        if token.pos_ in ['ADJ', 'ADV']:
             continue  # Drop modifiers
         else:
-            # Keep other tokens (particles, etc.)
-            tokens.append(token.text)
+            parts.append(token.text_with_ws)
 
-    # Clean up whitespace around punctuation
-    result = ' '.join(tokens)
-    result = re.sub(r'\s+([.,!?;:])', r'\1', result)
-    result = re.sub(r'\s+', ' ', result)
+    result = ''.join(parts)
+    # Clean up double spaces from dropped tokens
+    result = re.sub(r'  +', ' ', result)
     return result.strip()
 
 
@@ -1350,26 +1423,21 @@ def remove_concrete_nouns(text: str) -> str:
 
     Replaces concrete nouns with [THING] placeholder, forcing the model
     to generate the author's characteristic metaphors and imagery.
+    Uses token.text_with_ws to preserve contractions and original spacing.
     """
     nlp = get_nlp()
     doc = nlp(text)
-    tokens = []
+    parts = []
 
     for token in doc:
         # Replace concrete nouns with generic placeholders
-        if token.pos_ == 'NOUN' and token.ent_type_ == '':
-            # Keep abstract nouns, replace concrete ones
-            if is_concrete_noun(token.text):
-                tokens.append('[THING]')
-            else:
-                tokens.append(token.text)
+        if token.pos_ == 'NOUN' and token.ent_type_ == '' and is_concrete_noun(token.text):
+            parts.append('[THING]' + token.whitespace_)
         else:
-            tokens.append(token.text)
+            parts.append(token.text_with_ws)
 
-    # Clean up whitespace
-    result = ' '.join(tokens)
-    result = re.sub(r'\s+([.,!?;:])', r'\1', result)
-    result = re.sub(r'\s+', ' ', result)
+    result = ''.join(parts)
+    result = re.sub(r'  +', ' ', result)
     return result.strip()
 
 
@@ -1737,6 +1805,7 @@ def generate_training_data(
                 # Process results
                 for (idx, styled_text, vtype), neutral in zip(batch, neutrals):
                     if neutral:
+                        neutral = clean_neutral_text(neutral)
                         word_count = len(styled_text.split())
 
                         # Many-to-One: Create 3 input variants per anchor
@@ -1809,6 +1878,7 @@ def generate_training_data(
                     logger.warning(f"  [{idx}] ✗ All {max_individual_retries} retries exhausted ({len(styled_text.split())}w)")
 
                 if neutral:
+                    neutral = clean_neutral_text(neutral)
                     word_count = len(styled_text.split())
 
                     # Many-to-One: Create 3 input variants per anchor
@@ -1893,6 +1963,10 @@ def main():
                         help="Output format: llama_factory (default) or mlx")
     parser.add_argument("--skip-curation", action="store_true",
                         help="Skip curation step (corpus is already curated, one paragraph per double-newline)")
+    parser.add_argument("--snowflake-topics", type=str, default=None,
+                        help="Path to Python file with custom snowflake topics list "
+                             "(e.g., data/training/russell/snowflake_topics.py). "
+                             "Falls back to built-in MUNDANE_TOPICS if not specified.")
 
     args = parser.parse_args()
 
@@ -1902,6 +1976,9 @@ def main():
     overall_start = time.time()
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load custom snowflake topics if provided
+    snowflake_topics = load_snowflake_topics(args.snowflake_topics)
 
     variation_counts = {}
 
@@ -1956,8 +2033,10 @@ def main():
         metadata = selected_data.get("metadata", {})
         logger.info(f"Loaded {len(paragraphs)} pre-selected paragraphs")
         logger.info(f"  Source: {metadata.get('source', 'unknown')}")
-        logger.info(f"  Tokens: {metadata.get('actual_tokens', 'unknown'):,}")
-        logger.info(f"  Mean quality: {metadata.get('mean_quality', 'unknown'):.3f}")
+        actual_tokens = metadata.get('actual_tokens')
+        logger.info(f"  Tokens: {actual_tokens:,}" if isinstance(actual_tokens, (int, float)) else "  Tokens: unknown")
+        mean_quality = metadata.get('mean_quality')
+        logger.info(f"  Mean quality: {mean_quality:.3f}" if isinstance(mean_quality, (int, float)) else "  Mean quality: unknown")
 
         if args.max_paragraphs:
             paragraphs = paragraphs[:args.max_paragraphs]
@@ -1973,6 +2052,7 @@ def main():
             workers=args.workers,
             skip_variation=args.skip_variation,
             skip_perspective=args.skip_perspective,
+            snowflake_topics=snowflake_topics,
         )
 
         for _, vtype in expanded:
@@ -2041,6 +2121,7 @@ def main():
             workers=args.workers,
             skip_variation=args.skip_variation,
             skip_perspective=args.skip_perspective,
+            snowflake_topics=snowflake_topics,
         )
 
         for _, vtype in expanded:

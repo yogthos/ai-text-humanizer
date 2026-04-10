@@ -63,28 +63,16 @@ class LLMConfig:
 @dataclass
 class GenerationConfig:
     """Configuration for text generation."""
-    # Validation settings
-    entailment_threshold: float = 0.7  # Min NLI score for semantic preservation
-
-    # Repair settings
-    max_repair_attempts: int = 5  # Max critic repair attempts per paragraph
-    repair_temperature: float = 0.3  # Low temperature for precise edits
-
     # Length control settings
     max_expansion_ratio: float = 2.5  # Max output/input word ratio before warning
     target_expansion_ratio: float = 1.5  # Target for LoRA generation (1.5 = 50% expansion for flourish)
     expand_for_texture: bool = False  # Add stronger expansion prompt to encourage elaboration/flourishes
 
     # LoRA adapter settings (path -> config mapping)
-    # Each adapter can have: scale, temperature, top_p, min_p, repetition_penalty, max_tokens, worldview, checkpoint
     lora_adapters: Dict[str, "LoRAAdapterConfig"] = field(default_factory=dict)
 
     # Neutralization settings
     skip_neutralization: bool = False  # If True, skip RTT and use original text as input
-
-    # Post-processing settings
-    repetition_threshold: int = 3  # Words used N+ times get replaced
-    reduce_repetition: bool = True  # Enable repetition reduction
 
     # Document handling
     use_document_context: bool = False  # Extract document-level context (disabled: extracted but never used)
@@ -99,16 +87,6 @@ class GenerationConfig:
     # Persona settings
     use_persona: bool = True  # Enable persona-based prompting
     apply_input_perturbation: bool = True  # Apply 8% noise to match training distribution
-
-    # Grammar correction settings (final post-processing pass)
-    correct_grammar: bool = True  # Enable style-safe grammar correction
-    grammar_language: str = "en-US"  # Language variant: "en-US" or "en-GB"
-
-    # Sentence restructuring settings
-    restructure_sentences: bool = False  # Enable balanced→inverted restructuring
-    split_sentences: bool = True  # Enable sentence splitting at conjunction points
-    max_sentence_length: int = 60  # Words - split sentences longer than this
-    sentence_length_variance: float = 0.4  # Variance factor (0.4 = 60%-140% of max)
 
 
 @dataclass
@@ -135,13 +113,9 @@ class LoRAAdapterConfig:
     load_in_8bit: bool = False  # Use 8-bit quantization (PyTorch with CUDA only)
     hf_adapter_path: Optional[str] = None  # HuggingFace adapter path (if different from local)
     expand_for_texture: Optional[bool] = None  # Per-adapter override for texture expansion (None = use global)
-
-
-@dataclass
-class ValidationConfig:
-    """Configuration for validation."""
-    entailment_threshold: float = 0.7  # Min NLI score for semantic preservation
-    max_hallucinations_before_reject: int = 3  # Trigger repair after this many hallucinations
+    perspective: Optional[str] = None  # Per-adapter perspective override (None = use global)
+    verify_entailment: Optional[bool] = None  # Per-adapter verification override (None = use global/CLI)
+    merge_paragraphs: Optional[int] = None  # Merge short paragraphs to reach this minimum word count before LoRA
 
 
 @dataclass
@@ -187,7 +161,6 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     style: StyleConfig = field(default_factory=StyleConfig)
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
     log_level: str = "INFO"
     log_json: bool = False
 
@@ -223,6 +196,7 @@ _KNOWN_ADAPTER_FIELDS = {
     "enabled", "scale", "temperature", "top_p", "min_p", "repetition_penalty",
     "max_tokens", "worldview", "fiction_markers", "checkpoint", "backend", "device",
     "load_in_4bit", "load_in_8bit", "hf_adapter_path", "expand_for_texture",
+    "perspective", "verify_entailment", "merge_paragraphs",
 }
 
 
@@ -250,6 +224,9 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         load_in_8bit=data.get("load_in_8bit", False),
         hf_adapter_path=data.get("hf_adapter_path"),
         expand_for_texture=data.get("expand_for_texture"),
+        perspective=data.get("perspective"),
+        verify_entailment=data.get("verify_entailment"),
+        merge_paragraphs=data.get("merge_paragraphs"),
     )
 
 
@@ -337,46 +314,20 @@ def load_config(config_path: str = "config.json") -> Config:
 
     if "generation" in data:
         gen = data["generation"]
-        # Get entailment_threshold from validation section or generation section
-        val_data = data.get("validation", {})
-        entailment_thresh = gen.get("entailment_threshold", val_data.get("entailment_threshold", 0.7))
         config.generation = GenerationConfig(
-            # Validation settings
-            entailment_threshold=entailment_thresh,
-            # Repair settings
-            max_repair_attempts=gen.get("max_repair_attempts", 5),
-            repair_temperature=gen.get("repair_temperature", 0.3),
-            # Length control
             max_expansion_ratio=gen.get("max_expansion_ratio", 2.5),
             target_expansion_ratio=gen.get("target_expansion_ratio", 1.5),
             expand_for_texture=gen.get("expand_for_texture", False),
-            # LoRA adapters (path -> config mapping)
             lora_adapters=_parse_lora_adapters(gen.get("lora_adapters", {})),
-            # Neutralization
             skip_neutralization=gen.get("skip_neutralization", False),
-            # Post-processing
-            repetition_threshold=gen.get("repetition_threshold", 3),
-            reduce_repetition=gen.get("reduce_repetition", True),
-            # Document handling
             use_document_context=gen.get("use_document_context", False),
             pass_headings_unchanged=gen.get("pass_headings_unchanged", True),
             min_paragraph_words=gen.get("min_paragraph_words", 10),
-            # RAG settings
             use_structural_rag=gen.get("use_structural_rag", True),
             use_structural_grafting=gen.get("use_structural_grafting", True),
             rag_sample_size=gen.get("rag_sample_size", 300),
-            # Persona settings
             use_persona=gen.get("use_persona", True),
             apply_input_perturbation=gen.get("apply_input_perturbation", True),
-            # Humanization settings
-            # Grammar correction settings
-            correct_grammar=gen.get("correct_grammar", True),
-            grammar_language=gen.get("grammar_language", "en-US"),
-            # Sentence restructuring settings
-            restructure_sentences=gen.get("restructure_sentences", False),
-            split_sentences=gen.get("split_sentences", True),
-            max_sentence_length=gen.get("max_sentence_length", 60),
-            sentence_length_variance=gen.get("sentence_length_variance", 0.4),
         )
 
     if "style" in data:
@@ -385,27 +336,6 @@ def load_config(config_path: str = "config.json") -> Config:
             perspective=style_data.get("perspective", "preserve"),
         )
         # Note: validation is handled by StyleConfig.__post_init__
-
-    if "validation" in data:
-        val_data = data["validation"]
-        config.validation.entailment_threshold = val_data.get("entailment_threshold", 0.7)
-        config.validation.max_hallucinations_before_reject = val_data.get("max_hallucinations_before_reject", 3)
-
-    # Sync entailment_threshold: validation → generation when not explicitly set in generation
-    if "validation" in data and "generation" not in data:
-        # No generation section: propagate validation threshold to generation defaults
-        config.generation.entailment_threshold = config.validation.entailment_threshold
-    elif "validation" in data and "generation" in data:
-        gen_data = data["generation"]
-        if "entailment_threshold" not in gen_data:
-            # Generation section exists but doesn't set threshold: use validation value
-            config.generation.entailment_threshold = config.validation.entailment_threshold
-        else:
-            logger.debug(
-                f"entailment_threshold set in both generation ({config.generation.entailment_threshold}) "
-                f"and validation ({config.validation.entailment_threshold}) sections. "
-                f"Using generation value."
-            )
 
     # Validate worldview files exist in prompts/ directory
     prompts_dir = Path(__file__).parent.parent / "prompts"
@@ -464,15 +394,7 @@ def create_default_config() -> Dict:
                 "max_delay": 60
             }
         },
-        "generation": {
-            "max_repair_attempts": 3,
-            "repair_temperature": 0.3,
-            "repetition_threshold": 3
-        },
-        "validation": {
-            "entailment_threshold": 0.7,
-            "max_hallucinations_before_reject": 3
-        },
+        "generation": {},
         "log_level": "INFO"
     }
 

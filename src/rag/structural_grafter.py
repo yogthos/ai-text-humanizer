@@ -136,4 +136,6 @@ def get_structural_grafter(author: str, llm_provider=None) -> StructuralGrafter:
     cache_key = author
     if cache_key not in _grafter_cache:
         _grafter_cache[cache_key] = StructuralGrafter(author, llm_provider)
+    elif llm_provider is not None and _grafter_cache[cache_key].llm_provider is None:
+        _grafter_cache[cache_key].llm_provider = llm_provider
     return _grafter_cache[cache_key]

@@ -242,7 +242,7 @@ def transfer_file(
     adapters: list,
     author: str,
     config_path: str = "config.json",
-    temperature: float = 0.2,
+    temperature: float = None,
     perspective: str = None,
     verify: bool = True,
     verbose: bool = False,
@@ -309,51 +309,29 @@ def transfer_file(
     if app_config:
         gen = app_config.generation
         config = TransferConfig(
-            # Use CLI temperature if specified, otherwise config value
             temperature=temperature,
-            verify_entailment=verify,
-            # Perspective
+            verify_semantic_fidelity=verify,
             perspective=effective_perspective,
-            # From config file
-            max_repair_attempts=gen.max_repair_attempts,
-            repair_temperature=gen.repair_temperature,
-            entailment_threshold=gen.entailment_threshold,
-            max_hallucinations_before_reject=app_config.validation.max_hallucinations_before_reject,
             max_expansion_ratio=gen.max_expansion_ratio,
             target_expansion_ratio=gen.target_expansion_ratio,
             expand_for_texture=expand_for_texture,
             expand_for_texture_explicit=expand_for_texture_explicit,
-            # Neutralization
             skip_neutralization=gen.skip_neutralization,
-            # Post-processing
-            reduce_repetition=gen.reduce_repetition,
-            repetition_threshold=gen.repetition_threshold,
             use_document_context=gen.use_document_context,
             pass_headings_unchanged=gen.pass_headings_unchanged,
             min_paragraph_words=gen.min_paragraph_words,
-            # RAG settings
             use_structural_rag=gen.use_structural_rag,
             use_structural_grafting=gen.use_structural_grafting,
             rag_sample_size=gen.rag_sample_size,
-            # Input perturbation
             apply_input_perturbation=gen.apply_input_perturbation,
-            # Persona settings
             use_persona=gen.use_persona,
-            # Sentence post-processing
-            restructure_sentences=gen.restructure_sentences,
-            split_sentences=gen.split_sentences,
-            max_sentence_length=gen.max_sentence_length,
-            sentence_length_variance=gen.sentence_length_variance,
-            # Grammar correction
-            correct_grammar=gen.correct_grammar,
-            grammar_language=gen.grammar_language,
         )
     else:
         config = TransferConfig(
             temperature=temperature,
-            verify_entailment=verify,
+            verify_semantic_fidelity=verify,
             perspective=effective_perspective,
-            use_structural_rag=True,  # Default to enabled
+            use_structural_rag=True,
             expand_for_texture=expand_for_texture,
             expand_for_texture_explicit=expand_for_texture_explicit,
         )
@@ -458,8 +436,6 @@ def transfer_file(
             avg_score = sum(stats.entailment_scores) / len(stats.entailment_scores)
             print(f"  Content preservation: {avg_score:.1%}")
 
-        if stats.paragraphs_repaired > 0:
-            print(f"  Paragraphs repaired: {stats.paragraphs_repaired}")
 
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")

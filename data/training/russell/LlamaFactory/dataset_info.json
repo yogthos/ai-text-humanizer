@@ -1,0 +1,10 @@
+{
+  "russell_sft": {
+    "file_name": "train.jsonl",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}

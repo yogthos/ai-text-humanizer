@@ -1,0 +1,141 @@
+### Model
+# Qwen2.5-32B dense — proven architecture for style transfer.
+# Dense models respond linearly to LoRA scaling (unlike MoE).
+model_name_or_path: Qwen/Qwen2.5-32B
+trust_remote_code: true
+
+### Method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+# Rank 256 with alpha 512 (2:1 ratio). Baked-in scale = alpha/rank = 2.0.
+#
+# Rank 256 is empirically validated as the sweet spot for literary style transfer:
+#   - RunPod Nabokov study: rank 128 = "a bit more verbose", rank 256 = "huge
+#     jump in style", rank 512 = incoherent. Rank 256 provides "best balance
+#     between coherence and spirit".
+#     https://www.runpod.io/blog/effects-of-rank-epochs-learning-rate-textual-loras
+#   - Sebastian Raschka's tests: r=256 optimal for instruction tuning, and
+#     "the more diverse the tasks, the larger the r should be" — blended style
+#     is more diverse than single author, so rank 256 is especially warranted.
+#     https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms
+#
+# At ~60,000 examples / rank 256 = 234 ex/rank (very comfortable headroom).
+# With this much data per rank, overfitting is unlikely. Extra mitigations
+# still in place: bf16, NEFTune, dropout 0.1, low LR 1e-5, eval monitoring.
+lora_rank: 256
+lora_alpha: 512
+lora_dropout: 0.1
+
+# NEFTune: prevents memorization, forces generalized style patterns.
+neftune_noise_alpha: 5.0
+
+### Dataset
+# Howard Russell bidirectional blended corpus: 5,201 blended paragraphs
+# (2,378 Russell-primary + 2,823 Lovecraft-primary, 1,033 unblended fallbacks)
+# → ~22,000 chunks (40-100w with 2-sentence overlap, inference-matched sizing)
+#   Chunks avg 94w, median 97w — matches chapter median 75w / mean 79w
+# → ~60,000 training examples (many-to-one + robustness, snowflakes optional)
+dataset: howard_russell_sft
+template: qwen
+# 768 — max example is 585 tokens, p99 is 486. Lowering from 2048 saves
+# ~4GB activation memory (critical for fitting bf16 32B on single A100 80GB).
+cutoff_len: 768
+packing: true
+overwrite_cache: true
+preprocessing_num_workers: 1
+
+# Compute loss on instruction tokens in addition to response tokens.
+# Default SFT behavior masks instruction tokens (sets targets to -100), so loss
+# is computed only on the response. For style transfer, the persona frame in
+# the instruction carries stylistic signal — computing loss on it reinforces
+# the persona→style mapping.
+#
+# Shi et al. 2024 "Instruction Tuning With Loss Over Instructions" found this
+# approach outperforms standard masked-instruction SFT on many tasks:
+#   https://arxiv.org/abs/2405.14394
+# Independently confirmed in Sebastian Raschka's Test Yourself workbook
+# (Exercise 7.2): ~4 point improvement on Llama 3 eval.
+train_on_prompt: true
+
+### Output
+output_dir: saves/Qwen2.5-32B/lora/howard_russell
+logging_steps: 10
+save_steps: 200
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+
+### Training
+# Dataset: ~60,000 entries (with snowflakes: ~80,000)
+# Effective batch size: 1 * 16 = 16 (single GPU)
+# Steps per epoch: 60,000 / 16 = ~3,750 (or ~5,000 with snowflakes)
+# 3 epochs = ~11,250 steps (or ~15,000 with snowflakes)
+#
+# Data scale check:
+#   - Stein reference:     591 @ rank 32  = 18 ex/rank → worked
+#   - Lovecraft reference: 3,770 @ rank 64  = 59 ex/rank → production
+#   - Howard Russell:      60,000 @ rank 256 = 234 ex/rank → ample headroom
+#     Inference-matched chunking (40-100w) produces many more chunks from
+#     the same source material. This is intentional — the model MUST see
+#     examples at the actual inference paragraph lengths (median 75w).
+#
+# Learning rate: 1e-5 for deeper pattern imprinting.
+# With alpha/rank = 2.0, effective LR at LoRA weights is 2e-5 — sweet spot
+# for style transfer where subtle activation patterns matter.
+# With 2x A100 80GB + DeepSpeed ZeRO-3: model sharded across GPUs (~40GB each).
+# Effective batch = 2 GPUs × 1 batch × 8 accum = 16.
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-5
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+# Explicit default clipping (1.0) — safety net without MoE-level aggression
+max_grad_norm: 1.0
+
+### Evaluation
+val_size: 0.05
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 100
+
+### Optimization
+# bf16 LoRA (no quantization) — preserves signal fidelity for style transfer.
+# Style is encoded in subtle activation patterns that 4-bit quantization noise
+# would compete with. NEFTune + dropout already inject deliberate noise;
+# adding quantization noise compounds degradation.
+#
+# VRAM for 32B + rank 256 bf16 LoRA: ~76-80GB
+#   - Base weights (bf16):     ~64GB
+#   - LoRA params:              ~1.5GB
+#   - Gradients (trainable):    ~3GB
+#   - Optimizer states (8-bit): ~1.5GB
+#   - Activations (gc+packing): ~6-10GB
+#
+# bf16 LoRA OOMs on single A100 80GB with rank 256 all-linear (79.16/79.25GB).
+# Requires 2x A100 80GB with DeepSpeed ZeRO-3 to shard model across GPUs.
+# quantization_bit: 4   # fallback for single-GPU (reduces quality)
+flash_attn: fa2
+gradient_checkpointing: true
+# DeepSpeed ZeRO-3: shards model + optimizer + gradients across 2 GPUs.
+# Each GPU holds ~40GB instead of 80GB. Config file handles shard settings.
+deepspeed: ds_z3_config.json
+# With ZeRO-3, use standard AdamW (DeepSpeed manages optimizer partitioning)
+optim: adamw_torch
+
+# =============================================================================
+# POST-TRAINING
+# =============================================================================
+#
+# 1. Convert adapter:
+#    python scripts/convert_peft_to_mlx.py \
+#        --input saves/Qwen2.5-32B/lora/howard_russell \
+#        --output lora_adapters/howard_russell_25_32b_mlx \
+#        --mlx-model models/Qwen2.5-32B-Base-4bit-MLX
+#
+# 2. Run inference:
+#    python restyle.py input.md -o output.md \
+#        --adapter lora_adapters/howard_russell_25_32b_mlx

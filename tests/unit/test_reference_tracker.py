@@ -95,12 +95,13 @@ class TestReinjectReferences:
         clean, ref_map = extract_references(text)
 
         styled = "Einstein developed relativity."
-        result = reinject_references(styled, ref_map)
+        result, dropped = reinject_references(styled, ref_map)
 
         assert "[^1]" in result
         assert "[^2]" in result
         assert "Einstein[^1]" in result
         assert "relativity[^2]" in result
+        assert dropped == []
 
     def test_reinjection_with_style_changes(self):
         """Test reinjection when text has been restyled."""
@@ -108,18 +109,20 @@ class TestReinjectReferences:
         clean, ref_map = extract_references(text)
 
         styled = "The physicist Einstein formulated his theory of relativity in 1905."
-        result = reinject_references(styled, ref_map)
+        result, dropped = reinject_references(styled, ref_map)
 
         assert "Einstein[^1]" in result
         assert "relativity[^2]" in result
+        assert dropped == []
 
     def test_reinjection_empty_map(self):
         """Test reinjection with no references."""
         ref_map = ReferenceMap()
         styled = "Some styled text."
-        result = reinject_references(styled, ref_map)
+        result, dropped = reinject_references(styled, ref_map)
 
         assert result == styled
+        assert dropped == []
 
     def test_reinjection_missing_entity(self):
         """Test reinjection when entity is completely removed."""
@@ -128,10 +131,11 @@ class TestReinjectReferences:
 
         # Entity completely missing from output
         styled = "A great physicist changed physics."
-        result = reinject_references(styled, ref_map)
+        result, dropped = reinject_references(styled, ref_map)
 
         # Reference should not appear (no injection point found)
         assert result == styled
+        assert dropped == ["[^1]"]
 
     def test_context_disambiguation(self):
         """Test that context helps disambiguate multiple matches."""
@@ -139,7 +143,7 @@ class TestReinjectReferences:
         clean, ref_map = extract_references(text)
 
         styled = "Einstein was born in Germany. Einstein later moved to America."
-        result = reinject_references(styled, ref_map)
+        result, dropped = reinject_references(styled, ref_map)
 
         # Should inject after first Einstein (context: "Germany")
         assert result.count("[^1]") == 1
@@ -147,6 +151,7 @@ class TestReinjectReferences:
         idx_ref = result.find("[^1]")
         idx_germany = result.find("Germany")
         assert idx_ref < idx_germany  # Reference before Germany mention
+        assert dropped == []
 
     def test_fuzzy_matching_last_name(self):
         """Test fuzzy matching with last name only."""
@@ -155,9 +160,10 @@ class TestReinjectReferences:
 
         # Output only uses last name
         styled = "Einstein was a brilliant physicist."
-        result = reinject_references(styled, ref_map)
+        result, dropped = reinject_references(styled, ref_map)
 
         assert "Einstein[^1]" in result
+        assert dropped == []
 
 
 class TestExtractAttachedWord:

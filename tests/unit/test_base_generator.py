@@ -40,7 +40,7 @@ class TestFictionMarkers:
                 pass
 
         gen = TestGenerator()
-        gen.fiction_markers = [r'\bfoo_marker\b', r'\bbar_marker\b']
+        gen.fiction_markers = ['foo_marker', 'bar_marker']
 
         text = "Normal sentence here. The foo_marker was terrible. Another sentence."
         result = gen._clean_response(text)
@@ -127,7 +127,7 @@ class TestFictionMarkerAllHallucinated:
                 pass
 
         gen = TestGenerator()
-        gen.fiction_markers = [r'\bCthulhu\b', r"\bR'lyeh\b"]
+        gen.fiction_markers = ['Cthulhu', "R'lyeh"]
 
         # All sentences contain fiction markers — should all be filtered
         text = "Cthulhu stirred in the deep. R'lyeh rose from the ocean."

@@ -255,6 +255,13 @@ class SentenceRestructurer:
                         clause_content = doc[i + 2:clause_end].text  # Skip "which was"
                         after = doc[clause_end:].text
 
+                        # Strip surrounding commas left by the extracted clause
+                        if before.endswith(','):
+                            before = before[:-1]
+                        if after.lstrip().startswith(','):
+                            after = after.lstrip()[1:]
+                            after = ' ' + after
+
                         # Add em-dash interruption
                         return f"{before}—{clause_content}—{after}"
 

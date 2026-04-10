@@ -1,0 +1,18 @@
+{
+  "howard_russell_sft": {
+    "file_name": "train.jsonl",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  },
+  "howard_russell_mixed_sft": {
+    "file_name": "train_mixed.jsonl",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}

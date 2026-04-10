@@ -190,7 +190,7 @@ def reinject_references(
     output: str,
     ref_map: ReferenceMap,
     source_entities: Optional[List[str]] = None,
-) -> str:
+) -> Tuple[str, List[str]]:
     """Reinject references into styled output based on entity matching.
 
     Args:
@@ -199,18 +199,20 @@ def reinject_references(
         source_entities: Optional list of entities from source graph.
 
     Returns:
-        Output text with references reinjected.
+        Tuple of (output text with references reinjected, list of dropped markers).
     """
     if not ref_map.has_references():
-        return output
+        return output, []
 
     result = output
     injected_count = 0
+    dropped: List[str] = []
 
     # Process each reference
     for ref in ref_map.references:
         attached = ref.attached_to
         if not attached:
+            dropped.append(ref.marker)
             continue
 
         # Try to find the attached word/phrase in output
@@ -230,11 +232,15 @@ def reinject_references(
                 logger.debug(f"Fuzzy injected {ref.marker} near '{attached}'")
             else:
                 logger.warning(f"Could not find injection point for {ref.marker} (attached to '{attached}')")
+                dropped.append(ref.marker)
 
     if injected_count > 0:
         logger.info(f"Reinjected {injected_count}/{len(ref_map.references)} references")
 
-    return result
+    if dropped:
+        logger.warning(f"Dropped {len(dropped)} references that could not be re-attached: {dropped}")
+
+    return result, dropped
 
 
 def _find_injection_point(text: str, attached: str, context: str) -> Optional[int]:

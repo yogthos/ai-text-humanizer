@@ -60,7 +60,7 @@ class TestConfigLoading:
                 config = load_config(f.name)
                 assert config.llm.provider.writer == "mlx"
                 assert config.llm.provider.critic == "deepseek"
-                assert config.generation.max_repair_attempts == 3  # explicitly set to 3 in config
+                assert config.generation.max_expansion_ratio == 2.5
             finally:
                 os.unlink(f.name)
 
@@ -170,24 +170,7 @@ class TestDefaultConfig:
         config = Config()
 
         assert config.llm.max_retries == 5
-        assert config.generation.max_repair_attempts == 5  # default is 5
-        assert config.validation.entailment_threshold == 0.7
-        assert config.validation.max_hallucinations_before_reject == 3
-
-    def test_defaults_match_config_json(self):
-        """Dataclass defaults should match config.json to avoid silent divergence."""
-        from src.config import GenerationConfig, ValidationConfig
-
-        gen = GenerationConfig()
-        val = ValidationConfig()
-
-        # These defaults were out of sync with config.json — verify they match
-        assert gen.restructure_sentences is False, (
-            "restructure_sentences default should be False (matches config.json)"
-        )
-        assert val.max_hallucinations_before_reject == 3, (
-            "max_hallucinations_before_reject default should be 3 (matches config.json)"
-        )
+        assert config.generation.max_expansion_ratio == 2.5
 
 
 class TestLLMConfig:
@@ -246,44 +229,19 @@ class TestLLMConfig:
 
 
 class TestDefaultValueMatches:
-    """Tests for default value consistency (Bug 15)."""
-
-    def test_generation_config_max_repair_attempts(self):
-        """GenerationConfig max_repair_attempts should match config.json default."""
-        from src.config import GenerationConfig
-        assert GenerationConfig().max_repair_attempts == 5
+    """Tests for default value consistency."""
 
     def test_generation_config_rag_sample_size(self):
         """GenerationConfig rag_sample_size should match config.json default."""
         from src.config import GenerationConfig
         assert GenerationConfig().rag_sample_size == 300
 
-    def test_transfer_config_sentence_length_variance(self):
-        """TransferConfig sentence_length_variance should match config.json default."""
-        from src.generation.transfer import TransferConfig
-        assert TransferConfig().sentence_length_variance == 0.4
-
 
 class TestParserFallbackDefaults:
-    """Tests for parser .get() fallback defaults matching dataclass (Bug 9)."""
-
-    def test_parser_fallback_matches_dataclass_default_max_repair(self):
-        """Parser fallback for max_repair_attempts should be 5, not 3."""
-        config_data = {
-            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
-            "generation": {},  # Empty generation section — fallbacks kick in
-        }
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(config_data, f)
-            f.flush()
-            try:
-                config = load_config(f.name)
-                assert config.generation.max_repair_attempts == 5
-            finally:
-                os.unlink(f.name)
+    """Tests for parser .get() fallback defaults matching dataclass."""
 
     def test_parser_fallback_matches_dataclass_default_rag_sample(self):
-        """Parser fallback for rag_sample_size should be 300, not 200."""
+        """Parser fallback for rag_sample_size should be 300."""
         config_data = {
             "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
             "generation": {},
@@ -294,21 +252,6 @@ class TestParserFallbackDefaults:
             try:
                 config = load_config(f.name)
                 assert config.generation.rag_sample_size == 300
-            finally:
-                os.unlink(f.name)
-
-    def test_parser_fallback_matches_dataclass_default_sentence_variance(self):
-        """Parser fallback for sentence_length_variance should be 0.4, not 0.3."""
-        config_data = {
-            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
-            "generation": {},
-        }
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(config_data, f)
-            f.flush()
-            try:
-                config = load_config(f.name)
-                assert config.generation.sentence_length_variance == 0.4
             finally:
                 os.unlink(f.name)
 
@@ -341,55 +284,6 @@ class TestWorldviewFileValidation:
                     warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
                     assert any("nonexistent_worldview_xyz.txt" in str(c) for c in warning_calls), \
                         f"Expected warning about missing worldview file, got: {warning_calls}"
-            finally:
-                os.unlink(f.name)
-
-
-class TestDualEntailmentThreshold:
-    """Tests for entailment_threshold sync between generation and validation (Bug 8)."""
-
-    def test_validation_threshold_propagates(self):
-        """When only set in validation section, generation should match."""
-        config_data = {
-            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
-            "validation": {
-                "entailment_threshold": 0.85,
-                "max_hallucinations_before_reject": 3,
-            },
-        }
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(config_data, f)
-            f.flush()
-
-            try:
-                config = load_config(f.name)
-                # Both should be 0.85 since validation is the only source
-                assert config.validation.entailment_threshold == 0.85
-                assert config.generation.entailment_threshold == 0.85
-            finally:
-                os.unlink(f.name)
-
-    def test_generation_threshold_takes_precedence(self):
-        """When set in both, generation value should win."""
-        config_data = {
-            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
-            "generation": {
-                "entailment_threshold": 0.6,
-            },
-            "validation": {
-                "entailment_threshold": 0.85,
-            },
-        }
-
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            json.dump(config_data, f)
-            f.flush()
-
-            try:
-                config = load_config(f.name)
-                # generation explicitly set should win
-                assert config.generation.entailment_threshold == 0.6
             finally:
                 os.unlink(f.name)
 
@@ -566,18 +460,3 @@ class TestConfigFieldsForwarded:
         assert gen.rag_sample_size == 500
 
 
-class TestRedundantElifInConfigSync:
-    """Bug: elif condition in entailment_threshold sync is always true (dead branch)."""
-
-    def test_no_redundant_elif_in_config_sync(self):
-        """The entailment_threshold sync should use else, not elif with redundant condition."""
-        import inspect
-        from src.config import load_config
-
-        source = inspect.getsource(load_config)
-        # After 'if "entailment_threshold" not in gen_data:', the elif condition
-        # 'elif "entailment_threshold" in gen_data:' is always true — should be 'else:'
-        assert 'elif "entailment_threshold" in gen_data:' not in source, (
-            "Redundant elif — after checking 'not in', the elif 'in' is always true. "
-            "Use 'else:' instead."
-        )

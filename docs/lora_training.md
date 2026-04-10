@@ -73,7 +73,7 @@ Convert the author's works to plain text.
 
 ### 1.2 Curate Corpus (The "Chunking" Strategy)
 
-We need chunks that are long enough to capture *paragraph structure* (topic sentence  evidence  cosmic conclusion).
+We need chunks that are long enough to capture *paragraph structure* (topic sentence → evidence → cosmic conclusion).
 
 ```bash
 python scripts/curate_corpus.py \
@@ -81,10 +81,37 @@ python scripts/curate_corpus.py \
     --output styles/unconducted_chorus.txt \
     --target-tokens 900000 \
     --min-para-words 60 
-
 ```
 
-*Note: We increased `min-para-words` to 60 because short paragraphs don't carry enough style signal.*
+**Paragraph length guidelines:**
+- **Minimum**: 60 words — below this, insufficient style signal for the model to learn from
+- **Ideal**: 60-150 words — sweet spot for style learning
+- **Maximum**: 400 words — longer chunks still work but with diminishing returns
+- **Target corpus**: 50k+ words minimum, 900k tokens for optimal results
+
+**Match training lengths to inference lengths.** If the LoRA will process 70-100 word
+paragraphs at inference, the training data must include examples in that range. A model
+trained only on 200-400 word paragraphs will underperform on short paragraphs.
+
+### 1.3 Overlapping Chunks — "Style Lives in Transitions"
+
+Stylistic markers concentrate at sentence boundaries. Overlapping chunks expose the model
+to more beginning/ending patterns where style actually lives. This insight was validated
+by the [Gertrude Stein style training study](https://muratcankoylan.com/projects/gertrude-stein-style-training/),
+which found that moving from 250-650 word chunks to 150-400 word chunks with overlap
+**doubled training examples from identical source material** and produced significantly
+better output.
+
+```
+Config: min_words=150, max_words=400, overlap_sentences=2
+```
+
+The overlap strategy: the last 2 sentences of chunk N become the first 2 sentences of
+chunk N+1. This means the model sees the same transition point from two different contexts,
+learning how the author handles sentence-to-sentence flow.
+
+Only applied to `original` type entries (continuous narrative). Snowflakes and perspective
+variants are kept separate to avoid Frankenstein text.
 
 ---
 

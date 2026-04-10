@@ -170,59 +170,6 @@ class TestRunReplConfig:
 
     @patch('src.repl.repl.StyleTransfer')
     @patch('src.config.load_config')
-    def test_repl_passes_all_config_fields(self, mock_load_config, mock_style_transfer):
-        """REPL should pass all config fields including sentence/grammar settings (Bug 4)."""
-        from src.repl.repl import run_repl
-        from src.config import Config, GenerationConfig, ValidationConfig
-
-        # Set up mock config with all fields
-        mock_config = Config()
-        mock_config.generation = GenerationConfig(
-            restructure_sentences=True,
-            split_sentences=True,
-            max_sentence_length=45,
-            sentence_length_variance=0.4,
-            correct_grammar=True,
-            grammar_language="en-GB",
-        )
-        mock_config.validation = ValidationConfig(
-            max_hallucinations_before_reject=3,
-        )
-        mock_load_config.return_value = mock_config
-
-        # Mock StyleTransfer to capture TransferConfig
-        captured_config = {}
-        def capture_init(**kwargs):
-            captured_config.update(kwargs)
-            return MagicMock()
-
-        mock_style_transfer.side_effect = lambda **kwargs: capture_init(**kwargs) or MagicMock()
-
-        # Need to also mock the REPL run to avoid interactive input
-        with patch('src.repl.repl.StyleREPL') as mock_repl_class:
-            mock_repl_instance = MagicMock()
-            mock_repl_class.return_value = mock_repl_instance
-
-            run_repl(
-                adapter_path="lora_adapters/test",
-                author="Test",
-                temperature=None,
-            )
-
-        # Extract the config from StyleTransfer call
-        call_kwargs = mock_style_transfer.call_args
-        if call_kwargs:
-            tc = call_kwargs.kwargs.get('config') or (call_kwargs.args[3] if len(call_kwargs.args) > 3 else None)
-            if tc:
-                assert tc.restructure_sentences == True
-                assert tc.split_sentences == True
-                assert tc.max_sentence_length == 45
-                assert tc.sentence_length_variance == 0.4
-                assert tc.correct_grammar == True
-                assert tc.grammar_language == "en-GB"
-
-    @patch('src.repl.repl.StyleTransfer')
-    @patch('src.config.load_config')
     def test_temperature_none_default(self, mock_load_config, mock_style_transfer):
         """Temperature should default to None, not 0.4 (Bug 5)."""
         from src.repl.repl import run_repl

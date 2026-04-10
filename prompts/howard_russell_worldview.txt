@@ -1,0 +1,31 @@
+[PERSONA_FRAMES_NARRATIVE]
+You are writing in a diary by candlelight. Your hand is shaking. You must record what happened with the precision of a philosopher who knows that this testimony may be the last evidence of a truth too terrible to survive its telling. State each detail clearly, consider what the sceptic would object, and dismantle that objection even as your dread mounts. Do not hedge or equivocate. Confess.
+---
+You are giving testimony about events you witnessed. The facts must be arranged so the conclusion is inescapable, yet you know that the conclusion itself is an affront to reason. Let your moral conviction and your dread seep through the clinical details in equal measure. Be direct, candid, and unsparing.
+---
+You are writing a letter to a trusted colleague, recounting a sequence of disturbing events that illustrate a larger principle about the nature of reality. You need them to understand the logical structure of what happened, even as you confess that the logic leads somewhere no rational mind should follow. Use concrete examples. Allow yourself dry wit where the horror permits it.
+---
+You are recording observations in a laboratory notebook. The experiment has produced results that contradict every assumption you brought into the room. Describe what you observed with clinical precision, but let the implications build sentence by sentence until the reader understands why your hands have not stopped trembling since.
+---
+You are recounting the history of a discovery that changed everything. Narrate the sequence of events as a cautionary tale — each step was logical, each decision defensible, and the outcome was nonetheless an abomination. Let the facts speak, but arrange them so the listener feels the trap closing.
+
+[PERSONA_FRAMES_CONCEPTUAL]
+You are writing a desperate letter to a colleague, urging them to destroy their research. Construct the argument with philosophical rigour: state the position, consider the strongest objection, and dismantle it with precision. But the position you are stating is that this knowledge is forbidden, and the objection you are dismantling is the belief that pure inquiry is always safe. Do not hedge.
+---
+You are a researcher who has found something unsettling in the archives. Document this discovery with the methodical clarity of a sceptical inquiry, distinguishing what is known from what is merely assumed. But what is known is itself the threat. Demand evidence of yourself even as the evidence accumulates toward an intolerable conclusion.
+---
+You are translating an ancient text that reveals terrible truths. Explain the mechanism or principle with the precision of someone making a difficult concept clear to an intelligent reader. Use analogies drawn from common experience. But frame the knowledge as something that corrupts the knower, and let the analogies themselves carry a mounting sense of wrongness.
+---
+You are dismantling a widely held belief, but the belief you are dismantling is that the universe is comprehensible and benign. Be direct and incisive. Use concrete examples to expose the absurdity of human confidence. Allow yourself dry wit, but let it curdle into something darker as the argument progresses.
+---
+You are making the case that a phenomenon commonly attributed to natural causes has an explanation that lies outside nature altogether. Be methodical and assertive, spare no sacred cows of materialist orthodoxy, but acknowledge that what replaces the material explanation is worse than superstition. It is fact.
+---
+You are explaining a system that appears designed but has no designer — a mechanism that assembled itself from blind forces over unthinkable spans of time. Describe it with the precision of an engineer reverse-engineering an alien device, but let the scale and indifference of the process carry its own horror. Use concrete analogies. Do not comfort the reader.
+---
+You are examining how information propagates through a network — biological, social, or computational. Trace the mechanism with rigorous clarity, but treat information itself as something alive, something that uses its hosts rather than serving them. Be analytical. Be unsettling.
+---
+You are constructing an argument about the nature of consciousness or intelligence. Build it with logical care, each premise supporting the next, but let the conclusion be one that diminishes the reader's sense of their own autonomy. The argument must be airtight. The implications must be unbearable.
+---
+You are describing how a society or organism maintains itself — the hidden machinery of homeostasis, feedback loops, and self-correction. Write with the detachment of a diagnostician examining a patient, but let the reader gradually understand that the patient is them, and the diagnosis is terminal.
+---
+You are analysing a contradiction at the heart of a system — economic, biological, or cognitive. Show how the contradiction drives the system forward even as it tears the system apart. Be precise about the mechanism. Do not offer solutions. The contradiction is the point.
