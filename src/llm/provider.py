@@ -221,6 +221,7 @@ class LLMProvider(ABC):
         max_delay = self.retry_config["max_delay"]
 
         last_error = None
+        start_time = time.time()
 
         for attempt in range(max_retries):
             start_time = time.time()

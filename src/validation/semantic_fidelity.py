@@ -63,9 +63,14 @@ def validate_semantic_fidelity(
         changes = result.get("changes", [])
         corrected = result.get("result", restyled)
 
-        if changes:
+        if not isinstance(corrected, str) or not corrected.strip():
+            corrected = restyled
+            logger.warning("Semantic fidelity returned empty/null result, keeping original restyled text")
+
+        if changes and isinstance(changes, list):
             for change in changes:
-                logger.info(f"Semantic fix: {change.get('issue', '?')}")
+                if isinstance(change, dict):
+                    logger.info(f"Semantic fix: {change.get('issue', '?')}")
 
         return FidelityResult(
             original=original,

@@ -187,10 +187,11 @@ class DocumentContextExtractor:
             context.tone = "neutral"
 
         # Detect intent based on sentence patterns
-        questions = sum(1 for sent in doc.sents if sent.text.strip().endswith("?"))
+        sentences_list = list(doc.sents)
+        questions = sum(1 for sent in sentences_list if sent.text.strip().endswith("?"))
         imperatives = sum(1 for token in doc if token.dep_ == "ROOT" and token.tag_ == "VB")
 
-        if questions > len(list(doc.sents)) * 0.2:
+        if questions > len(sentences_list) * 0.2:
             context.intent = "explanatory"
         elif imperatives > 5:
             context.intent = "persuasive"
@@ -198,9 +199,8 @@ class DocumentContextExtractor:
             context.intent = "informative"
 
         # Use first sentence as rough thesis
-        sentences = list(doc.sents)
-        if sentences:
-            context.thesis = sentences[0].text.strip()[:200]
+        if sentences_list:
+            context.thesis = sentences_list[0].text.strip()[:200]
 
 
 def extract_document_context(

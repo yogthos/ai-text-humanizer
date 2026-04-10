@@ -2033,8 +2033,10 @@ def main():
         metadata = selected_data.get("metadata", {})
         logger.info(f"Loaded {len(paragraphs)} pre-selected paragraphs")
         logger.info(f"  Source: {metadata.get('source', 'unknown')}")
-        logger.info(f"  Tokens: {metadata.get('actual_tokens', 'unknown'):,}")
-        logger.info(f"  Mean quality: {metadata.get('mean_quality', 'unknown'):.3f}")
+        actual_tokens = metadata.get('actual_tokens')
+        logger.info(f"  Tokens: {actual_tokens:,}" if isinstance(actual_tokens, (int, float)) else "  Tokens: unknown")
+        mean_quality = metadata.get('mean_quality')
+        logger.info(f"  Mean quality: {mean_quality:.3f}" if isinstance(mean_quality, (int, float)) else "  Mean quality: unknown")
 
         if args.max_paragraphs:
             paragraphs = paragraphs[:args.max_paragraphs]
