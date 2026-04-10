@@ -6,7 +6,7 @@ The restyled text was produced by a style-transfer model. Its sentence structure
 2. The restyled text is grammatically correct
 
 STEP 1 — Check for dropped content:
-Extract every distinct factual claim from the original. For each one, verify that the restyled text expresses the same claim somewhere (the wording and structure can differ, but the meaning must be there). If any claim has no equivalent, it MUST be restored with a minimal insertion that fits the restyled text's voice.
+CRITICAL: Extract EVERY distinct factual claim from the original. For each one, verify that the restyled text expresses the same claim somewhere (the wording and structure can differ, but the meaning must be there). If any claim has no equivalent, it MUST be restored with a minimal insertion that fits the restyled text's voice.
 
 STEP 2 — Check for distorted meaning:
 Look for statements where the restyled version says something factually different from the original (wrong subject, wrong object, reversed causation, opposite claim). Fix with the smallest possible edit.
