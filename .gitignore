@@ -41,7 +41,11 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
-
+.beads/
+.clj-kondo/
+.gitattributes
+.lsp/
+checkpoints/
 config.json
 input/
 output/
