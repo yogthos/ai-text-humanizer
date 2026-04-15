@@ -4,7 +4,9 @@ nltk>=3.8.0
 
 # ML/Deep Learning
 torch>=2.0.0
-transformers>=4.36.0  # For HuggingFace models (LUAR, etc.)
+transformers>=4.36.0
+peft>=0.18.0
+accelerate>=0.21.0
 sentence-transformers>=2.2.0  # For NLI entailment verification (cross-encoder/nli-deberta-v3-small)
 einops>=0.7.0  # Required for LUAR style embeddings
 
