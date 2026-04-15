@@ -71,6 +71,7 @@ class FusedModelConfig:
     """
 
     enabled: bool = True
+    author: str = ""
     temperature: float = 0.6
     top_p: float = 0.92
     min_p: float = 0.05
@@ -308,6 +309,7 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
 
 _KNOWN_MODEL_FIELDS = {
     "enabled",
+    "author",
     "temperature",
     "top_p",
     "min_p",
@@ -325,6 +327,7 @@ def _parse_fused_model_config(data: Dict) -> FusedModelConfig:
     """Parse fused model configuration from dict."""
     return FusedModelConfig(
         enabled=data.get("enabled", True),
+        author=data.get("author", ""),
         temperature=data.get("temperature", 0.6),
         top_p=data.get("top_p", 0.92),
         min_p=data.get("min_p", 0.05),

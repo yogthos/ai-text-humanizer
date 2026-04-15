@@ -699,6 +699,7 @@ def main():
     # Parse adapter specs from CLI or config
     adapters = []
     fused_models = []
+    fused_model_config = None
 
     if args.model:
         for model_path in args.model:
@@ -731,6 +732,8 @@ def main():
                         if not model_config.enabled:
                             continue
                         fused_models.append(path)
+                        if fused_model_config is None:
+                            fused_model_config = model_config
                     if fused_models:
                         print(f"Using fused models from config: {args.config}")
             else:
@@ -763,6 +766,8 @@ def main():
             with open(metadata_path, "r") as f:
                 metadata = json.load(f)
             author = metadata.get("author")
+    if not author and fused_model_config and fused_model_config.author:
+        author = fused_model_config.author
 
     if not author:
         parser.error("--author is required")
