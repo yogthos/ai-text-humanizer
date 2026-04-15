@@ -67,6 +67,10 @@ class TestFuseMLXScaleOverride:
             "fuse_mlx must accept a `scale` kwarg for overriding the trained scale"
         )
 
+    @pytest.mark.skipif(
+        __import__("importlib").util.find_spec("mlx_lm") is None,
+        reason="mlx_lm is Apple-only; test patches its symbols",
+    )
     def test_fuse_mlx_overrides_module_scale_before_fusing(self):
         """When scale is passed, every LoRA module's .scale is reassigned
         before .fuse() is invoked."""
@@ -113,6 +117,10 @@ class TestFuseMLXScaleOverride:
             f"scale override not applied before fuse; saw {captured_scales}"
         )
 
+    @pytest.mark.skipif(
+        __import__("importlib").util.find_spec("mlx_lm") is None,
+        reason="mlx_lm is Apple-only; test patches its symbols",
+    )
     def test_fuse_mlx_leaves_scale_alone_when_not_overridden(self):
         """When scale=None, modules keep their trained scale."""
         from unittest.mock import MagicMock, patch
