@@ -27,6 +27,7 @@ logger = get_logger(__name__)
 try:
     from mlx_lm import load, generate
     from mlx_lm.sample_utils import make_sampler, make_repetition_penalty
+
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False
@@ -47,7 +48,7 @@ class AdapterMetadata:
     @classmethod
     def from_file(cls, path: Path) -> "AdapterMetadata":
         """Load metadata from JSON file."""
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             data = json.load(f)
         return cls(
             author=data.get("author", "Unknown"),
@@ -75,8 +76,8 @@ class AdapterSpec:
             'lora_adapters/sagan' -> AdapterSpec(path='lora_adapters/sagan', scale=1.0)
             'lora_adapters/sagan:0.5' -> AdapterSpec(path='lora_adapters/sagan', scale=0.5)
         """
-        if ':' in spec:
-            parts = spec.rsplit(':', 1)
+        if ":" in spec:
+            parts = spec.rsplit(":", 1)
             try:
                 scale = float(parts[1])
                 return cls(path=parts[0], scale=scale)
@@ -145,11 +146,13 @@ class LoRAStyleGenerator(BaseStyleGenerator):
             self.checkpoint = None
         elif adapter_path:
             # Single adapter mode (backward compatible) - scale defaults to 1.0
-            self.adapters = [AdapterSpec(path=adapter_path, scale=1.0, checkpoint=checkpoint)]
+            self.adapters = [
+                AdapterSpec(path=adapter_path, scale=1.0, checkpoint=checkpoint)
+            ]
             self.adapter_path = adapter_path
             self.checkpoint = checkpoint
         else:
-            # No adapters (base model only)
+            # Fused model mode (no adapter) — base_model is the fused model path
             self.adapters = []
             self.adapter_path = None
             self.checkpoint = None
@@ -171,6 +174,7 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         """Check if model is already downloaded in HuggingFace cache."""
         try:
             from huggingface_hub import try_to_load_from_cache, _CACHED_NO_EXIST
+
             # Check for config.json as indicator the model is cached
             result = try_to_load_from_cache(model_name, "config.json")
             return result is not None and result is not _CACHED_NO_EXIST
@@ -348,12 +352,13 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         Args:
             scale: Scaling factor for LoRA weights.
         """
+
         def scale_lora_layers(module, path=""):
             """Recursively find and scale LoRA layers."""
             # Check if this module has LoRA weights
-            if hasattr(module, 'lora_a') and hasattr(module, 'lora_b'):
+            if hasattr(module, "lora_a") and hasattr(module, "lora_b"):
                 # Scale the LoRA output by adjusting lora_b (more efficient than scaling both)
-                if hasattr(module, 'scale'):
+                if hasattr(module, "scale"):
                     # If module has a scale attribute, use it
                     module.scale = scale
                     logger.debug(f"Scaled {path}.scale = {scale}")
@@ -363,12 +368,12 @@ class LoRAStyleGenerator(BaseStyleGenerator):
                     logger.debug(f"Scaled {path}.lora_b by {scale}")
 
             # Recurse into children
-            if hasattr(module, 'children'):
+            if hasattr(module, "children"):
                 for name, child in module.children().items():
                     scale_lora_layers(child, f"{path}.{name}" if path else name)
-            elif hasattr(module, '__dict__'):
+            elif hasattr(module, "__dict__"):
                 for name, child in module.__dict__.items():
-                    if hasattr(child, 'lora_a') or hasattr(child, 'children'):
+                    if hasattr(child, "lora_a") or hasattr(child, "children"):
                         scale_lora_layers(child, f"{path}.{name}" if path else name)
 
         try:
@@ -445,14 +450,14 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         # Wrap prompt in chat format if tokenizer supports it
         # LLaMA-Factory trained models expect Qwen chat format
         # Training format: instruction (persona+constraints) | input (content) | output
-        if hasattr(self._tokenizer, 'apply_chat_template'):
+        if hasattr(self._tokenizer, "apply_chat_template"):
             # Split at "###" - everything before last content block is instruction
             # Format: {instruction}\n\n{content}\n###
-            if '###' in prompt:
+            if "###" in prompt:
                 # Find the content by looking for the last double-newline before ###
-                prompt_no_stop = prompt.rsplit('###', 1)[0].rstrip()
+                prompt_no_stop = prompt.rsplit("###", 1)[0].rstrip()
                 # Split instruction from content - content is after last \n\n
-                parts = prompt_no_stop.rsplit('\n\n', 1)
+                parts = prompt_no_stop.rsplit("\n\n", 1)
                 if len(parts) == 2:
                     instruction, user_content = parts
                 else:
@@ -464,8 +469,8 @@ class LoRAStyleGenerator(BaseStyleGenerator):
                 user_content = prompt
 
             messages = [
-                {'role': 'system', 'content': instruction},
-                {'role': 'user', 'content': user_content}
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": user_content},
             ]
 
             # Use a nothink template to avoid <think> tokens that Qwen 3.5
@@ -488,7 +493,9 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         # Create sampler with temperature, top_p, and min_p
         # min_p filters low-probability nonsense while allowing creative choices
         # Use override temperature if provided (for repairs)
-        effective_temp = temperature if temperature is not None else self.config.temperature
+        effective_temp = (
+            temperature if temperature is not None else self.config.temperature
+        )
         sampler = make_sampler(
             temp=effective_temp,
             top_p=self.config.top_p,
@@ -540,7 +547,9 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         clean_words = len(response.split())
         if clean_words < raw_words * 0.7:
             # Usually this means repetition was removed (model repeats after ### marker)
-            logger.debug(f"_clean_response removed {raw_words - clean_words} words ({raw_words} → {clean_words}) - likely repetition")
+            logger.debug(
+                f"_clean_response removed {raw_words - clean_words} words ({raw_words} → {clean_words}) - likely repetition"
+            )
 
         return response
 
@@ -552,6 +561,7 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         # Clean up temp checkpoint directories if they exist
         if self._temp_dirs:
             import shutil
+
             for temp_dir in self._temp_dirs:
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)

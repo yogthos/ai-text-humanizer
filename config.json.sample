@@ -47,9 +47,13 @@
     "_comment3": "Length control (target_expansion_ratio: 1.5 = 50% longer output for author flourish)",
     "max_expansion_ratio": 3.0,
     "target_expansion_ratio": 1.5,
-    "_comment3a": "expand_for_texture: add stronger prompt to encourage elaboration/flourishes",
+    "_comment3a": "expand_for_texture: add stronger expansion prompt to encourage elaboration/flourishes",
     "expand_for_texture": false,
-    "_comment4": "LoRA adapters with per-adapter generation settings (enabled: true/false to toggle)",
+    "_comment3b": "use_adapter: true = use lora_adapters, false = use models (fused models, no adapter)",
+    "use_adapter": true,
+    "_comment4": "Fused models (LoRA merged into base) with per-model generation settings",
+    "models": {},
+    "_comment4a": "LoRA adapters with per-adapter generation settings (enabled: true/false to toggle)",
     "lora_adapters": {
       "lora_adapters/lovecraft_32b": {
         "_comment": "Qwen2.5-32B trained on RunPod A100, checkpoint-600 has best val_loss",

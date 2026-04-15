@@ -35,6 +35,7 @@ To train a LoRA adapter for a new author:
 """
 
 import os
+
 # Disable tokenizers parallelism warning (must be set before importing transformers)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -91,7 +92,7 @@ def run_repl_mode(
     author: str,
     config_path: str = "config.json",
     temperature: float = 0.4,
-    perspective: str = None,
+    perspective: str | None = None,
     verify: bool = True,
 ) -> None:
     """Run interactive REPL mode.
@@ -122,6 +123,7 @@ def run_repl_mode(
     else:
         import os
         from src.config import LLMProviderConfig
+
         api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         if api_key:
             deepseek_config = LLMProviderConfig(
@@ -176,8 +178,12 @@ def list_adapters(adapters_dir: str = "lora_adapters") -> None:
     if not adapters_path.exists():
         print(f"No adapters directory found at: {adapters_path}")
         print("\nTo train an adapter, see the training workflow in README.md or run:")
-        print("  1. python scripts/curate_corpus.py --input corpus.txt --output curated.txt")
-        print("  2. python scripts/load_corpus.py --input curated.txt --author 'Author Name'")
+        print(
+            "  1. python scripts/curate_corpus.py --input corpus.txt --output curated.txt"
+        )
+        print(
+            "  2. python scripts/load_corpus.py --input curated.txt --author 'Author Name'"
+        )
         print("  3. python scripts/generate_flat_training.py --corpus curated.txt \\")
         print("         --author 'Author Name' --output data/training/author")
         print("  4. mlx_lm.lora --config data/training/author/config.yaml")
@@ -187,6 +193,7 @@ def list_adapters(adapters_dir: str = "lora_adapters") -> None:
     config_adapters = {}
     try:
         from src.config import load_config
+
         config = load_config()
         config_adapters = config.generation.lora_adapters
     except Exception:
@@ -197,7 +204,7 @@ def list_adapters(adapters_dir: str = "lora_adapters") -> None:
         if item.is_dir():
             metadata_path = item / "metadata.json"
             if metadata_path.exists():
-                with open(metadata_path, 'r') as f:
+                with open(metadata_path, "r") as f:
                     metadata = json.load(f)
 
                 # Check enabled status from config
@@ -206,14 +213,16 @@ def list_adapters(adapters_dir: str = "lora_adapters") -> None:
                 if adapter_path in config_adapters:
                     enabled = config_adapters[adapter_path].enabled
 
-                adapters.append({
-                    "path": adapter_path,
-                    "author": metadata.get("author", "Unknown"),
-                    "base_model": metadata.get("base_model", "Unknown"),
-                    "rank": metadata.get("lora_rank", 16),
-                    "examples": metadata.get("training_examples", 0),
-                    "enabled": enabled,
-                })
+                adapters.append(
+                    {
+                        "path": adapter_path,
+                        "author": metadata.get("author", "Unknown"),
+                        "base_model": metadata.get("base_model", "Unknown"),
+                        "rank": metadata.get("lora_rank", 16),
+                        "examples": metadata.get("training_examples", 0),
+                        "enabled": enabled,
+                    }
+                )
 
     if not adapters:
         print(f"No adapters found in: {adapters_path}")
@@ -224,7 +233,7 @@ def list_adapters(adapters_dir: str = "lora_adapters") -> None:
     print("-" * 85)
 
     for adapter in adapters:
-        status = "[ON]" if adapter['enabled'] else "[OFF]"
+        status = "[ON]" if adapter["enabled"] else "[OFF]"
         print(
             f"{status:<10} "
             f"{adapter['author']:<25} "
@@ -242,14 +251,15 @@ def transfer_file(
     adapters: list,
     author: str,
     config_path: str = "config.json",
-    temperature: float = None,
-    perspective: str = None,
+    temperature: float | None = None,
+    perspective: str | None = None,
     verify: bool = True,
     verbose: bool = False,
     expand: bool = False,
     no_expand: bool = False,
+    fused_models: list | None = None,
 ) -> None:
-    """Transfer a file using LoRA adapter(s).
+    """Transfer a file using LoRA adapter(s) or fused model(s).
 
     Args:
         input_path: Path to input file.
@@ -263,7 +273,9 @@ def transfer_file(
         verbose: Whether to print verbose output.
         expand: Enable texture expansion (CLI flag).
         no_expand: Disable texture expansion (CLI flag).
+        fused_models: List of fused model paths to use directly (no adapter).
     """
+    fused_models = fused_models or []
     from src.generation.transfer import StyleTransfer, TransferConfig
     from src.generation.lora_generator import AdapterSpec
     from src.config import load_config
@@ -278,7 +290,7 @@ def transfer_file(
 
     # Load input
     print(f"Loading: {input_path}")
-    with open(input_path, 'r') as f:
+    with open(input_path, "r") as f:
         input_text = f.read()
 
     word_count = len(input_text.split())
@@ -345,6 +357,7 @@ def transfer_file(
         # Try to get API key from environment
         import os
         from src.config import LLMProviderConfig
+
         api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         if not api_key:
             print("Warning: No DeepSeek API key found. Repairs will be disabled.")
@@ -360,8 +373,17 @@ def transfer_file(
             print(f"Using DeepSeek for critic/repair (from env)")
 
     # Create transfer pipeline
-    if len(adapters) == 1:
-        print(f"\nInitializing LoRA adapter: {adapters[0].path} (scale={adapters[0].scale})")
+    if fused_models:
+        if len(fused_models) == 1:
+            print(f"\nInitializing fused model: {fused_models[0]}")
+        else:
+            print(f"\nInitializing {len(fused_models)} fused models:")
+            for mp in fused_models:
+                print(f"  - {mp}")
+    elif len(adapters) == 1:
+        print(
+            f"\nInitializing LoRA adapter: {adapters[0].path} (scale={adapters[0].scale})"
+        )
         if adapters[0].checkpoint:
             print(f"Checkpoint: {adapters[0].checkpoint}")
     else:
@@ -377,6 +399,7 @@ def transfer_file(
         critic_provider=critic_provider,
         config=config,
         adapters=adapters,
+        fused_models=fused_models,
     )
 
     # Set up output file for streaming
@@ -400,7 +423,7 @@ def transfer_file(
     def on_paragraph(index: int, paragraph: str):
         output_paragraphs.append(paragraph)
         # Write all paragraphs so far to file (overwrite for clean state)
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             f.write("\n\n".join(output_paragraphs))
         if verbose:
             print(f"\n--- Paragraph {index + 1} written to {output_path} ---")
@@ -420,7 +443,7 @@ def transfer_file(
             print()  # New line after progress bar
 
         # Final save (ensures proper formatting)
-        with open(output_file, 'w') as f:
+        with open(output_file, "w") as f:
             f.write(output_text)
 
         # Print stats
@@ -436,7 +459,6 @@ def transfer_file(
             avg_score = sum(stats.entailment_scores) / len(stats.entailment_scores)
             print(f"  Content preservation: {avg_score:.1%}")
 
-
     except KeyboardInterrupt:
         print("\n\nInterrupted by user.")
         # Get partial results
@@ -445,7 +467,7 @@ def transfer_file(
 
         if output_paragraphs:
             # Save what we have
-            with open(output_file, 'w') as f:
+            with open(output_file, "w") as f:
                 f.write("\n\n".join(output_paragraphs))
             print(f"  Partial output saved: {output_path}")
             print(f"  Paragraphs completed: {len(output_paragraphs)}")
@@ -472,18 +494,26 @@ def main():
 
     # Output
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Output file path",
     )
 
     # Adapter settings
+    parser.add_argument(
+        "--model",
+        metavar="PATH",
+        dest="model",
+        help="Path to a fused model directory to use directly (no adapter needed). "
+        "Can be specified multiple times. Overrides --adapter.",
+    )
     parser.add_argument(
         "--adapter",
         action="append",
         dest="adapters",
         metavar="PATH[:SCALE]",
         help="Path to LoRA adapter directory with optional scale (e.g., 'lora_adapters/sagan:0.5'). "
-             "Can be specified multiple times to blend styles. Scale defaults to --lora-scale or 1.0.",
+        "Can be specified multiple times to blend styles. Scale defaults to --lora-scale or 1.0.",
     )
     parser.add_argument(
         "--author",
@@ -499,12 +529,17 @@ def main():
     )
     parser.add_argument(
         "--perspective",
-        choices=["preserve", "first_person_singular", "first_person_plural",
-                 "third_person", "author_voice_third_person"],
+        choices=[
+            "preserve",
+            "first_person_singular",
+            "first_person_plural",
+            "third_person",
+            "author_voice_third_person",
+        ],
         default=None,
         help="Output perspective: preserve (default), first_person_singular, "
-             "first_person_plural, third_person, or author_voice_third_person "
-             "(writes AS author using third person)",
+        "first_person_plural, third_person, or author_voice_third_person "
+        "(writes AS author using third person)",
     )
     parser.add_argument(
         "--no-verify",
@@ -526,14 +561,14 @@ def main():
         type=float,
         default=None,
         help="LoRA influence scale (0.0=base only, 0.5=balanced, 1.0=full). "
-             "Overrides config setting.",
+        "Overrides config setting.",
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
         default=None,
         help="Specific checkpoint file to use (e.g., '0000600_adapters.safetensors'). "
-             "Uses final adapter if not specified.",
+        "Uses final adapter if not specified.",
     )
 
     # Utility options
@@ -567,14 +602,16 @@ def main():
 
     # Config
     parser.add_argument(
-        "-c", "--config",
+        "-c",
+        "--config",
         default="config.json",
         help="Path to config file (default: config.json)",
     )
 
     # Output options
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Verbose output",
     )
@@ -591,6 +628,7 @@ def main():
     # Setup logging - use config.log_level as default, -v overrides to INFO
     try:
         from src.config import load_config
+
         app_config = load_config()
         default_level = app_config.log_level
     except Exception:
@@ -632,7 +670,7 @@ def main():
         if not author:
             metadata_path = Path(adapter_path) / "metadata.json"
             if metadata_path.exists():
-                with open(metadata_path, 'r') as f:
+                with open(metadata_path, "r") as f:
                     metadata = json.load(f)
                 author = metadata.get("author")
 
@@ -660,61 +698,81 @@ def main():
 
     # Parse adapter specs from CLI or config
     adapters = []
+    fused_models = []
 
-    if args.adapters:
+    if args.model:
+        for model_path in args.model:
+            fused_models.append(model_path)
+    elif args.adapters:
         # CLI adapters specified - parse them
         default_scale = args.lora_scale if args.lora_scale is not None else 1.0
 
         for spec_str in args.adapters:
             adapter = AdapterSpec.parse(spec_str)
             # If no scale was specified in the spec string, use the default
-            if ':' not in spec_str:
+            if ":" not in spec_str:
                 adapter.scale = default_scale
             # Apply checkpoint to first adapter if specified via --checkpoint
             if len(adapters) == 0 and args.checkpoint:
                 adapter.checkpoint = args.checkpoint
             adapters.append(adapter)
     else:
-        # Try to load adapters from config file
-        from src.config import load_config, LoRAAdapterConfig
+        # Try to load from config file
+        from src.config import load_config, LoRAAdapterConfig, FusedModelConfig
+
         try:
             app_config = load_config(args.config)
-            lora_adapters = app_config.generation.lora_adapters
-            if lora_adapters:
-                for path, adapter_config in lora_adapters.items():
-                    # Skip disabled adapters
-                    if not adapter_config.enabled:
-                        continue
-                    # Value is now a LoRAAdapterConfig object
-                    adapters.append(AdapterSpec(
-                        path=path,
-                        scale=adapter_config.scale,
-                        checkpoint=adapter_config.checkpoint,
-                    ))
-                print(f"Using adapters from config: {args.config}")
+            gen = app_config.generation
+
+            if not gen.use_adapter:
+                models = gen.models
+                if models:
+                    for path, model_config in models.items():
+                        if not model_config.enabled:
+                            continue
+                        fused_models.append(path)
+                    if fused_models:
+                        print(f"Using fused models from config: {args.config}")
+            else:
+                lora_adapters = gen.lora_adapters
+                if lora_adapters:
+                    for path, adapter_config in lora_adapters.items():
+                        if not adapter_config.enabled:
+                            continue
+                        adapters.append(
+                            AdapterSpec(
+                                path=path,
+                                scale=adapter_config.scale,
+                                checkpoint=adapter_config.checkpoint,
+                            )
+                        )
+                    print(f"Using adapters from config: {args.config}")
         except (FileNotFoundError, AttributeError):
             pass
 
-    if not adapters:
-        parser.error("--adapter is required (or configure lora_adapters in config.json)")
+    if not adapters and not fused_models:
+        parser.error(
+            "--model or --adapter is required (or configure lora_adapters/models in config.json)"
+        )
 
     # Load author from metadata if not provided
     author = args.author
-    if not author:
+    if not author and adapters:
         metadata_path = Path(adapters[0].path) / "metadata.json"
         if metadata_path.exists():
-            with open(metadata_path, 'r') as f:
+            with open(metadata_path, "r") as f:
                 metadata = json.load(f)
             author = metadata.get("author")
 
     if not author:
-        parser.error("--author is required (not found in adapter metadata)")
+        parser.error("--author is required")
 
     # Run transfer
     transfer_file(
         input_path=args.input,
         output_path=args.output,
         adapters=adapters,
+        fused_models=fused_models,
         author=author,
         config_path=args.config,
         temperature=args.temperature,
