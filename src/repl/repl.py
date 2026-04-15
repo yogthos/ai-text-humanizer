@@ -412,24 +412,26 @@ class StyleREPL:
 
 
 def run_repl(
-    adapter_path: str,
+    adapter_path: str | None,
     author: str,
     config_path: str = "config.json",
     temperature: float = None,
     perspective: str = "preserve",
     verify: bool = True,
-    critic_provider = None,
+    critic_provider=None,
+    fused_models: list | None = None,
 ) -> None:
     """Run the interactive REPL.
 
     Args:
-        adapter_path: Path to LoRA adapter.
+        adapter_path: Path to LoRA adapter (or None when using a fused model).
         author: Author name.
         config_path: Path to config file.
         temperature: Generation temperature.
         perspective: Output perspective.
         verify: Whether to verify entailment.
         critic_provider: Optional critic provider for repairs.
+        fused_models: List of fused model paths (used instead of adapter).
     """
     # Suppress tqdm progress bars for cleaner REPL output (scoped to run_repl)
     os.environ["TQDM_DISABLE"] = "1"
@@ -481,7 +483,10 @@ def run_repl(
 
     # Print loading message
     print()
-    print(f"Loading LoRA adapter: {adapter_path}")
+    if fused_models:
+        print(f"Loading fused model: {fused_models[0]}")
+    else:
+        print(f"Loading LoRA adapter: {adapter_path}")
     print(f"Author: {author}")
     print()
 
@@ -491,12 +496,13 @@ def run_repl(
         author_name=author,
         critic_provider=critic_provider,
         config=transfer_config,
+        fused_models=fused_models,
     )
 
-    # Create REPL config
+    # Create REPL config — adapter_path is only used for display
     repl_config = REPLConfig(
         author=author,
-        adapter_path=adapter_path,
+        adapter_path=adapter_path or (fused_models[0] if fused_models else ""),
         temperature=temperature,
         verify=verify,
         perspective=perspective,

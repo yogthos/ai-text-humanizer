@@ -260,6 +260,150 @@ class TestTransferAppliesFusedModelSettings:
         assert cfg.expand_for_texture is False
 
 
+class TestResolveTransferTargets:
+    """Priority 5: _resolve_transfer_targets unifies CLI + config resolution.
+
+    Shared between file-transfer and REPL modes so both behave identically
+    when falling back to config.json.
+    """
+
+    def _make_args(self, **overrides):
+        """Build a minimal args-like object with the fields the resolver reads."""
+        from types import SimpleNamespace
+
+        defaults = dict(
+            model=None,
+            adapters=None,
+            lora_scale=None,
+            checkpoint=None,
+            config="config.json",
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_cli_model_wins_over_config(self):
+        """--model on CLI takes priority over any config.json content."""
+        from restyle import _resolve_transfer_targets
+
+        args = self._make_args(model=["models/cli-model"])
+        adapters, fused, fused_cfg = _resolve_transfer_targets(args)
+        assert fused == ["models/cli-model"]
+        assert adapters == []
+
+    def test_config_fused_models_when_use_adapter_false(self):
+        """With use_adapter=false, resolver returns enabled fused models."""
+        from src.config import _config_cache, load_config
+        from restyle import _resolve_transfer_targets
+
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "use_adapter": False,
+                "models": {
+                    "models/enabled": {
+                        "enabled": True,
+                        "author": "X",
+                        "worldview": "x.txt",
+                    },
+                    "models/disabled": {
+                        "enabled": False,
+                        "author": "Y",
+                    },
+                },
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                _config_cache.clear()
+                load_config(f.name)  # populate cache under f.name
+
+                args = self._make_args(config=f.name)
+                adapters, fused, fused_cfg = _resolve_transfer_targets(args)
+                assert fused == ["models/enabled"]
+                assert adapters == []
+                assert fused_cfg is not None
+                assert fused_cfg.author == "X"
+            finally:
+                _config_cache.clear()
+                os.unlink(f.name)
+
+    def test_config_lora_adapters_when_use_adapter_true(self):
+        """With use_adapter=true, resolver returns enabled adapters."""
+        from src.config import _config_cache, load_config
+        from restyle import _resolve_transfer_targets
+
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "use_adapter": True,
+                "lora_adapters": {
+                    "lora_adapters/foo": {
+                        "enabled": True,
+                        "scale": 2.0,
+                    },
+                },
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                _config_cache.clear()
+                load_config(f.name)
+
+                args = self._make_args(config=f.name)
+                adapters, fused, fused_cfg = _resolve_transfer_targets(args)
+                assert fused == []
+                assert len(adapters) == 1
+                assert adapters[0].path == "lora_adapters/foo"
+                assert adapters[0].scale == 2.0
+            finally:
+                _config_cache.clear()
+                os.unlink(f.name)
+
+
+class TestReplWithFusedModel:
+    """Priority 5: REPL mode must accept --model and use fused models from config."""
+
+    def test_run_repl_passes_fused_models_to_transfer(self):
+        """run_repl with fused_models set should construct StyleTransfer with fused_models."""
+        from unittest.mock import MagicMock, patch
+
+        with patch("src.repl.repl.StyleTransfer") as mock_transfer, patch(
+            "src.repl.repl.StyleREPL"
+        ) as mock_repl:
+            # Make the REPL a no-op
+            mock_repl.return_value.run = MagicMock()
+
+            from src.repl.repl import run_repl
+
+            run_repl(
+                adapter_path=None,
+                author="Test",
+                fused_models=["models/my-fused"],
+                verify=False,
+            )
+
+            # StyleTransfer should have been constructed with fused_models
+            assert mock_transfer.call_count == 1
+            kwargs = mock_transfer.call_args.kwargs
+            assert kwargs.get("fused_models") == ["models/my-fused"]
+
+    def test_run_repl_signature_accepts_fused_models(self):
+        """run_repl must have a fused_models keyword parameter."""
+        import inspect
+        from src.repl.repl import run_repl
+
+        sig = inspect.signature(run_repl)
+        assert "fused_models" in sig.parameters, (
+            "run_repl must accept fused_models so REPL can use fused models"
+        )
+
+
 class TestSampleConfigIsClean:
     """config.json.sample must parse without unknown-field warnings."""
 

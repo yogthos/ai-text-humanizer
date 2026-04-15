@@ -88,22 +88,24 @@ def index_corpus(corpus_path: str, author: str, clear: bool = False) -> None:
 
 
 def run_repl_mode(
-    adapter_path: str,
+    adapter_path: str | None,
     author: str,
     config_path: str = "config.json",
     temperature: float = 0.4,
     perspective: str | None = None,
     verify: bool = True,
+    fused_models: list | None = None,
 ) -> None:
     """Run interactive REPL mode.
 
     Args:
-        adapter_path: Path to LoRA adapter.
+        adapter_path: Path to LoRA adapter (or None when using a fused model).
         author: Author name.
         config_path: Path to config file.
         temperature: Generation temperature.
         perspective: Output perspective.
         verify: Whether to verify entailment.
+        fused_models: List of fused model paths (used instead of adapter).
     """
     from src.repl import run_repl
     from src.config import load_config
@@ -142,6 +144,7 @@ def run_repl_mode(
         perspective=perspective or "preserve",
         verify=verify,
         critic_provider=critic_provider,
+        fused_models=fused_models,
     )
 
 
@@ -628,6 +631,77 @@ def _build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_transfer_targets(args):
+    """Resolve adapters and fused models from CLI args, falling back to config.
+
+    Priority:
+    1. ``--model`` CLI flag → fused models
+    2. ``--adapter`` CLI flag → LoRA adapters
+    3. ``config.json``: ``use_adapter=false`` picks enabled entries from
+       ``generation.models``; ``use_adapter=true`` picks from
+       ``generation.lora_adapters``.
+
+    Returns:
+        Tuple ``(adapters, fused_models, fused_model_config)`` where
+        ``fused_model_config`` is the first enabled fused-model's config
+        (for author fallback), or ``None``.
+    """
+    from src.generation.lora_generator import AdapterSpec
+
+    adapters: list = []
+    fused_models: list = []
+    fused_model_config = None
+
+    if args.model:
+        fused_models = list(args.model)
+        return adapters, fused_models, fused_model_config
+
+    if args.adapters:
+        default_scale = args.lora_scale if args.lora_scale is not None else 1.0
+        for spec_str in args.adapters:
+            adapter = AdapterSpec.parse(spec_str)
+            if ":" not in spec_str:
+                adapter.scale = default_scale
+            if len(adapters) == 0 and args.checkpoint:
+                adapter.checkpoint = args.checkpoint
+            adapters.append(adapter)
+        return adapters, fused_models, fused_model_config
+
+    # Fall back to config file
+    from src.config import load_config
+
+    try:
+        app_config = load_config(args.config)
+        gen = app_config.generation
+
+        if not gen.use_adapter:
+            for path, model_cfg in gen.models.items():
+                if not model_cfg.enabled:
+                    continue
+                fused_models.append(path)
+                if fused_model_config is None:
+                    fused_model_config = model_cfg
+            if fused_models:
+                print(f"Using fused models from config: {args.config}")
+        else:
+            for path, adapter_cfg in gen.lora_adapters.items():
+                if not adapter_cfg.enabled:
+                    continue
+                adapters.append(
+                    AdapterSpec(
+                        path=path,
+                        scale=adapter_cfg.scale,
+                        checkpoint=adapter_cfg.checkpoint,
+                    )
+                )
+            if adapters:
+                print(f"Using adapters from config: {args.config}")
+    except (FileNotFoundError, AttributeError):
+        pass
+
+    return adapters, fused_models, fused_model_config
+
+
 def main():
     parser = _build_argument_parser()
     args = parser.parse_args()
@@ -661,31 +735,33 @@ def main():
         index_corpus(args.index_corpus, args.author, args.clear_rag)
         return
 
-    # Import AdapterSpec for parsing
-    from src.generation.lora_generator import AdapterSpec
-
     # REPL mode
     if args.repl:
-        if not args.adapters:
-            parser.error("--adapter is required for REPL mode")
+        adapters, fused_models, fused_model_config = _resolve_transfer_targets(args)
 
-        # For REPL, use first adapter only
-        adapter_path = AdapterSpec.parse(args.adapters[0]).path
+        if not adapters and not fused_models:
+            parser.error(
+                "REPL mode needs --model, --adapter, or lora_adapters/models "
+                "configured in config.json"
+            )
 
-        # Load author from metadata if not provided
+        # Load author: CLI > adapter metadata > fused-model config
         author = args.author
-        if not author:
-            metadata_path = Path(adapter_path) / "metadata.json"
+        if not author and adapters:
+            metadata_path = Path(adapters[0].path) / "metadata.json"
             if metadata_path.exists():
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
                 author = metadata.get("author")
+        if not author and fused_model_config and fused_model_config.author:
+            author = fused_model_config.author
 
         if not author:
-            parser.error("--author is required (not found in adapter metadata)")
+            parser.error("--author is required")
 
         run_repl_mode(
-            adapter_path=adapter_path,
+            adapter_path=adapters[0].path if adapters else None,
+            fused_models=fused_models or None,
             author=author,
             config_path=args.config,
             temperature=args.temperature,
@@ -703,61 +779,7 @@ def main():
         input_path = Path(args.input)
         args.output = str(input_path.with_suffix(".styled" + input_path.suffix))
 
-    # Parse adapter specs from CLI or config
-    adapters = []
-    fused_models = []
-    fused_model_config = None
-
-    if args.model:
-        fused_models = list(args.model)
-    elif args.adapters:
-        # CLI adapters specified - parse them
-        default_scale = args.lora_scale if args.lora_scale is not None else 1.0
-
-        for spec_str in args.adapters:
-            adapter = AdapterSpec.parse(spec_str)
-            # If no scale was specified in the spec string, use the default
-            if ":" not in spec_str:
-                adapter.scale = default_scale
-            # Apply checkpoint to first adapter if specified via --checkpoint
-            if len(adapters) == 0 and args.checkpoint:
-                adapter.checkpoint = args.checkpoint
-            adapters.append(adapter)
-    else:
-        # Try to load from config file
-        from src.config import load_config, LoRAAdapterConfig, FusedModelConfig
-
-        try:
-            app_config = load_config(args.config)
-            gen = app_config.generation
-
-            if not gen.use_adapter:
-                models = gen.models
-                if models:
-                    for path, model_config in models.items():
-                        if not model_config.enabled:
-                            continue
-                        fused_models.append(path)
-                        if fused_model_config is None:
-                            fused_model_config = model_config
-                    if fused_models:
-                        print(f"Using fused models from config: {args.config}")
-            else:
-                lora_adapters = gen.lora_adapters
-                if lora_adapters:
-                    for path, adapter_config in lora_adapters.items():
-                        if not adapter_config.enabled:
-                            continue
-                        adapters.append(
-                            AdapterSpec(
-                                path=path,
-                                scale=adapter_config.scale,
-                                checkpoint=adapter_config.checkpoint,
-                            )
-                        )
-                    print(f"Using adapters from config: {args.config}")
-        except (FileNotFoundError, AttributeError):
-            pass
+    adapters, fused_models, fused_model_config = _resolve_transfer_targets(args)
 
     if not adapters and not fused_models:
         parser.error(
