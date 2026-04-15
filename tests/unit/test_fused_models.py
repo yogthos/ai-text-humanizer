@@ -1,0 +1,321 @@
+"""Tests for fused model support: fusion script, CLI parsing, config wiring."""
+
+import argparse
+import inspect
+import json
+import os
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+
+class TestFuseMLXActuallyFuses:
+    """Priority 1: fuse_mlx must merge LoRA weights into base weights.
+
+    Regression test for a bug where `remove_lora_layers` was called instead of
+    `m.fuse()`. `remove_lora_layers` strips the LoRALinear wrapper but returns
+    the original base linear unchanged — the LoRA weights are silently lost.
+    """
+
+    def test_fuse_mlx_does_not_invoke_remove_lora_layers(self):
+        """fuse_mlx must not call remove_lora_layers (which doesn't actually fuse)."""
+        import scripts.fuse_model as fm
+
+        source = inspect.getsource(fm.fuse_mlx)
+        # Strip line comments so we match on executable code only
+        code_only = "\n".join(
+            line.split("#", 1)[0] for line in source.splitlines()
+        )
+        assert "remove_lora_layers(" not in code_only, (
+            "fuse_mlx must not call remove_lora_layers — it strips LoRA layers "
+            "without merging their weights into the base."
+        )
+
+    def test_fuse_mlx_uses_fuse_method(self):
+        """fuse_mlx must call .fuse() on LoRA modules (canonical mlx-lm pattern)."""
+        import scripts.fuse_model as fm
+
+        source = inspect.getsource(fm.fuse_mlx)
+        assert ".fuse(" in source or "m.fuse" in source, (
+            "fuse_mlx must call .fuse() on modules with LoRA weights "
+            "to actually merge them into base weights."
+        )
+
+    def test_fuse_mlx_updates_modules(self):
+        """fuse_mlx must replace LoRA modules with fused linears via update_modules."""
+        import scripts.fuse_model as fm
+
+        source = inspect.getsource(fm.fuse_mlx)
+        assert "update_modules" in source, (
+            "fuse_mlx must call model.update_modules() to install the fused layers."
+        )
+
+
+class TestModelCLIAppend:
+    """Priority 2: --model must be action='append' so it yields a list of paths."""
+
+    def test_single_model_produces_list(self):
+        """One --model flag should produce a single-element list, not a string."""
+        from restyle import _build_argument_parser
+
+        parser = _build_argument_parser()
+        args = parser.parse_args(
+            ["input.md", "-o", "out.md", "--model", "models/foo"]
+        )
+        assert args.model == ["models/foo"]
+
+    def test_multiple_model_flags_collected(self):
+        """Multiple --model flags should produce a list of all paths."""
+        from restyle import _build_argument_parser
+
+        parser = _build_argument_parser()
+        args = parser.parse_args(
+            [
+                "input.md",
+                "-o",
+                "out.md",
+                "--model",
+                "models/foo",
+                "--model",
+                "models/bar",
+            ]
+        )
+        assert args.model == ["models/foo", "models/bar"]
+
+    def test_no_model_flag_is_none_or_empty(self):
+        """No --model flag should leave args.model falsy (None or [])."""
+        from restyle import _build_argument_parser
+
+        parser = _build_argument_parser()
+        args = parser.parse_args(["input.md", "-o", "out.md", "--adapter", "foo"])
+        assert not args.model
+
+
+class TestGetFusedModelConfig:
+    """Priority 3: get_fused_model_config must look up per-model settings by path."""
+
+    def test_get_fused_model_config_returns_defaults_for_none(self):
+        """Passing None should return a default FusedModelConfig."""
+        from src.config import FusedModelConfig, get_fused_model_config
+
+        cfg = get_fused_model_config(None)
+        assert isinstance(cfg, FusedModelConfig)
+        # Default values from dataclass
+        assert cfg.enabled is True
+        assert cfg.temperature == 0.6
+
+    def test_get_fused_model_config_by_exact_path(self):
+        """Exact-path match should return that model's config."""
+        from src.config import _config_cache, get_fused_model_config, load_config
+
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "use_adapter": False,
+                "models": {
+                    "models/foo": {
+                        "author": "Foo Author",
+                        "temperature": 0.42,
+                        "worldview": "foo.txt",
+                    }
+                },
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                _config_cache.clear()
+                # Prime the default-path cache entry with our test config so the
+                # internal load_config() call (no args) returns the right data.
+                config = load_config(f.name)
+                _config_cache["config.json"] = config
+
+                cfg = get_fused_model_config("models/foo")
+                assert cfg.author == "Foo Author"
+                assert cfg.temperature == 0.42
+                assert cfg.worldview == "foo.txt"
+            finally:
+                _config_cache.clear()
+                os.unlink(f.name)
+
+    def test_get_fused_model_config_by_directory_name(self):
+        """Should match by trailing directory name if exact path not in config."""
+        from src.config import _config_cache, get_fused_model_config, load_config
+
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "use_adapter": False,
+                "models": {
+                    "models/my-fused-model": {
+                        "author": "Bar",
+                        "worldview": "bar.txt",
+                    }
+                },
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                _config_cache.clear()
+                config = load_config(f.name)
+                _config_cache["config.json"] = config
+
+                cfg = get_fused_model_config("/other/prefix/my-fused-model")
+                assert cfg.author == "Bar"
+                assert cfg.worldview == "bar.txt"
+            finally:
+                _config_cache.clear()
+                os.unlink(f.name)
+
+
+class TestWorldviewLookupFusedModels:
+    """Priority 4: worldview lookup must also check the fused `models` dict."""
+
+    def test_worldview_found_for_fused_model_path(self):
+        """Passing a fused-model path should resolve its worldview field."""
+        from src.config import _config_cache, load_config
+        from src.persona.prompt_builder import _get_worldview_filename
+
+        config_data = {
+            "llm": {"provider": {"writer": "mlx", "critic": "deepseek"}, "providers": {}},
+            "generation": {
+                "use_adapter": False,
+                "models": {
+                    "models/my-fused": {
+                        "author": "Q",
+                        "worldview": "q_worldview.txt",
+                    }
+                },
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
+            json.dump(config_data, f)
+            f.flush()
+            try:
+                _config_cache.clear()
+                config = load_config(f.name)
+                _config_cache["config.json"] = config
+
+                result = _get_worldview_filename("models/my-fused")
+                assert result == "q_worldview.txt"
+            finally:
+                _config_cache.clear()
+                os.unlink(f.name)
+
+
+class TestTransferAppliesFusedModelSettings:
+    """Priority 3 (integration): TransferConfig should pick up FusedModelConfig settings."""
+
+    def test_fused_model_overrides_applied_to_transfer_config(self):
+        """When a fused model has perspective/verify_entailment/etc set, TransferConfig
+        should adopt those values (mirroring the adapter override path)."""
+        from src.config import FusedModelConfig
+        from src.generation.transfer import TransferConfig, _apply_fused_model_overrides
+
+        cfg = TransferConfig()
+        cfg.expand_for_texture_explicit = False  # Not set by CLI
+
+        fused_cfg = FusedModelConfig(
+            author="X",
+            perspective="first_person_singular",
+            verify_entailment=False,
+            expand_for_texture=True,
+            merge_paragraphs=200,
+        )
+
+        _apply_fused_model_overrides(cfg, fused_cfg)
+
+        assert cfg.perspective == "first_person_singular"
+        assert cfg.verify_semantic_fidelity is False
+        assert cfg.expand_for_texture is True
+        assert cfg.merge_paragraphs == 200
+
+    def test_fused_model_cli_expand_takes_priority(self):
+        """If expand_for_texture_explicit is True, fused cfg should not override."""
+        from src.config import FusedModelConfig
+        from src.generation.transfer import TransferConfig, _apply_fused_model_overrides
+
+        cfg = TransferConfig()
+        cfg.expand_for_texture = False
+        cfg.expand_for_texture_explicit = True  # Set by CLI
+
+        fused_cfg = FusedModelConfig(expand_for_texture=True)
+        _apply_fused_model_overrides(cfg, fused_cfg)
+
+        # CLI wins
+        assert cfg.expand_for_texture is False
+
+
+class TestSampleConfigIsClean:
+    """config.json.sample must parse without unknown-field warnings."""
+
+    def test_sample_config_loads_without_unknown_field_warnings(self):
+        """The checked-in sample must only contain keys the parser knows about."""
+        from src.config import _config_cache, load_config
+
+        sample_path = Path(__file__).parent.parent.parent / "config.json.sample"
+        assert sample_path.exists(), "config.json.sample not found"
+
+        _config_cache.clear()
+        try:
+            with patch("src.config.logger") as mock_logger:
+                load_config(str(sample_path))
+                warnings = [str(c) for c in mock_logger.warning.call_args_list]
+                unknown_warnings = [
+                    w for w in warnings if "Unknown" in w and "fields" in w
+                ]
+                assert not unknown_warnings, (
+                    f"config.json.sample has unknown fields: {unknown_warnings}"
+                )
+        finally:
+            _config_cache.clear()
+
+    def test_sample_config_has_models_and_lora_adapters(self):
+        """The sample must demonstrate both adapter and fused-model configuration."""
+        from src.config import _config_cache, load_config
+
+        sample_path = Path(__file__).parent.parent.parent / "config.json.sample"
+        _config_cache.clear()
+        try:
+            config = load_config(str(sample_path))
+            assert config.generation.lora_adapters, "sample lacks lora_adapters examples"
+            assert config.generation.models, "sample lacks fused-model examples"
+        finally:
+            _config_cache.clear()
+
+
+class TestGenerationConfigFromFusedModel:
+    """Priority 3: GenerationConfig.from_fused_model builds from FusedModelConfig."""
+
+    def test_from_fused_model_applies_all_gen_settings(self):
+        """from_fused_model should copy temperature, top_p, min_p, etc. from FusedModelConfig."""
+        from src.config import FusedModelConfig
+        from src.generation.base_generator import GenerationConfig
+
+        fused = FusedModelConfig(
+            temperature=0.42,
+            top_p=0.88,
+            min_p=0.07,
+            repetition_penalty=1.22,
+            max_tokens=1234,
+        )
+        gen = GenerationConfig.from_fused_model(fused)
+        assert gen.temperature == 0.42
+        assert gen.top_p == 0.88
+        assert gen.min_p == 0.07
+        assert gen.repetition_penalty == 1.22
+        assert gen.max_tokens == 1234

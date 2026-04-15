@@ -42,8 +42,6 @@
     }
   },
   "generation": {
-    "_comment": "Repair and length settings",
-    "max_repair_attempts": 5,
     "_comment3": "Length control (target_expansion_ratio: 1.5 = 50% longer output for author flourish)",
     "max_expansion_ratio": 3.0,
     "target_expansion_ratio": 1.5,
@@ -112,18 +110,6 @@
     },
     "_comment5": "Neutralization (skip for better fact preservation)",
     "skip_neutralization": false,
-    "_comment6": "Post-processing",
-    "repetition_threshold": 3,
-    "reduce_repetition": true,
-    "_comment6a": "Sentence restructuring (convert balanced patterns to organic)",
-    "restructure_sentences": false,
-    "_comment6b": "Sentence splitting (break run-on sentences at conjunction points)",
-    "split_sentences": true,
-    "max_sentence_length": 60,
-    "sentence_length_variance": 0.4,
-    "_comment6c": "Grammar correction (style-safe, preserves author voice)",
-    "correct_grammar": true,
-    "grammar_language": "en-US",
     "_comment7": "Document handling",
     "use_document_context": false,
     "pass_headings_unchanged": true,
@@ -141,11 +127,6 @@
     "_comment": "Perspective controls output point-of-view",
     "_options": "preserve | first_person_singular | first_person_plural | third_person | author_voice_third_person",
     "perspective": "preserve"
-  },
-  "validation": {
-    "_comment": "Semantic validation settings",
-    "entailment_threshold": 0.7,
-    "max_hallucinations_before_reject": 3
   },
   "log_level": "INFO"
 }

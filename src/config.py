@@ -277,7 +277,10 @@ _KNOWN_ADAPTER_FIELDS = {
 
 def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
     """Parse LoRA adapter configuration from dict."""
-    unknown_fields = set(data.keys()) - _KNOWN_ADAPTER_FIELDS
+    unknown_fields = {
+        k for k in data.keys()
+        if k not in _KNOWN_ADAPTER_FIELDS and not k.startswith("_")
+    }
     if unknown_fields:
         logger.warning(
             f"Unknown adapter config fields (ignored): {', '.join(sorted(unknown_fields))}"
@@ -325,6 +328,14 @@ _KNOWN_MODEL_FIELDS = {
 
 def _parse_fused_model_config(data: Dict) -> FusedModelConfig:
     """Parse fused model configuration from dict."""
+    unknown_fields = {
+        k for k in data.keys()
+        if k not in _KNOWN_MODEL_FIELDS and not k.startswith("_")
+    }
+    if unknown_fields:
+        logger.warning(
+            f"Unknown fused-model config fields (ignored): {', '.join(sorted(unknown_fields))}"
+        )
     return FusedModelConfig(
         enabled=data.get("enabled", True),
         author=data.get("author", ""),
@@ -546,3 +557,35 @@ def get_adapter_config(adapter_path: Optional[str] = None) -> LoRAAdapterConfig:
         logger.debug(f"Could not load adapter config: {e}")
 
     return LoRAAdapterConfig()
+
+
+def get_fused_model_config(model_path: Optional[str] = None) -> FusedModelConfig:
+    """Get fused-model config for a specific model path.
+
+    Mirrors get_adapter_config for the `generation.models` section.
+
+    Args:
+        model_path: Path to the fused model directory. If None, returns defaults.
+
+    Returns:
+        FusedModelConfig for the model, or defaults if not found.
+    """
+    if not model_path:
+        return FusedModelConfig()
+
+    try:
+        config = load_config()
+        models = config.generation.models
+
+        if model_path in models:
+            return models[model_path]
+
+        model_name = Path(model_path).name
+        for path, model_cfg in models.items():
+            if Path(path).name == model_name:
+                return model_cfg
+
+    except Exception as e:
+        logger.debug(f"Could not load fused model config: {e}")
+
+    return FusedModelConfig()

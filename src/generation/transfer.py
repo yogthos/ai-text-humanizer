@@ -17,7 +17,7 @@ import time
 from .lora_generator import AdapterSpec
 from .base_generator import GenerationConfig
 from .factory import create_style_generator
-from ..config import get_adapter_config
+from ..config import FusedModelConfig, get_adapter_config, get_fused_model_config
 from .document_context import DocumentContext, extract_document_context
 from ..utils.nlp import (
     split_into_paragraphs,
@@ -53,6 +53,40 @@ except ImportError:
     PERSONA_AVAILABLE = False
 
 logger = get_logger(__name__)
+
+
+def _apply_fused_model_overrides(
+    transfer_config: "TransferConfig", fused_cfg: FusedModelConfig
+) -> None:
+    """Apply per-fused-model overrides to a TransferConfig in place.
+
+    Mirrors the adapter override block: CLI flags win over config, so
+    expand_for_texture only overrides when expand_for_texture_explicit is False.
+    """
+    if (
+        fused_cfg.expand_for_texture is not None
+        and not transfer_config.expand_for_texture_explicit
+    ):
+        transfer_config.expand_for_texture = fused_cfg.expand_for_texture
+        logger.info(
+            f"Using fused-model expand_for_texture={fused_cfg.expand_for_texture}"
+        )
+
+    if fused_cfg.perspective is not None:
+        transfer_config.perspective = fused_cfg.perspective
+        logger.info(f"Using fused-model perspective={fused_cfg.perspective}")
+
+    if fused_cfg.verify_entailment is not None:
+        transfer_config.verify_semantic_fidelity = fused_cfg.verify_entailment
+        logger.info(
+            f"Using fused-model verify_semantic_fidelity={fused_cfg.verify_entailment}"
+        )
+
+    if fused_cfg.merge_paragraphs is not None:
+        transfer_config.merge_paragraphs = fused_cfg.merge_paragraphs
+        logger.info(
+            f"Using fused-model merge_paragraphs={fused_cfg.merge_paragraphs}"
+        )
 
 
 @dataclass
@@ -210,28 +244,35 @@ class StyleTransfer:
 
         if fused_models:
             primary_adapter_path = fused_models[0]
-            self.adapter_path = None
         elif adapters:
             primary_adapter_path = adapters[0].path
-            self.adapter_path = primary_adapter_path
         else:
             primary_adapter_path = adapter_path
-            self.adapter_path = primary_adapter_path
-
-        gen_config = GenerationConfig.from_config(
-            primary_adapter_path if not fused_models else None
-        )
-        if self.config.temperature is not None:
-            gen_config.temperature = self.config.temperature
-        gen_config.skip_cleaning = False
+        # adapter_path on the instance is consumed by the persona prompt builder
+        # to look up the worldview — it must be set for both adapters and fused
+        # models so _get_worldview_filename can locate the config entry.
+        self.adapter_path = primary_adapter_path
 
         if fused_models:
+            fused_cfg = get_fused_model_config(primary_adapter_path)
+            gen_config = GenerationConfig.from_fused_model(fused_cfg)
+            if self.config.temperature is not None:
+                gen_config.temperature = self.config.temperature
+            gen_config.skip_cleaning = False
+
+            _apply_fused_model_overrides(self.config, fused_cfg)
+
             self.generator = create_style_generator(
                 adapter_path=None,
                 config=gen_config,
                 fused_models=fused_models,
             )
         else:
+            gen_config = GenerationConfig.from_config(primary_adapter_path)
+            if self.config.temperature is not None:
+                gen_config.temperature = self.config.temperature
+            gen_config.skip_cleaning = False
+
             adapter_cfg = get_adapter_config(primary_adapter_path)
 
             if (

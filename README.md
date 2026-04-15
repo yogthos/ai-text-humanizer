@@ -62,6 +62,7 @@ python restyle.py --list-adapters
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--adapter PATH[:SCALE]` | config | LoRA adapter path with optional scale (can repeat to blend) |
+| `--model PATH` | config | Fused model path (LoRA pre-merged into base); overrides `--adapter`. See [docs/fused_models.md](docs/fused_models.md) |
 | `--author NAME` | - | Author name (optional if adapter has metadata) |
 | `--temperature FLOAT` | config | Generation temperature |
 | `--perspective MODE` | config | Output perspective: `preserve`, `first_person_singular`, `first_person_plural`, `third_person`, `author_voice_third_person` |

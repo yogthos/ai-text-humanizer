@@ -44,7 +44,7 @@ def fuse_mlx(
     qbits: int | None = None,
     group_size: int = 64,
 ) -> None:
-    from mlx_lm.tuner.utils import remove_lora_layers
+    from mlx.utils import tree_unflatten
     from mlx_lm.utils import load, quantize_model, save
 
     print(f"Loading MLX model: {model_path}")
@@ -54,8 +54,23 @@ def fuse_mlx(
     )
 
     print("Fusing LoRA adapter into base model...")
-    model = remove_lora_layers(model)
-    model.eval()
+    # Canonical mlx-lm fuse: call .fuse() on every LoRALinear and replace it
+    # with the merged weights. `remove_lora_layers`, by contrast, returns the
+    # untouched base linear and silently discards the LoRA weights.
+    # If we intend to re-quantize afterwards, dequantize during fuse so
+    # quantize_model sees regular Linears.
+    fused_linears = [
+        (n, m.fuse(dequantize=qbits is not None))
+        for n, m in model.named_modules()
+        if hasattr(m, "fuse")
+    ]
+    if not fused_linears:
+        print(
+            "Warning: no LoRA layers found to fuse — adapter may not be loaded correctly",
+            file=sys.stderr,
+        )
+    else:
+        model.update_modules(tree_unflatten(fused_linears))
 
     if qbits is not None:
         print(f"Quantizing fused model to {qbits}-bit (group_size={group_size})...")

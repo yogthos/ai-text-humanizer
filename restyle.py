@@ -478,7 +478,8 @@ def transfer_file(
         sys.exit(130)  # Standard exit code for Ctrl+C
 
 
-def main():
+def _build_argument_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser. Extracted for testability."""
     parser = argparse.ArgumentParser(
         description="Fast style transfer using LoRA adapters",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -502,6 +503,7 @@ def main():
     # Adapter settings
     parser.add_argument(
         "--model",
+        action="append",
         metavar="PATH",
         dest="model",
         help="Path to a fused model directory to use directly (no adapter needed). "
@@ -623,6 +625,11 @@ def main():
         help="Start interactive REPL mode for live style transfer",
     )
 
+    return parser
+
+
+def main():
+    parser = _build_argument_parser()
     args = parser.parse_args()
 
     # Setup logging - use config.log_level as default, -v overrides to INFO
@@ -702,8 +709,7 @@ def main():
     fused_model_config = None
 
     if args.model:
-        for model_path in args.model:
-            fused_models.append(model_path)
+        fused_models = list(args.model)
     elif args.adapters:
         # CLI adapters specified - parse them
         default_scale = args.lora_scale if args.lora_scale is not None else 1.0

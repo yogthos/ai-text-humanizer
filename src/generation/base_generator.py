@@ -112,6 +112,22 @@ class GenerationConfig:
             logger.warning(f"Could not load config, using defaults: {e}")
             return cls()
 
+    @classmethod
+    def from_fused_model(cls, fused_config) -> "GenerationConfig":
+        """Create GenerationConfig from a FusedModelConfig.
+
+        Fused models don't use a scale (LoRA is already merged), so we pin
+        scale=1.0 and copy sampling parameters verbatim.
+        """
+        return cls(
+            max_tokens=fused_config.max_tokens,
+            temperature=fused_config.temperature,
+            top_p=fused_config.top_p,
+            min_p=fused_config.min_p,
+            repetition_penalty=fused_config.repetition_penalty,
+            scale=1.0,
+        )
+
 
 class BaseStyleGenerator(ABC):
     """Abstract base class for style generators.
