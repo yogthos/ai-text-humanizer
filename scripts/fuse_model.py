@@ -1,37 +1,90 @@
 #!/usr/bin/env python3
 """Fuse a LoRA checkpoint with the base model.
 
-Merges PEFT LoRA weights into the base model using transformers/PEFT,
-producing a standalone fused model. Optionally converts the result to MLX format.
+Supports three fusion paths:
 
-Usage:
-    # Fuse PEFT checkpoint into base model
-    python scripts/fuse_model.py \\
-        --model Qwen/Qwen2.5-32B \\
-        --checkpoint checkpoints/checkpoint-10200 \\
-        --output models/style-transfer-fused
+1. MLX fusion (recommended for Apple Silicon):
+   Loads a quantized MLX base model + MLX LoRA adapters, fuses them,
+   optionally re-quantizes, and saves. No PyTorch, no OOM risk.
 
-    # Also convert to MLX format
-    python scripts/fuse_model.py \\
-        --model Qwen/Qwen2.5-32B \\
-        --checkpoint checkpoints/checkpoint-10200 \\
-        --output models/style-transfer-fused \\
-        --convert-mlx
+   python scripts/fuse_model.py \\
+       --model models/Qwen2.5-32B-Base-8bit-MLX \\
+       --checkpoint lora_adapters/howard_russell_checkpoint_10200 \\
+       --output models/Qwen2.5-32B-howard-lovecraft-10200 \\
+       --mlx --qbits 8
 
-    # Convert a previously fused HF model to MLX
-    python scripts/fuse_model.py \\
-        --model models/style-transfer-fused \\
-        --output models/style-transfer-mlx \\
-        --convert-mlx-only
+2. HF/PEFT fusion (PyTorch):
+   Merges PEFT LoRA weights into the base model using transformers/PEFT.
+
+   python scripts/fuse_model.py \\
+       --model models/Qwen2.5-32B \\
+       --checkpoint checkpoints/checkpoint-10200 \\
+       --output models/style-transfer-fused
+
+3. Convert existing HF model to MLX:
+   python scripts/fuse_model.py \\
+       --model models/style-transfer-fused \\
+       --output models/style-transfer-mlx \\
+       --convert-mlx-only
 """
 
 import argparse
+import gc
 import json
-import shutil
 import sys
 from pathlib import Path
 
 project_root = Path(__file__).resolve().parent.parent
+
+
+def fuse_mlx(
+    model_path: str,
+    adapter_path: Path,
+    output_path: Path,
+    qbits: int | None = None,
+    group_size: int = 64,
+) -> None:
+    from mlx_lm.tuner.utils import remove_lora_layers
+    from mlx_lm.utils import load, quantize_model, save
+
+    print(f"Loading MLX model: {model_path}")
+    print(f"Loading MLX adapter: {adapter_path}")
+    model, tokenizer, config = load(
+        model_path, adapter_path=str(adapter_path), return_config=True
+    )
+
+    print("Fusing LoRA adapter into base model...")
+    model = remove_lora_layers(model)
+    model.eval()
+
+    if qbits is not None:
+        print(f"Quantizing fused model to {qbits}-bit (group_size={group_size})...")
+        model, config = quantize_model(model, config, group_size=group_size, bits=qbits)
+
+    print(f"Saving fused model to {output_path}")
+    output_path.mkdir(parents=True, exist_ok=True)
+    save(str(output_path), model_path, model, tokenizer, config)
+
+    adapter_cfg = {}
+    adapter_config_path = adapter_path / "adapter_config.json"
+    if adapter_config_path.exists():
+        with open(adapter_config_path) as f:
+            adapter_cfg = json.load(f)
+
+    metadata = {
+        "base_model": model_path,
+        "adapter_path": str(adapter_path),
+        "lora_rank": adapter_cfg.get("lora_parameters", {}).get("rank")
+        or adapter_cfg.get("r"),
+        "lora_alpha": adapter_cfg.get("lora_alpha"),
+        "fusion_method": "mlx",
+    }
+    if qbits is not None:
+        metadata["quantization_bits"] = qbits
+        metadata["quantization_group_size"] = group_size
+
+    with open(output_path / "fuse_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
 
 
 def fuse_peft(
@@ -54,10 +107,16 @@ def fuse_peft(
     print("Merging adapter weights into base model...")
     model = model.merge_and_unload()
 
+    del base_model
+    gc.collect()
+
     print(f"Saving fused model to {output_path}")
     output_path.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(output_path))
+    model.save_pretrained(str(output_path), max_shard_size="5GB")
     tokenizer.save_pretrained(str(output_path))
+
+    del model
+    gc.collect()
 
     with open(checkpoint_path / "adapter_config.json") as f:
         adapter_cfg = json.load(f)
@@ -67,57 +126,22 @@ def fuse_peft(
         "checkpoint": str(checkpoint_path),
         "lora_rank": adapter_cfg.get("r"),
         "lora_alpha": adapter_cfg.get("lora_alpha"),
+        "fusion_method": "peft",
     }
     with open(output_path / "fuse_metadata.json", "w") as f:
         json.dump(metadata, f, indent=2)
 
 
 def convert_to_mlx(model_path: Path, output_path: Path) -> None:
-    try:
-        from mlx_lm.utils import convert
-    except ImportError:
-        print(
-            "Error: mlx-lm is required for MLX conversion. Install with: pip install mlx-lm",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    from mlx_lm.utils import load, save
 
     print(f"\nConverting to MLX format: {model_path} -> {output_path}")
     output_path.mkdir(parents=True, exist_ok=True)
 
-    import mlx.core as mx
-    from mlx.utils import tree_flatten
+    print("Loading model for MLX conversion...")
+    model, tokenizer, config = load(str(model_path), return_config=True)
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    print("Loading fused model for MLX conversion...")
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        str(model_path), trust_remote_code=True
-    )
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
-
-    weights = dict(tree_flatten(hf_model.state_dict()))
-    del hf_model
-
-    from mlx_lm.utils import save_weights
-
-    save_weights(str(output_path), weights)
-    tokenizer.save_pretrained(str(output_path))
-
-    config_path = model_path / "config.json"
-    if config_path.exists():
-        shutil.copy2(config_path, output_path / "config.json")
-
-    for name in [
-        "generation_config.json",
-        "tokenizer_config.json",
-        "tokenizer.json",
-        "special_tokens_map.json",
-        "chat_template.jinja",
-    ]:
-        src = model_path / name
-        if src.exists():
-            shutil.copy2(src, output_path / name)
+    save(str(output_path), str(model_path), model, tokenizer, config)
 
     if (model_path / "fuse_metadata.json").exists():
         with open(model_path / "fuse_metadata.json") as f:
@@ -125,6 +149,8 @@ def convert_to_mlx(model_path: Path, output_path: Path) -> None:
         metadata["mlx_converted"] = True
         with open(output_path / "fuse_metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
+
+    print(f"MLX model saved to {output_path}")
 
 
 def main():
@@ -139,13 +165,30 @@ def main():
         "--checkpoint",
         "-c",
         default=None,
-        help="Path to PEFT checkpoint directory to fuse",
+        help="Path to PEFT checkpoint or MLX adapter directory to fuse",
     )
     parser.add_argument(
         "--output",
         "-o",
         required=True,
         help="Output path for the fused model",
+    )
+    parser.add_argument(
+        "--mlx",
+        action="store_true",
+        help="Use MLX for fusion (requires MLX-format base model and adapters)",
+    )
+    parser.add_argument(
+        "--qbits",
+        type=int,
+        default=None,
+        help="Quantize output to N bits after MLX fusion (e.g. 8 for Q8)",
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=64,
+        help="Quantization group size (default: 64)",
     )
     parser.add_argument(
         "--convert-mlx",
@@ -174,14 +217,22 @@ def main():
         print(f"Error: Checkpoint not found at {checkpoint_path}", file=sys.stderr)
         sys.exit(1)
 
-    fuse_peft(args.model, checkpoint_path, output_path)
+    if args.mlx:
+        fuse_mlx(
+            args.model,
+            checkpoint_path,
+            output_path,
+            qbits=args.qbits,
+            group_size=args.group_size,
+        )
+    else:
+        fuse_peft(args.model, checkpoint_path, output_path)
+        if args.convert_mlx:
+            mlx_output = output_path.parent / (output_path.name + "-MLX")
+            convert_to_mlx(output_path, mlx_output)
+            print(f"\nMLX model saved to {mlx_output}")
+
     print(f"\nFused model saved to {output_path}")
-
-    if args.convert_mlx:
-        mlx_output = output_path.parent / (output_path.name + "-MLX")
-        convert_to_mlx(output_path, mlx_output)
-        print(f"\nMLX model saved to {mlx_output}")
-
     print(f"\nUsage:")
     print(f"  python restyle.py input.txt -o output.txt --model {output_path}")
 
