@@ -67,6 +67,24 @@ python scripts/fuse_model.py \
 `--qbits` accepts 2, 3, 4, 6, or 8. Use `--group-size 64` (default) to control
 quantization granularity.
 
+### Override the LoRA scale at fuse time
+
+The adapter's `adapter_config.json` records the `scale` used during training
+(typically 2.0). `--scale` overrides that multiplier when computing the merged
+delta — useful for dialling the adapter's influence up or down without
+retraining:
+
+```bash
+python scripts/fuse_model.py \
+    --model models/Qwen2.5-32B-Base-8bit-MLX \
+    --checkpoint lora_adapters/howard_russell_checkpoint_10200 \
+    --output models/Qwen2.5-32B-howard-lovecraft-10200-weak \
+    --mlx --scale 1.0
+```
+
+Rule of thumb: `<1.0` weakens the style, `>1.0` amplifies it but may degrade
+coherence. MLX-only; not supported by the PEFT path.
+
 ## PEFT Fusion
 
 Cross-platform approach using HuggingFace Transformers and PEFT. Loads the full

@@ -43,6 +43,7 @@ def fuse_mlx(
     output_path: Path,
     qbits: int | None = None,
     group_size: int = 64,
+    scale: float | None = None,
 ) -> None:
     from mlx.utils import tree_unflatten
     from mlx_lm.utils import load, quantize_model, save
@@ -53,17 +54,24 @@ def fuse_mlx(
         model_path, adapter_path=str(adapter_path), return_config=True
     )
 
+    if scale is not None:
+        print(f"Overriding LoRA scale: {scale} (was set at training time)")
+
     print("Fusing LoRA adapter into base model...")
     # Canonical mlx-lm fuse: call .fuse() on every LoRALinear and replace it
     # with the merged weights. `remove_lora_layers`, by contrast, returns the
     # untouched base linear and silently discards the LoRA weights.
     # If we intend to re-quantize afterwards, dequantize during fuse so
     # quantize_model sees regular Linears.
-    fused_linears = [
-        (n, m.fuse(dequantize=qbits is not None))
-        for n, m in model.named_modules()
-        if hasattr(m, "fuse")
-    ]
+    # If --scale is provided, override the module's .scale before fusing so
+    # the merged delta uses the new multiplier.
+    fused_linears = []
+    for n, m in model.named_modules():
+        if not hasattr(m, "fuse"):
+            continue
+        if scale is not None:
+            m.scale = scale
+        fused_linears.append((n, m.fuse(dequantize=qbits is not None)))
     if not fused_linears:
         print(
             "Warning: no LoRA layers found to fuse — adapter may not be loaded correctly",
@@ -86,14 +94,18 @@ def fuse_mlx(
         with open(adapter_config_path) as f:
             adapter_cfg = json.load(f)
 
+    trained_scale = adapter_cfg.get("lora_parameters", {}).get("scale")
     metadata = {
         "base_model": model_path,
         "adapter_path": str(adapter_path),
         "lora_rank": adapter_cfg.get("lora_parameters", {}).get("rank")
         or adapter_cfg.get("r"),
         "lora_alpha": adapter_cfg.get("lora_alpha"),
+        "lora_scale": scale if scale is not None else trained_scale,
         "fusion_method": "mlx",
     }
+    if scale is not None and trained_scale is not None:
+        metadata["lora_scale_trained"] = trained_scale
     if qbits is not None:
         metadata["quantization_bits"] = qbits
         metadata["quantization_group_size"] = group_size
@@ -206,6 +218,14 @@ def main():
         help="Quantization group size (default: 64)",
     )
     parser.add_argument(
+        "--scale",
+        type=float,
+        default=None,
+        help="Override the LoRA scale at fuse time (e.g. 0.5 weakens the "
+        "adapter, 3.0 strengthens it). Defaults to the scale from the "
+        "adapter's config.json.",
+    )
+    parser.add_argument(
         "--convert-mlx",
         action="store_true",
         help="Convert the fused model to MLX format after fusing",
@@ -239,8 +259,16 @@ def main():
             output_path,
             qbits=args.qbits,
             group_size=args.group_size,
+            scale=args.scale,
         )
     else:
+        if args.scale is not None:
+            print(
+                "Error: --scale is only supported with --mlx. PEFT fusion applies "
+                "the adapter's trained alpha/r scaling via merge_and_unload().",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         fuse_peft(args.model, checkpoint_path, output_path)
         if args.convert_mlx:
             mlx_output = output_path.parent / (output_path.name + "-MLX")

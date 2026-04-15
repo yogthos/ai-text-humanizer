@@ -53,6 +53,150 @@ class TestFuseMLXActuallyFuses:
         )
 
 
+class TestFuseMLXScaleOverride:
+    """fuse_mlx must accept a scale override that replaces the trained scale
+    on every LoRA module before fusing."""
+
+    def test_fuse_mlx_signature_accepts_scale(self):
+        """fuse_mlx must expose a `scale` keyword argument."""
+        import inspect
+        import scripts.fuse_model as fm
+
+        sig = inspect.signature(fm.fuse_mlx)
+        assert "scale" in sig.parameters, (
+            "fuse_mlx must accept a `scale` kwarg for overriding the trained scale"
+        )
+
+    def test_fuse_mlx_overrides_module_scale_before_fusing(self):
+        """When scale is passed, every LoRA module's .scale is reassigned
+        before .fuse() is invoked."""
+        from unittest.mock import MagicMock, patch
+
+        # Build fake LoRALinear-ish modules that record their state at .fuse() time
+        captured_scales = []
+
+        def make_module():
+            m = MagicMock()
+            m.scale = 2.0  # original trained scale
+            m.fuse = MagicMock(side_effect=lambda dequantize=False: captured_scales.append(m.scale) or MagicMock())
+            return m
+
+        lora_modules = [make_module() for _ in range(3)]
+        fake_model = MagicMock()
+        fake_model.named_modules = MagicMock(
+            return_value=[(f"layer{i}", m) for i, m in enumerate(lora_modules)]
+        )
+        fake_tokenizer = MagicMock()
+        fake_config = {}
+
+        with patch("mlx_lm.utils.load", return_value=(fake_model, fake_tokenizer, fake_config)), \
+             patch("mlx_lm.utils.save"), \
+             patch("mlx.utils.tree_unflatten"):
+            from scripts.fuse_model import fuse_mlx
+
+            tmp_adapter = Path(tempfile.mkdtemp())
+            tmp_output = Path(tempfile.mkdtemp())
+            try:
+                fuse_mlx(
+                    model_path="dummy",
+                    adapter_path=tmp_adapter,
+                    output_path=tmp_output,
+                    scale=0.5,
+                )
+            finally:
+                import shutil
+                shutil.rmtree(tmp_adapter, ignore_errors=True)
+                shutil.rmtree(tmp_output, ignore_errors=True)
+
+        # Every module must have had scale==0.5 at the moment .fuse() was called
+        assert captured_scales == [0.5, 0.5, 0.5], (
+            f"scale override not applied before fuse; saw {captured_scales}"
+        )
+
+    def test_fuse_mlx_leaves_scale_alone_when_not_overridden(self):
+        """When scale=None, modules keep their trained scale."""
+        from unittest.mock import MagicMock, patch
+
+        captured_scales = []
+
+        def make_module():
+            m = MagicMock()
+            m.scale = 2.0
+            m.fuse = MagicMock(side_effect=lambda dequantize=False: captured_scales.append(m.scale) or MagicMock())
+            return m
+
+        lora_modules = [make_module() for _ in range(2)]
+        fake_model = MagicMock()
+        fake_model.named_modules = MagicMock(
+            return_value=[(f"layer{i}", m) for i, m in enumerate(lora_modules)]
+        )
+
+        with patch("mlx_lm.utils.load", return_value=(fake_model, MagicMock(), {})), \
+             patch("mlx_lm.utils.save"), \
+             patch("mlx.utils.tree_unflatten"):
+            from scripts.fuse_model import fuse_mlx
+
+            tmp_adapter = Path(tempfile.mkdtemp())
+            tmp_output = Path(tempfile.mkdtemp())
+            try:
+                fuse_mlx(
+                    model_path="dummy",
+                    adapter_path=tmp_adapter,
+                    output_path=tmp_output,
+                    scale=None,
+                )
+            finally:
+                import shutil
+                shutil.rmtree(tmp_adapter, ignore_errors=True)
+                shutil.rmtree(tmp_output, ignore_errors=True)
+
+        assert captured_scales == [2.0, 2.0]
+
+
+class TestScaleCLIFlag:
+    """--scale CLI flag must parse to a float and reach fuse_mlx."""
+
+    def test_scale_flag_reaches_fuse_mlx(self):
+        """`--scale 0.75` should reach fuse_mlx as scale=0.75."""
+        from unittest.mock import patch
+        import sys
+
+        captured = {}
+
+        def fake_fuse_mlx(*args, **kwargs):
+            captured.update(kwargs)
+
+        tmp_checkpoint = Path(tempfile.mkdtemp())
+        tmp_output = Path(tempfile.mkdtemp())
+        try:
+            with patch("scripts.fuse_model.fuse_mlx", side_effect=fake_fuse_mlx), \
+                 patch.object(
+                     sys,
+                     "argv",
+                     [
+                         "fuse_model.py",
+                         "--model", "dummy",
+                         "--checkpoint", str(tmp_checkpoint),
+                         "--output", str(tmp_output),
+                         "--mlx",
+                         "--scale", "0.75",
+                     ],
+                 ):
+                from scripts.fuse_model import main
+                try:
+                    main()
+                except SystemExit:
+                    pass
+        finally:
+            import shutil
+            shutil.rmtree(tmp_checkpoint, ignore_errors=True)
+            shutil.rmtree(tmp_output, ignore_errors=True)
+
+        assert captured.get("scale") == 0.75, (
+            f"--scale 0.75 did not reach fuse_mlx; captured={captured}"
+        )
+
+
 class TestModelCLIAppend:
     """Priority 2: --model must be action='append' so it yields a list of paths."""
 
