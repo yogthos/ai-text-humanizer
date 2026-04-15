@@ -14,6 +14,7 @@ logger = get_logger(__name__)
 @dataclass
 class LLMProviderConfig:
     """Configuration for a specific LLM provider."""
+
     api_key: str = ""
     base_url: str = ""
     model: str = ""
@@ -31,6 +32,7 @@ class LLMProviderRoles:
     - critic: Smarter API model for validation and repair (e.g., DeepSeek)
     - rtt: Provider for Round-Trip Translation neutralization (e.g., DeepSeek)
     """
+
     writer: str = "mlx"  # Provider for generation
     critic: str = "deepseek"  # Provider for critique/repair
     rtt: str = "deepseek"  # Provider for RTT neutralization
@@ -39,6 +41,7 @@ class LLMProviderRoles:
 @dataclass
 class LLMConfig:
     """Configuration for LLM providers."""
+
     provider: LLMProviderRoles = field(default_factory=LLMProviderRoles)
     providers: Dict[str, LLMProviderConfig] = field(default_factory=dict)
     max_retries: int = 5
@@ -61,32 +64,74 @@ class LLMConfig:
 
 
 @dataclass
+class FusedModelConfig:
+    """Configuration for a fused (LoRA merged into base) model.
+
+    These settings apply when using a standalone model without an adapter.
+    """
+
+    enabled: bool = True
+    author: str = ""
+    temperature: float = 0.6
+    top_p: float = 0.92
+    min_p: float = 0.05
+    repetition_penalty: float = 1.15
+    max_tokens: int = 512
+    worldview: str = ""
+    expand_for_texture: Optional[bool] = None
+    perspective: Optional[str] = None
+    verify_entailment: Optional[bool] = None
+    merge_paragraphs: Optional[int] = None
+
+
+@dataclass
 class GenerationConfig:
     """Configuration for text generation."""
+
     # Length control settings
     max_expansion_ratio: float = 2.5  # Max output/input word ratio before warning
-    target_expansion_ratio: float = 1.5  # Target for LoRA generation (1.5 = 50% expansion for flourish)
-    expand_for_texture: bool = False  # Add stronger expansion prompt to encourage elaboration/flourishes
+    target_expansion_ratio: float = (
+        1.5  # Target for LoRA generation (1.5 = 50% expansion for flourish)
+    )
+    expand_for_texture: bool = (
+        False  # Add stronger expansion prompt to encourage elaboration/flourishes
+    )
+
+    # Model selection: use_adapter=True loads adapter+base, use_adapter=False loads fused model directly
+    use_adapter: bool = True
+
+    # Fused model settings (path -> config mapping)
+    models: Dict[str, "FusedModelConfig"] = field(default_factory=dict)
 
     # LoRA adapter settings (path -> config mapping)
     lora_adapters: Dict[str, "LoRAAdapterConfig"] = field(default_factory=dict)
 
     # Neutralization settings
-    skip_neutralization: bool = False  # If True, skip RTT and use original text as input
+    skip_neutralization: bool = (
+        False  # If True, skip RTT and use original text as input
+    )
 
     # Document handling
-    use_document_context: bool = False  # Extract document-level context (disabled: extracted but never used)
+    use_document_context: bool = (
+        False  # Extract document-level context (disabled: extracted but never used)
+    )
     pass_headings_unchanged: bool = True  # Don't transform headings
     min_paragraph_words: int = 10  # Skip paragraphs shorter than this
 
     # RAG settings
     use_structural_rag: bool = True  # Enable structural RAG for rhythm/syntax guidance
-    use_structural_grafting: bool = True  # Enable structural grafting for argument skeletons
-    rag_sample_size: int = 300  # Number of corpus chunks to sample for rhythm pattern analysis
+    use_structural_grafting: bool = (
+        True  # Enable structural grafting for argument skeletons
+    )
+    rag_sample_size: int = (
+        300  # Number of corpus chunks to sample for rhythm pattern analysis
+    )
 
     # Persona settings
     use_persona: bool = True  # Enable persona-based prompting
-    apply_input_perturbation: bool = True  # Apply 8% noise to match training distribution
+    apply_input_perturbation: bool = (
+        True  # Apply 8% noise to match training distribution
+    )
 
 
 @dataclass
@@ -96,6 +141,7 @@ class LoRAAdapterConfig:
     These settings control the balance between style strength and coherence.
     Each adapter in lora_adapters can have its own settings.
     """
+
     enabled: bool = True  # Whether this adapter is active
     scale: float = 1.0  # Adapter influence (0.0=base only, 1.0=full, >1.0=amplified)
     temperature: float = 0.6  # Higher = more creative, lower = more coherent
@@ -104,23 +150,36 @@ class LoRAAdapterConfig:
     repetition_penalty: float = 1.15  # Penalty for repeating tokens
     max_tokens: int = 512  # Maximum tokens to generate
     worldview: str = ""  # Author worldview prompt file
-    fiction_markers: List[str] = field(default_factory=list)  # Fiction markers to filter from output
+    fiction_markers: List[str] = field(
+        default_factory=list
+    )  # Fiction markers to filter from output
     checkpoint: Optional[str] = None  # Specific checkpoint to use
     # Backend configuration
     backend: str = "auto"  # "auto", "mlx", or "pytorch"
     device: str = "auto"  # Device for PyTorch: "auto", "cuda", "cpu", "mps"
     load_in_4bit: bool = True  # Use 4-bit quantization (PyTorch with CUDA only)
     load_in_8bit: bool = False  # Use 8-bit quantization (PyTorch with CUDA only)
-    hf_adapter_path: Optional[str] = None  # HuggingFace adapter path (if different from local)
-    expand_for_texture: Optional[bool] = None  # Per-adapter override for texture expansion (None = use global)
-    perspective: Optional[str] = None  # Per-adapter perspective override (None = use global)
-    verify_entailment: Optional[bool] = None  # Per-adapter verification override (None = use global/CLI)
-    merge_paragraphs: Optional[int] = None  # Merge short paragraphs to reach this minimum word count before LoRA
+    hf_adapter_path: Optional[str] = (
+        None  # HuggingFace adapter path (if different from local)
+    )
+    expand_for_texture: Optional[bool] = (
+        None  # Per-adapter override for texture expansion (None = use global)
+    )
+    perspective: Optional[str] = (
+        None  # Per-adapter perspective override (None = use global)
+    )
+    verify_entailment: Optional[bool] = (
+        None  # Per-adapter verification override (None = use global/CLI)
+    )
+    merge_paragraphs: Optional[int] = (
+        None  # Merge short paragraphs to reach this minimum word count before LoRA
+    )
 
 
 @dataclass
 class StyleConfig:
     """Configuration for style transfer settings."""
+
     perspective: str = "preserve"  # preserve, first_person_singular, first_person_plural, third_person, author_voice_third_person
 
     def __post_init__(self):
@@ -158,6 +217,7 @@ class StyleConfig:
 @dataclass
 class Config:
     """Main configuration container."""
+
     llm: LLMConfig = field(default_factory=LLMConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     style: StyleConfig = field(default_factory=StyleConfig)
@@ -193,18 +253,38 @@ def _parse_llm_provider_config(data: Dict) -> LLMProviderConfig:
 
 
 _KNOWN_ADAPTER_FIELDS = {
-    "enabled", "scale", "temperature", "top_p", "min_p", "repetition_penalty",
-    "max_tokens", "worldview", "fiction_markers", "checkpoint", "backend", "device",
-    "load_in_4bit", "load_in_8bit", "hf_adapter_path", "expand_for_texture",
-    "perspective", "verify_entailment", "merge_paragraphs",
+    "enabled",
+    "scale",
+    "temperature",
+    "top_p",
+    "min_p",
+    "repetition_penalty",
+    "max_tokens",
+    "worldview",
+    "fiction_markers",
+    "checkpoint",
+    "backend",
+    "device",
+    "load_in_4bit",
+    "load_in_8bit",
+    "hf_adapter_path",
+    "expand_for_texture",
+    "perspective",
+    "verify_entailment",
+    "merge_paragraphs",
 }
 
 
 def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
     """Parse LoRA adapter configuration from dict."""
-    unknown_fields = set(data.keys()) - _KNOWN_ADAPTER_FIELDS
+    unknown_fields = {
+        k for k in data.keys()
+        if k not in _KNOWN_ADAPTER_FIELDS and not k.startswith("_")
+    }
     if unknown_fields:
-        logger.warning(f"Unknown adapter config fields (ignored): {', '.join(sorted(unknown_fields))}")
+        logger.warning(
+            f"Unknown adapter config fields (ignored): {', '.join(sorted(unknown_fields))}"
+        )
 
     return LoRAAdapterConfig(
         enabled=data.get("enabled", True),
@@ -228,6 +308,57 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         verify_entailment=data.get("verify_entailment"),
         merge_paragraphs=data.get("merge_paragraphs"),
     )
+
+
+_KNOWN_MODEL_FIELDS = {
+    "enabled",
+    "author",
+    "temperature",
+    "top_p",
+    "min_p",
+    "repetition_penalty",
+    "max_tokens",
+    "worldview",
+    "expand_for_texture",
+    "perspective",
+    "verify_entailment",
+    "merge_paragraphs",
+}
+
+
+def _parse_fused_model_config(data: Dict) -> FusedModelConfig:
+    """Parse fused model configuration from dict."""
+    unknown_fields = {
+        k for k in data.keys()
+        if k not in _KNOWN_MODEL_FIELDS and not k.startswith("_")
+    }
+    if unknown_fields:
+        logger.warning(
+            f"Unknown fused-model config fields (ignored): {', '.join(sorted(unknown_fields))}"
+        )
+    return FusedModelConfig(
+        enabled=data.get("enabled", True),
+        author=data.get("author", ""),
+        temperature=data.get("temperature", 0.6),
+        top_p=data.get("top_p", 0.92),
+        min_p=data.get("min_p", 0.05),
+        repetition_penalty=data.get("repetition_penalty", 1.15),
+        max_tokens=data.get("max_tokens", 512),
+        worldview=data.get("worldview", ""),
+        expand_for_texture=data.get("expand_for_texture"),
+        perspective=data.get("perspective"),
+        verify_entailment=data.get("verify_entailment"),
+        merge_paragraphs=data.get("merge_paragraphs"),
+    )
+
+
+def _parse_fused_models(data: Dict) -> Dict[str, FusedModelConfig]:
+    """Parse models section into typed configs."""
+    result = {}
+    for path, value in data.items():
+        if isinstance(value, dict):
+            result[path] = _parse_fused_model_config(value)
+    return result
 
 
 def _parse_lora_adapters(data: Dict) -> Dict[str, LoRAAdapterConfig]:
@@ -318,6 +449,8 @@ def load_config(config_path: str = "config.json") -> Config:
             max_expansion_ratio=gen.get("max_expansion_ratio", 2.5),
             target_expansion_ratio=gen.get("target_expansion_ratio", 1.5),
             expand_for_texture=gen.get("expand_for_texture", False),
+            use_adapter=gen.get("use_adapter", True),
+            models=_parse_fused_models(gen.get("models", {})),
             lora_adapters=_parse_lora_adapters(gen.get("lora_adapters", {})),
             skip_neutralization=gen.get("skip_neutralization", False),
             use_document_context=gen.get("use_document_context", False),
@@ -362,10 +495,7 @@ def create_default_config() -> Dict:
     """Create a default configuration dictionary."""
     return {
         "llm": {
-            "provider": {
-                "writer": "mlx",
-                "critic": "deepseek"
-            },
+            "provider": {"writer": "mlx", "critic": "deepseek"},
             "providers": {
                 "deepseek": {
                     "api_key": "${DEEPSEEK_API_KEY}",
@@ -373,29 +503,25 @@ def create_default_config() -> Dict:
                     "model": "deepseek-chat",
                     "max_tokens": 4096,
                     "temperature": 0.7,
-                    "timeout": 120
+                    "timeout": 120,
                 },
                 "mlx": {
                     "model": "mlx-community/Qwen3-8B-4bit",
                     "max_tokens": 512,
                     "temperature": 0.7,
-                    "top_p": 0.9
+                    "top_p": 0.9,
                 },
                 "ollama": {
                     "base_url": "http://localhost:11434",
                     "model": "llama3",
                     "max_tokens": 4096,
-                    "temperature": 0.7
-                }
+                    "temperature": 0.7,
+                },
             },
-            "retry": {
-                "max_attempts": 5,
-                "base_delay": 2,
-                "max_delay": 60
-            }
+            "retry": {"max_attempts": 5, "base_delay": 2, "max_delay": 60},
         },
         "generation": {},
-        "log_level": "INFO"
+        "log_level": "INFO",
     }
 
 
@@ -421,6 +547,7 @@ def get_adapter_config(adapter_path: Optional[str] = None) -> LoRAAdapterConfig:
 
         # Try matching by adapter directory name
         from pathlib import Path
+
         adapter_name = Path(adapter_path).name
         for path, adapter_config in adapters.items():
             if Path(path).name == adapter_name:
@@ -430,3 +557,35 @@ def get_adapter_config(adapter_path: Optional[str] = None) -> LoRAAdapterConfig:
         logger.debug(f"Could not load adapter config: {e}")
 
     return LoRAAdapterConfig()
+
+
+def get_fused_model_config(model_path: Optional[str] = None) -> FusedModelConfig:
+    """Get fused-model config for a specific model path.
+
+    Mirrors get_adapter_config for the `generation.models` section.
+
+    Args:
+        model_path: Path to the fused model directory. If None, returns defaults.
+
+    Returns:
+        FusedModelConfig for the model, or defaults if not found.
+    """
+    if not model_path:
+        return FusedModelConfig()
+
+    try:
+        config = load_config()
+        models = config.generation.models
+
+        if model_path in models:
+            return models[model_path]
+
+        model_name = Path(model_path).name
+        for path, model_cfg in models.items():
+            if Path(path).name == model_name:
+                return model_cfg
+
+    except Exception as e:
+        logger.debug(f"Could not load fused model config: {e}")
+
+    return FusedModelConfig()

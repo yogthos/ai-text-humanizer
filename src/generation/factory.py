@@ -26,6 +26,7 @@ def detect_best_backend() -> str:
     if sys.platform == "darwin":
         try:
             import mlx  # noqa: F401
+
             logger.debug("MLX backend available")
             return "mlx"
         except ImportError:
@@ -34,6 +35,7 @@ def detect_best_backend() -> str:
     # Check PyTorch
     try:
         import torch  # noqa: F401
+
         logger.debug("PyTorch backend available")
         return "pytorch"
     except ImportError:
@@ -52,6 +54,7 @@ def _set_fiction_markers(generator, adapter_path: Optional[str]) -> None:
         return
     try:
         from ..config import get_adapter_config
+
         adapter_config = get_adapter_config(adapter_path)
         if adapter_config.fiction_markers:
             generator.fiction_markers = adapter_config.fiction_markers
@@ -69,6 +72,7 @@ def create_style_generator(
     device: str = "auto",
     load_in_4bit: bool = True,
     load_in_8bit: bool = False,
+    fused_models: Optional[List[str]] = None,
 ):
     """Create a style generator using the specified backend.
 
@@ -85,6 +89,7 @@ def create_style_generator(
         device: Device for PyTorch ("auto", "cuda", "cpu", "mps").
         load_in_4bit: Use 4-bit quantization (PyTorch with CUDA only).
         load_in_8bit: Use 8-bit quantization (PyTorch with CUDA only).
+        fused_models: List of fused model paths to use directly (no adapter).
 
     Returns:
         Style generator instance (LoRAStyleGenerator or PyTorchStyleGenerator).
@@ -101,6 +106,15 @@ def create_style_generator(
     if backend == "mlx":
         from .lora_generator import LoRAStyleGenerator, AdapterSpec
 
+        if fused_models:
+            generator = LoRAStyleGenerator(
+                adapter_path=None,
+                base_model=fused_models[0],
+                config=config,
+                adapters=None,
+            )
+            return generator
+
         # Convert adapters if provided as list of dicts or strings
         adapter_specs = None
         if adapters:
@@ -111,11 +125,13 @@ def create_style_generator(
                 elif isinstance(a, str):
                     adapter_specs.append(AdapterSpec.parse(a))
                 elif isinstance(a, dict):
-                    adapter_specs.append(AdapterSpec(
-                        path=a.get("path", ""),
-                        scale=a.get("scale", 1.0),
-                        checkpoint=a.get("checkpoint"),
-                    ))
+                    adapter_specs.append(
+                        AdapterSpec(
+                            path=a.get("path", ""),
+                            scale=a.get("scale", 1.0),
+                            checkpoint=a.get("checkpoint"),
+                        )
+                    )
 
         generator = LoRAStyleGenerator(
             adapter_path=adapter_path,
@@ -131,6 +147,17 @@ def create_style_generator(
     elif backend == "pytorch":
         from .pytorch_generator import PyTorchStyleGenerator
 
+        if fused_models:
+            generator = PyTorchStyleGenerator(
+                adapter_path=None,
+                base_model=fused_models[0],
+                config=config,
+                device=device,
+                load_in_4bit=load_in_4bit,
+                load_in_8bit=load_in_8bit,
+            )
+            return generator
+
         generator = PyTorchStyleGenerator(
             adapter_path=adapter_path,
             base_model=base_model or "Qwen/Qwen2.5-32B-Instruct",
@@ -140,14 +167,12 @@ def create_style_generator(
             load_in_4bit=load_in_4bit,
             load_in_8bit=load_in_8bit,
         )
-        # Load fiction markers from adapter config
         _set_fiction_markers(generator, adapter_path)
         return generator
 
     else:
         raise ValueError(
-            f"Unknown backend: {backend}. "
-            f"Supported backends: 'auto', 'mlx', 'pytorch'"
+            f"Unknown backend: {backend}. Supported backends: 'auto', 'mlx', 'pytorch'"
         )
 
 
@@ -163,6 +188,7 @@ def list_available_backends() -> List[str]:
     if sys.platform == "darwin":
         try:
             import mlx  # noqa: F401
+
             available.append("mlx")
         except ImportError:
             pass
@@ -170,6 +196,7 @@ def list_available_backends() -> List[str]:
     # Check PyTorch
     try:
         import torch  # noqa: F401
+
         available.append("pytorch")
     except ImportError:
         pass

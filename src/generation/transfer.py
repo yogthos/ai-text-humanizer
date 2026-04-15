@@ -17,7 +17,7 @@ import time
 from .lora_generator import AdapterSpec
 from .base_generator import GenerationConfig
 from .factory import create_style_generator
-from ..config import get_adapter_config
+from ..config import FusedModelConfig, get_adapter_config, get_fused_model_config
 from .document_context import DocumentContext, extract_document_context
 from ..utils.nlp import (
     split_into_paragraphs,
@@ -29,6 +29,7 @@ from ..utils.logging import get_logger
 # Optional Structural RAG import
 try:
     from ..rag import StructuralRAG, get_structural_rag
+
     STRUCTURAL_RAG_AVAILABLE = True
 except ImportError:
     STRUCTURAL_RAG_AVAILABLE = False
@@ -37,6 +38,7 @@ except ImportError:
 # Optional Structural Grafter import
 try:
     from ..rag import StructuralGrafter, get_structural_grafter
+
     STRUCTURAL_GRAFTER_AVAILABLE = True
 except ImportError:
     STRUCTURAL_GRAFTER_AVAILABLE = False
@@ -45,6 +47,7 @@ except ImportError:
 # Persona system for subjective style transfer
 try:
     from ..persona import build_persona_prompt
+
     PERSONA_AVAILABLE = True
 except ImportError:
     PERSONA_AVAILABLE = False
@@ -52,6 +55,38 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+def _apply_fused_model_overrides(
+    transfer_config: "TransferConfig", fused_cfg: FusedModelConfig
+) -> None:
+    """Apply per-fused-model overrides to a TransferConfig in place.
+
+    Mirrors the adapter override block: CLI flags win over config, so
+    expand_for_texture only overrides when expand_for_texture_explicit is False.
+    """
+    if (
+        fused_cfg.expand_for_texture is not None
+        and not transfer_config.expand_for_texture_explicit
+    ):
+        transfer_config.expand_for_texture = fused_cfg.expand_for_texture
+        logger.info(
+            f"Using fused-model expand_for_texture={fused_cfg.expand_for_texture}"
+        )
+
+    if fused_cfg.perspective is not None:
+        transfer_config.perspective = fused_cfg.perspective
+        logger.info(f"Using fused-model perspective={fused_cfg.perspective}")
+
+    if fused_cfg.verify_entailment is not None:
+        transfer_config.verify_semantic_fidelity = fused_cfg.verify_entailment
+        logger.info(
+            f"Using fused-model verify_semantic_fidelity={fused_cfg.verify_entailment}"
+        )
+
+    if fused_cfg.merge_paragraphs is not None:
+        transfer_config.merge_paragraphs = fused_cfg.merge_paragraphs
+        logger.info(
+            f"Using fused-model merge_paragraphs={fused_cfg.merge_paragraphs}"
+        )
 
 
 @dataclass
@@ -77,30 +112,46 @@ class TransferConfig:
 
     # Length control settings
     max_expansion_ratio: float = 2.5  # Max output/input word ratio before warning
-    target_expansion_ratio: float = 1.5  # Target for LoRA generation (1.5 = 50% expansion for author flourish)
-    expand_for_texture: bool = False  # Add stronger expansion prompt for texture/flourishes
-    expand_for_texture_explicit: bool = False  # True when set by CLI flag (takes priority over adapter config)
+    target_expansion_ratio: float = (
+        1.5  # Target for LoRA generation (1.5 = 50% expansion for author flourish)
+    )
+    expand_for_texture: bool = (
+        False  # Add stronger expansion prompt for texture/flourishes
+    )
+    expand_for_texture_explicit: bool = (
+        False  # True when set by CLI flag (takes priority over adapter config)
+    )
 
     # Paragraph merging — merge short paragraphs to reach minimum word count
     # LoRAs produce better rhythm/burstiness with longer input blocks (~200+ words)
-    merge_paragraphs: Optional[int] = None  # None = no merging, int = min words per block
+    merge_paragraphs: Optional[int] = (
+        None  # None = no merging, int = min words per block
+    )
 
     # Neutralization settings
-    skip_neutralization: bool = False  # If True, skip RTT and use original text as input
+    skip_neutralization: bool = (
+        False  # If True, skip RTT and use original text as input
+    )
 
     # Perspective settings
-    perspective: str = "preserve"  # preserve, first_person_singular, first_person_plural, third_person
+    perspective: str = (
+        "preserve"  # preserve, first_person_singular, first_person_plural, third_person
+    )
 
     # Structural RAG settings
     use_structural_rag: bool = True  # Enable Structural RAG for rhythm/syntax guidance
-    use_structural_grafting: bool = True  # Enable Structural Grafting for argument skeletons
-    rag_sample_size: int = 300  # Number of corpus chunks to sample for rhythm pattern analysis
-
+    use_structural_grafting: bool = (
+        True  # Enable Structural Grafting for argument skeletons
+    )
+    rag_sample_size: int = (
+        300  # Number of corpus chunks to sample for rhythm pattern analysis
+    )
 
     # Persona settings (subjective voice to defeat AI detection)
     use_persona: bool = True  # Enable persona-based prompting
-    apply_input_perturbation: bool = True  # Apply 8% noise to match training distribution
-
+    apply_input_perturbation: bool = (
+        True  # Apply 8% noise to match training distribution
+    )
 
 
 @dataclass
@@ -120,7 +171,9 @@ class TransferStats:
             "avg_time_per_paragraph": round(self.avg_time_per_paragraph, 2),
             "avg_entailment_score": round(
                 sum(self.entailment_scores) / len(self.entailment_scores), 3
-            ) if self.entailment_scores else 0.0,
+            )
+            if self.entailment_scores
+            else 0.0,
         }
 
 
@@ -153,6 +206,7 @@ class StyleTransfer:
         verify_fn: Optional[Callable[[str, str], float]] = None,
         checkpoint: Optional[str] = None,
         adapters: Optional[List[AdapterSpec]] = None,
+        fused_models: Optional[List[str]] = None,
     ):
         """Initialize the fast transfer pipeline.
 
@@ -164,6 +218,7 @@ class StyleTransfer:
             verify_fn: Optional verification function (original, output) -> score.
             checkpoint: Specific checkpoint file to use (e.g., "0000600_adapters.safetensors").
             adapters: List of AdapterSpec for multiple adapters. If provided, adapter_path is ignored.
+            fused_models: List of fused model paths to use directly (no adapter needed).
         """
         self.config = config or TransferConfig()
         self.author = author_name
@@ -173,64 +228,90 @@ class StyleTransfer:
         if isinstance(critic_provider, str):
             from ..llm.provider import create_critic_provider
             from ..config import load_config
+
             app_config = load_config()
             self.critic_provider = create_critic_provider(app_config.llm)
         else:
             self.critic_provider = critic_provider
 
         # Log key config settings
-        logger.info(f"StyleTransfer config: expand_for_texture={self.config.expand_for_texture}, "
-                    f"target_expansion_ratio={self.config.target_expansion_ratio}")
+        logger.info(
+            f"StyleTransfer config: expand_for_texture={self.config.expand_for_texture}, "
+            f"target_expansion_ratio={self.config.target_expansion_ratio}"
+        )
 
-        # Determine the primary adapter path for config loading
-        if adapters:
+        fused_models = fused_models or []
+
+        if fused_models:
+            primary_adapter_path = fused_models[0]
+        elif adapters:
             primary_adapter_path = adapters[0].path
         else:
             primary_adapter_path = adapter_path
-
-        # Store adapter path for worldview lookup in persona prompts
+        # adapter_path on the instance is consumed by the persona prompt builder
+        # to look up the worldview — it must be set for both adapters and fused
+        # models so _get_worldview_filename can locate the config entry.
         self.adapter_path = primary_adapter_path
 
-        # Initialize generator using adapter-specific config from config.json
-        # This loads temperature, top_p, min_p, repetition_penalty, scale, etc.
-        gen_config = GenerationConfig.from_config(primary_adapter_path)
-        # Override with CLI-specified temperature if provided
-        if self.config.temperature is not None:
-            gen_config.temperature = self.config.temperature
-        gen_config.skip_cleaning = False  # Always clean output to remove garbage
+        if fused_models:
+            fused_cfg = get_fused_model_config(primary_adapter_path)
+            gen_config = GenerationConfig.from_fused_model(fused_cfg)
+            if self.config.temperature is not None:
+                gen_config.temperature = self.config.temperature
+            gen_config.skip_cleaning = False
 
-        # Get backend configuration from adapter config
-        adapter_cfg = get_adapter_config(primary_adapter_path)
+            _apply_fused_model_overrides(self.config, fused_cfg)
 
-        # Apply per-adapter overrides if set (CLI flags take priority)
-        if adapter_cfg.expand_for_texture is not None and not self.config.expand_for_texture_explicit:
-            self.config.expand_for_texture = adapter_cfg.expand_for_texture
-            logger.info(f"Using adapter-specific expand_for_texture={adapter_cfg.expand_for_texture}")
+            self.generator = create_style_generator(
+                adapter_path=None,
+                config=gen_config,
+                fused_models=fused_models,
+            )
+        else:
+            gen_config = GenerationConfig.from_config(primary_adapter_path)
+            if self.config.temperature is not None:
+                gen_config.temperature = self.config.temperature
+            gen_config.skip_cleaning = False
 
-        if adapter_cfg.perspective is not None:
-            self.config.perspective = adapter_cfg.perspective
-            logger.info(f"Using adapter-specific perspective={adapter_cfg.perspective}")
+            adapter_cfg = get_adapter_config(primary_adapter_path)
 
-        if adapter_cfg.verify_entailment is not None:
-            self.config.verify_semantic_fidelity = adapter_cfg.verify_entailment
-            logger.info(f"Using adapter-specific verify_semantic_fidelity={adapter_cfg.verify_entailment}")
+            if (
+                adapter_cfg.expand_for_texture is not None
+                and not self.config.expand_for_texture_explicit
+            ):
+                self.config.expand_for_texture = adapter_cfg.expand_for_texture
+                logger.info(
+                    f"Using adapter-specific expand_for_texture={adapter_cfg.expand_for_texture}"
+                )
 
-        if adapter_cfg.merge_paragraphs is not None:
-            self.config.merge_paragraphs = adapter_cfg.merge_paragraphs
-            logger.info(f"Using adapter-specific merge_paragraphs={adapter_cfg.merge_paragraphs}")
+            if adapter_cfg.perspective is not None:
+                self.config.perspective = adapter_cfg.perspective
+                logger.info(
+                    f"Using adapter-specific perspective={adapter_cfg.perspective}"
+                )
 
-        # Use factory to create the appropriate generator based on backend
-        self.generator = create_style_generator(
-            adapter_path=adapter_cfg.hf_adapter_path or adapter_path,
-            config=gen_config,
-            checkpoint=checkpoint,
-            adapters=adapters,
-            backend=adapter_cfg.backend,
-            device=adapter_cfg.device,
-            load_in_4bit=adapter_cfg.load_in_4bit,
-            load_in_8bit=adapter_cfg.load_in_8bit,
-        )
+            if adapter_cfg.verify_entailment is not None:
+                self.config.verify_semantic_fidelity = adapter_cfg.verify_entailment
+                logger.info(
+                    f"Using adapter-specific verify_semantic_fidelity={adapter_cfg.verify_entailment}"
+                )
 
+            if adapter_cfg.merge_paragraphs is not None:
+                self.config.merge_paragraphs = adapter_cfg.merge_paragraphs
+                logger.info(
+                    f"Using adapter-specific merge_paragraphs={adapter_cfg.merge_paragraphs}"
+                )
+
+            self.generator = create_style_generator(
+                adapter_path=adapter_cfg.hf_adapter_path or adapter_path,
+                config=gen_config,
+                checkpoint=checkpoint,
+                adapters=adapters,
+                backend=adapter_cfg.backend,
+                device=adapter_cfg.device,
+                load_in_4bit=adapter_cfg.load_in_4bit,
+                load_in_8bit=adapter_cfg.load_in_8bit,
+            )
 
         # Initialize RTT neutralizer (local MLX model)
         self._rtt_neutralizer = None
@@ -243,9 +324,13 @@ class StyleTransfer:
         if self.config.use_structural_rag:
             if STRUCTURAL_RAG_AVAILABLE:
                 self.structural_rag = get_structural_rag(self.author)
-                loaded = self.structural_rag.load_patterns(sample_size=self.config.rag_sample_size)
+                loaded = self.structural_rag.load_patterns(
+                    sample_size=self.config.rag_sample_size
+                )
                 if loaded > 0:
-                    logger.info(f"Structural RAG loaded {loaded} rhythm patterns for {self.author}")
+                    logger.info(
+                        f"Structural RAG loaded {loaded} rhythm patterns for {self.author}"
+                    )
                 else:
                     logger.warning(f"No structural patterns found for {self.author}")
                     self.structural_rag = None
@@ -257,10 +342,14 @@ class StyleTransfer:
         self.structural_grafter: Optional[StructuralGrafter] = None
         if self.config.use_structural_grafting:
             if STRUCTURAL_GRAFTER_AVAILABLE:
-                self.structural_grafter = get_structural_grafter(self.author, critic_provider)
+                self.structural_grafter = get_structural_grafter(
+                    self.author, critic_provider
+                )
                 logger.info(f"Structural Grafter initialized for {self.author}")
             else:
-                logger.warning("Structural Grafter not available (missing dependencies)")
+                logger.warning(
+                    "Structural Grafter not available (missing dependencies)"
+                )
                 self.config.use_structural_grafting = False
 
     def _rtt_neutralize(self, text: str, max_retries: int = 2) -> Optional[str]:
@@ -284,6 +373,7 @@ class StyleTransfer:
         if self._rtt_neutralizer is None:
             try:
                 from ..llm.mlx_provider import create_rtt_neutralizer
+
                 self._rtt_neutralizer = create_rtt_neutralizer()
                 logger.debug(f"RTT neutralizer: {type(self._rtt_neutralizer).__name__}")
             except Exception as e:
@@ -319,14 +409,18 @@ class StyleTransfer:
 
             input_words = len(text.split())
             output_words = len(response.split()) if response else 0
-            logger.info(f"TEXTURE EXPANSION result: {input_words} → {output_words} words")
+            logger.info(
+                f"TEXTURE EXPANSION result: {input_words} → {output_words} words"
+            )
 
             if response and output_words > input_words:
                 expansion = output_words / input_words
                 logger.info(f"TEXTURE EXPANSION: expanded by {expansion:.0%}")
                 return response.strip()
             else:
-                logger.warning(f"Texture expansion returned shorter/equal text ({output_words} vs {input_words}), using original")
+                logger.warning(
+                    f"Texture expansion returned shorter/equal text ({output_words} vs {input_words}), using original"
+                )
                 return text
 
         except Exception as e:
@@ -368,7 +462,9 @@ class StyleTransfer:
             if response and response.strip():
                 input_words = len(text.split())
                 output_words = len(response.split())
-                logger.info(f"NARRATIVIZE: {input_words} → {output_words} words (converted to first-person)")
+                logger.info(
+                    f"NARRATIVIZE: {input_words} → {output_words} words (converted to first-person)"
+                )
                 return response.strip()
             else:
                 logger.warning("Narrativization returned empty, using original")
@@ -466,7 +562,10 @@ class StyleTransfer:
         Returns:
             Tuple of (styled_paragraph, entailment_score).
         """
-        from ..validation.reference_tracker import extract_references, reinject_references
+        from ..validation.reference_tracker import (
+            extract_references,
+            reinject_references,
+        )
 
         # Skip very short paragraphs
         if len(paragraph.split()) < self.config.min_paragraph_words:
@@ -491,9 +590,13 @@ class StyleTransfer:
         # If enabled, use the critic model to add asides, observations, and
         # texture before RTT neutralization. This enriches flat prose.
         if self.config.expand_for_texture:
-            logger.info(f"TEXTURE EXPANSION: Starting expansion for {len(paragraph_clean.split())} words")
+            logger.info(
+                f"TEXTURE EXPANSION: Starting expansion for {len(paragraph_clean.split())} words"
+            )
             paragraph_clean = self._expand_with_texture(paragraph_clean)
-            word_count = len(paragraph_clean.split())  # Update word count after expansion
+            word_count = len(
+                paragraph_clean.split()
+            )  # Update word count after expansion
             logger.info(f"TEXTURE EXPANSION: Complete, now {word_count} words")
 
         # ========================================
@@ -512,10 +615,14 @@ class StyleTransfer:
         # - Other perspectives = convert to that perspective
         if self.config.perspective != "preserve":
             pre_perspective_words = len(paragraph_clean.split())
-            paragraph_clean = self._convert_to_perspective(paragraph_clean, self.config.perspective)
+            paragraph_clean = self._convert_to_perspective(
+                paragraph_clean, self.config.perspective
+            )
             post_perspective_words = len(paragraph_clean.split())
             word_count = post_perspective_words  # Update word count for LoRA target
-            logger.info(f"PERSPECTIVE: {pre_perspective_words} → {post_perspective_words} words (→ {self.config.perspective})")
+            logger.info(
+                f"PERSPECTIVE: {pre_perspective_words} → {post_perspective_words} words (→ {self.config.perspective})"
+            )
 
         # ========================================
         # STEP 1: RTT Neutralization (match training format)
@@ -528,7 +635,9 @@ class StyleTransfer:
             content_for_generation = paragraph_clean
             logger.debug("RTT neutralization skipped (skip_neutralization=true)")
         else:
-            logger.info(f"RTT: Starting neutralization for {len(paragraph_clean.split())} words")
+            logger.info(
+                f"RTT: Starting neutralization for {len(paragraph_clean.split())} words"
+            )
             content_for_generation = self._rtt_neutralize(paragraph_clean)
             if not content_for_generation:
                 # Fall back to cleaned text instead of crashing
@@ -541,9 +650,13 @@ class StyleTransfer:
             else:
                 rtt_input_words = len(paragraph_clean.split())
                 rtt_output_words = len(content_for_generation.split())
-                compression_ratio = rtt_output_words / rtt_input_words if rtt_input_words > 0 else 1.0
+                compression_ratio = (
+                    rtt_output_words / rtt_input_words if rtt_input_words > 0 else 1.0
+                )
                 word_count = rtt_output_words  # Update word count for LoRA target
-                logger.info(f"RTT: {rtt_input_words} → {rtt_output_words} words ({compression_ratio:.0%})")
+                logger.info(
+                    f"RTT: {rtt_input_words} → {rtt_output_words} words ({compression_ratio:.0%})"
+                )
 
         # ========================================
         # STEP 1.5: Apply input perturbation to match training distribution
@@ -552,6 +665,7 @@ class StyleTransfer:
         # This forces the model to creatively reconstruct, not just restyle
         if self.config.apply_input_perturbation:
             from ..utils.perturbation import perturb_text
+
             pre_perturb_words = len(content_for_generation.split())
             content_for_generation = perturb_text(
                 content_for_generation,
@@ -559,13 +673,17 @@ class StyleTransfer:
                 drop_adjectives=True,
             )
             post_perturb_words = len(content_for_generation.split())
-            logger.info(f"PERTURBATION: {pre_perturb_words} → {post_perturb_words} words (adjective drops + 8% noise)")
+            logger.info(
+                f"PERTURBATION: {pre_perturb_words} → {post_perturb_words} words (adjective drops + 8% noise)"
+            )
 
         # ========================================
         # STEP 2: Pass to LoRA for style transformation
         # ========================================
         target_words = int(word_count * self.config.target_expansion_ratio)
-        logger.info(f"LORA: content_for_generation={len(content_for_generation.split())} words, target={target_words} words")
+        logger.info(
+            f"LORA: content_for_generation={len(content_for_generation.split())} words, target={target_words} words"
+        )
         # Token limit needs to be generous to avoid truncation mid-sentence
         # Typically ~1.5 tokens per word, plus some margin for style variation
         # Use 2.5x target words to ensure complete sentences
@@ -578,14 +696,18 @@ class StyleTransfer:
         if self.structural_rag:
             guidance = self.structural_rag.get_guidance(paragraph)
             structural_guidance = guidance.format_for_prompt()
-            logger.debug(f"Using author structural guidance: {structural_guidance[:100]}...")
+            logger.debug(
+                f"Using author structural guidance: {structural_guidance[:100]}..."
+            )
 
         # Get grafting guidance if available
         grafting_guidance = None
         if self.structural_grafter:
             grafting_guidance = self.structural_grafter.get_grafting_guidance(paragraph)
             if grafting_guidance:
-                logger.debug(f"Using grafting skeleton: {grafting_guidance.skeleton.format_for_prompt()}")
+                logger.debug(
+                    f"Using grafting skeleton: {grafting_guidance.skeleton.format_for_prompt()}"
+                )
 
         # Build persona-injected prompt if enabled
         # CRITICAL: Prompt format must match training format exactly
@@ -601,7 +723,9 @@ class StyleTransfer:
                 adapter_path=self.adapter_path,
             )
             structural_guidance = None  # Already included in persona prompt
-            use_raw_prompt = True  # Use persona prompt directly without additional formatting
+            use_raw_prompt = (
+                True  # Use persona prompt directly without additional formatting
+            )
             logger.debug(f"Using persona prompt (target={target_words} words)")
 
         output = self.generator.generate(
@@ -613,11 +737,15 @@ class StyleTransfer:
             raw_prompt=use_raw_prompt,
         )
         lora_output_words = len(output.split())
-        logger.info(f"LORA OUTPUT: {lora_output_words} words (target was {target_words})")
+        logger.info(
+            f"LORA OUTPUT: {lora_output_words} words (target was {target_words})"
+        )
 
         # Check if LoRA output matches input (indicates no transformation)
         if output.strip() == content_for_generation.strip():
-            logger.warning("LoRA output identical to input - no transformation occurred")
+            logger.warning(
+                "LoRA output identical to input - no transformation occurred"
+            )
 
         # Check for memorization (output has no semantic overlap with input)
         output_overlap = self._check_content_overlap(content_for_generation, output)
@@ -631,7 +759,9 @@ class StyleTransfer:
         lora_words = len(output.split())
         source_words = len(paragraph_clean.split())
         if lora_words > source_words * self.config.max_expansion_ratio:
-            logger.warning(f"LoRA over-expanded: {lora_words} words vs {source_words} source ({lora_words/source_words:.0%})")
+            logger.warning(
+                f"LoRA over-expanded: {lora_words} words vs {source_words} source ({lora_words / source_words:.0%})"
+            )
 
         # ========================================
         # STEP 3: Semantic fidelity validation (if enabled)
@@ -640,6 +770,7 @@ class StyleTransfer:
         # grammar correction, and repetition reduction
         if self.config.verify_semantic_fidelity:
             from ..validation.semantic_fidelity import validate_semantic_fidelity
+
             logger.info(f"SEMANTIC FIDELITY: validating {len(output.split())} words")
             fidelity = validate_semantic_fidelity(
                 original=original_for_verification,
@@ -659,7 +790,9 @@ class StyleTransfer:
         if ref_map.has_references():
             output, dropped_refs = reinject_references(output, ref_map)
             if dropped_refs:
-                logger.warning(f"Lost {len(dropped_refs)} references during style transfer: {dropped_refs}")
+                logger.warning(
+                    f"Lost {len(dropped_refs)} references during style transfer: {dropped_refs}"
+                )
             logger.debug(f"Reinjected {len(ref_map.references)} references")
 
         # Score via verify_fn if configured (for stats tracking)
@@ -710,28 +843,28 @@ class StyleTransfer:
         import re
 
         # Fix em-dash + punctuation combinations
-        text = re.sub(r'—\s*,', ',', text)  # "—," -> ","
-        text = re.sub(r',\s*—', ',', text)  # ",—" -> ","
-        text = re.sub(r'—\s*\.', '.', text)  # "—." -> "."
-        text = re.sub(r'\.\s*—', '.', text)  # ".—" -> "."
-        text = re.sub(r'—\s*;', ';', text)  # "—;" -> ";"
-        text = re.sub(r';\s*—', ';', text)  # ";—" -> ";"
-        text = re.sub(r'—\s*:', ':', text)  # "—:" -> ":"
-        text = re.sub(r':\s*—', ':', text)  # ":—" -> ":"
+        text = re.sub(r"—\s*,", ",", text)  # "—," -> ","
+        text = re.sub(r",\s*—", ",", text)  # ",—" -> ","
+        text = re.sub(r"—\s*\.", ".", text)  # "—." -> "."
+        text = re.sub(r"\.\s*—", ".", text)  # ".—" -> "."
+        text = re.sub(r"—\s*;", ";", text)  # "—;" -> ";"
+        text = re.sub(r";\s*—", ";", text)  # ";—" -> ";"
+        text = re.sub(r"—\s*:", ":", text)  # "—:" -> ":"
+        text = re.sub(r":\s*—", ":", text)  # ":—" -> ":"
 
         # Fix double punctuation
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r'\.\s*\.', '.', text)
-        text = re.sub(r';\s*;', ';', text)
-        text = re.sub(r':\s*:', ':', text)
+        text = re.sub(r",\s*,", ",", text)
+        text = re.sub(r"\.\s*\.", ".", text)
+        text = re.sub(r";\s*;", ";", text)
+        text = re.sub(r":\s*:", ":", text)
 
         # Fix spacing around punctuation
-        text = re.sub(r'\s+([.,;:!?])', r'\1', text)  # No space before
+        text = re.sub(r"\s+([.,;:!?])", r"\1", text)  # No space before
         # Space after punctuation, but not between single uppercase letters (abbreviations like U.S.)
-        text = re.sub(r'([.,;:!?])(?!(?<=[A-Z]\.)[A-Z])([A-Za-z])', r'\1 \2', text)
+        text = re.sub(r"([.,;:!?])(?!(?<=[A-Z]\.)[A-Z])([A-Za-z])", r"\1 \2", text)
 
         # Normalize multiple spaces
-        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r"\s+", " ", text)
 
         return text.strip()
 
@@ -748,7 +881,7 @@ class StyleTransfer:
             return text
 
         # If already ends with sentence terminator, we're good
-        if text[-1] in '.!?':
+        if text[-1] in ".!?":
             return text
 
         # Find the last complete sentence
@@ -760,21 +893,23 @@ class StyleTransfer:
         complete_sentences = []
         for sent in sentences:
             sent = sent.strip()
-            if sent and sent[-1] in '.!?':
+            if sent and sent[-1] in ".!?":
                 complete_sentences.append(sent)
             elif sent and len(sent) > 20:
                 # Long fragment - try to salvage by adding period
                 # Only if it looks like a complete thought
                 words = sent.split()
                 if len(words) >= 5:
-                    complete_sentences.append(sent + '.')
-                    logger.warning(f"Added period to incomplete sentence: ...{sent[-30:]}")
+                    complete_sentences.append(sent + ".")
+                    logger.warning(
+                        f"Added period to incomplete sentence: ...{sent[-30:]}"
+                    )
 
         if complete_sentences:
-            return ' '.join(complete_sentences)
+            return " ".join(complete_sentences)
 
         # Fallback: add period to entire text
-        return text + '.'
+        return text + "."
 
     def transfer_document(
         self,
@@ -815,9 +950,13 @@ class StyleTransfer:
             for para in paragraphs:
                 para_words = len(para.split())
                 # Always keep headings separate
-                if self.config.pass_headings_unchanged and len(para.strip().split('\n')) == 1 and is_heading(para.strip()):
+                if (
+                    self.config.pass_headings_unchanged
+                    and len(para.strip().split("\n")) == 1
+                    and is_heading(para.strip())
+                ):
                     if current_block:
-                        merged.append('\n\n'.join(current_block))
+                        merged.append("\n\n".join(current_block))
                         current_block = []
                         current_words = 0
                     merged.append(para)
@@ -827,18 +966,24 @@ class StyleTransfer:
                 current_words += para_words
 
                 if current_words >= min_words:
-                    merged.append('\n\n'.join(current_block))
+                    merged.append("\n\n".join(current_block))
                     current_block = []
                     current_words = 0
 
             # Flush remaining — merge with last block if too small
             if current_block:
-                if merged and current_words < min_words // 2 and not is_heading(merged[-1].strip()):
-                    merged[-1] = merged[-1] + '\n\n' + '\n\n'.join(current_block)
+                if (
+                    merged
+                    and current_words < min_words // 2
+                    and not is_heading(merged[-1].strip())
+                ):
+                    merged[-1] = merged[-1] + "\n\n" + "\n\n".join(current_block)
                 else:
-                    merged.append('\n\n'.join(current_block))
+                    merged.append("\n\n".join(current_block))
 
-            logger.info(f"Merged {len(paragraphs)} paragraphs into {len(merged)} blocks (min_words={min_words})")
+            logger.info(
+                f"Merged {len(paragraphs)} paragraphs into {len(merged)} blocks (min_words={min_words})"
+            )
             paragraphs = merged
 
         # Extract document context for improved generation and critique
@@ -855,13 +1000,17 @@ class StyleTransfer:
 
         for i, para in enumerate(paragraphs):
             if on_progress:
-                on_progress(i + 1, len(paragraphs), f"Processing paragraph {i+1}")
+                on_progress(i + 1, len(paragraphs), f"Processing paragraph {i + 1}")
 
             para_start = time.time()
 
             # Check if paragraph is a heading - pass through unchanged
-            para_lines = para.strip().split('\n')
-            is_heading_para = self.config.pass_headings_unchanged and len(para_lines) == 1 and is_heading(para_lines[0])
+            para_lines = para.strip().split("\n")
+            is_heading_para = (
+                self.config.pass_headings_unchanged
+                and len(para_lines) == 1
+                and is_heading(para_lines[0])
+            )
 
             if is_heading_para:
                 logger.debug(f"Passing heading unchanged: {para[:50]}...")
@@ -871,7 +1020,7 @@ class StyleTransfer:
                 output, score = self.transfer_paragraph(para, previous)
 
             para_time = time.time() - para_start
-            logger.debug(f"Paragraph {i+1}: {para_time:.1f}s, score={score:.2f}")
+            logger.debug(f"Paragraph {i + 1}: {para_time:.1f}s, score={score:.2f}")
 
             self._transfer_outputs.append(output)
             previous = output
@@ -884,10 +1033,14 @@ class StyleTransfer:
                 on_paragraph(i, output)
 
         # Compute final stats
-        self._transfer_stats.total_time_seconds = time.time() - self._transfer_start_time
+        self._transfer_stats.total_time_seconds = (
+            time.time() - self._transfer_start_time
+        )
         self._transfer_stats.avg_time_per_paragraph = (
-            self._transfer_stats.total_time_seconds / self._transfer_stats.paragraphs_processed
-            if self._transfer_stats.paragraphs_processed > 0 else 0
+            self._transfer_stats.total_time_seconds
+            / self._transfer_stats.paragraphs_processed
+            if self._transfer_stats.paragraphs_processed > 0
+            else 0
         )
 
         logger.info(
@@ -932,7 +1085,9 @@ class StyleTransfer:
                 last_sent = sentences[-1]
                 is_incomplete, reason = is_sentence_incomplete(last_sent)
                 if is_incomplete and reason != "no ending punctuation":
-                    logger.warning(f"Paragraph ends incomplete ({reason}), truncating: ...{para[-50:]}")
+                    logger.warning(
+                        f"Paragraph ends incomplete ({reason}), truncating: ...{para[-50:]}"
+                    )
                     # Keep only complete sentences
                     complete = get_complete_sentences(para)
                     if complete:
@@ -958,7 +1113,9 @@ class StyleTransfer:
                         seen_sents.add(sent_normalized)
                         unique_sentences.append(sent.strip())
                     else:
-                        logger.debug(f"Removing repeated sentence within paragraph: {sent[:40]}...")
+                        logger.debug(
+                            f"Removing repeated sentence within paragraph: {sent[:40]}..."
+                        )
                 if len(unique_sentences) < len(sentences):
                     para = " ".join(unique_sentences)
 
@@ -974,14 +1131,17 @@ class StyleTransfer:
             Tuple of (partial_output, statistics).
         """
         # Compute stats for partial transfer
-        if hasattr(self, '_transfer_stats') and hasattr(self, '_transfer_start_time'):
-            self._transfer_stats.total_time_seconds = time.time() - self._transfer_start_time
+        if hasattr(self, "_transfer_stats") and hasattr(self, "_transfer_start_time"):
+            self._transfer_stats.total_time_seconds = (
+                time.time() - self._transfer_start_time
+            )
             if self._transfer_stats.paragraphs_processed > 0:
                 self._transfer_stats.avg_time_per_paragraph = (
-                    self._transfer_stats.total_time_seconds / self._transfer_stats.paragraphs_processed
+                    self._transfer_stats.total_time_seconds
+                    / self._transfer_stats.paragraphs_processed
                 )
 
-        outputs = getattr(self, '_transfer_outputs', [])
-        stats = getattr(self, '_transfer_stats', TransferStats())
+        outputs = getattr(self, "_transfer_outputs", [])
+        stats = getattr(self, "_transfer_stats", TransferStats())
 
         return "\n\n".join(outputs), stats

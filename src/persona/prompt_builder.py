@@ -101,30 +101,38 @@ def _load_persona_file(persona_filename: str) -> Dict[str, Any]:
 
 
 def _get_worldview_filename(adapter_path: Optional[str] = None) -> str:
-    """Get worldview filename from config.json for a specific adapter.
+    """Get worldview filename from config.json for a specific adapter or fused model.
 
     Args:
-        adapter_path: Path to the adapter. If provided, looks up worldview
-                     from that adapter's config. If None, uses first configured adapter.
+        adapter_path: Path to the adapter or fused model. If provided, looks up
+                     the worldview from that entry's config (checking both
+                     `lora_adapters` and `models`). If None, falls back to the
+                     first enabled entry.
 
     Returns:
         Worldview filename (e.g., "lovecraft_worldview.txt") or default.
     """
     try:
-        from ..config import get_adapter_config, load_config
+        from ..config import get_adapter_config, get_fused_model_config, load_config
 
         if adapter_path:
-            # Get worldview for specific adapter
+            # Check LoRA adapters first
             adapter_config = get_adapter_config(adapter_path)
             if adapter_config.worldview:
                 return adapter_config.worldview
+            # Fall through to fused models (path may be a fused model instead)
+            fused_config = get_fused_model_config(adapter_path)
+            if fused_config.worldview:
+                return fused_config.worldview
         else:
-            # Fall back to first enabled adapter's worldview
+            # Fall back to first enabled entry's worldview
             config = load_config()
-            if config.generation.lora_adapters:
-                for adapter_config in config.generation.lora_adapters.values():
-                    if adapter_config.enabled and adapter_config.worldview:
-                        return adapter_config.worldview
+            for adapter_config in config.generation.lora_adapters.values():
+                if adapter_config.enabled and adapter_config.worldview:
+                    return adapter_config.worldview
+            for fused_config in config.generation.models.values():
+                if fused_config.enabled and fused_config.worldview:
+                    return fused_config.worldview
     except Exception as e:
         logger.warning(f"Failed to determine worldview filename: {e}")
     return "default_persona.txt"

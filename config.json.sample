@@ -42,14 +42,30 @@
     }
   },
   "generation": {
-    "_comment": "Repair and length settings",
-    "max_repair_attempts": 5,
     "_comment3": "Length control (target_expansion_ratio: 1.5 = 50% longer output for author flourish)",
     "max_expansion_ratio": 3.0,
     "target_expansion_ratio": 1.5,
-    "_comment3a": "expand_for_texture: add stronger prompt to encourage elaboration/flourishes",
+    "_comment3a": "expand_for_texture: add stronger expansion prompt to encourage elaboration/flourishes",
     "expand_for_texture": false,
-    "_comment4": "LoRA adapters with per-adapter generation settings (enabled: true/false to toggle)",
+    "_comment3b": "use_adapter: true = use lora_adapters, false = use models (fused models, no adapter)",
+    "use_adapter": true,
+    "_comment4": "Fused models (LoRA merged into base) with per-model generation settings",
+    "models": {
+      "models/Qwen2.5-32B-howard-lovecraft-10200": {
+        "_comment": "Fused Qwen2.5-32B + checkpoint-10200 adapter via scripts/fuse_model.py",
+        "enabled": true,
+        "author": "Howard Russell",
+        "temperature": 0.7,
+        "top_p": 0.92,
+        "min_p": 0.05,
+        "repetition_penalty": 1.05,
+        "max_tokens": 2048,
+        "worldview": "howard_russell_worldview.txt",
+        "perspective": "preserve",
+        "verify_entailment": false
+      }
+    },
+    "_comment4a": "LoRA adapters with per-adapter generation settings (enabled: true/false to toggle)",
     "lora_adapters": {
       "lora_adapters/lovecraft_32b": {
         "_comment": "Qwen2.5-32B trained on RunPod A100, checkpoint-600 has best val_loss",
@@ -94,18 +110,6 @@
     },
     "_comment5": "Neutralization (skip for better fact preservation)",
     "skip_neutralization": false,
-    "_comment6": "Post-processing",
-    "repetition_threshold": 3,
-    "reduce_repetition": true,
-    "_comment6a": "Sentence restructuring (convert balanced patterns to organic)",
-    "restructure_sentences": false,
-    "_comment6b": "Sentence splitting (break run-on sentences at conjunction points)",
-    "split_sentences": true,
-    "max_sentence_length": 60,
-    "sentence_length_variance": 0.4,
-    "_comment6c": "Grammar correction (style-safe, preserves author voice)",
-    "correct_grammar": true,
-    "grammar_language": "en-US",
     "_comment7": "Document handling",
     "use_document_context": false,
     "pass_headings_unchanged": true,
@@ -123,11 +127,6 @@
     "_comment": "Perspective controls output point-of-view",
     "_options": "preserve | first_person_singular | first_person_plural | third_person | author_voice_third_person",
     "perspective": "preserve"
-  },
-  "validation": {
-    "_comment": "Semantic validation settings",
-    "entailment_threshold": 0.7,
-    "max_hallucinations_before_reject": 3
   },
   "log_level": "INFO"
 }
