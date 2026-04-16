@@ -560,21 +560,6 @@ if self.sentence_splitter:
     output, split_stats = self.sentence_splitter.split(output)
 ```
 
-Configuration:
-- `max_sentence_length`: 50-60 words
-- `sentence_length_variance`: 0.3 (allow 70%-130% of max)
-
-**Grammar Correction:**
-
-Apply style-safe grammar fixes (preserves author voice):
-
-```python
-if self.grammar_corrector:
-    output, grammar_stats = self.grammar_corrector.correct(output)
-```
-
-Uses LanguageTool with whitelist of allowed patterns.
-
 **Repetition Reduction:**
 
 Fix overused words:
@@ -640,10 +625,6 @@ Output: "The physicist Einstein[^1] formulated his theory of relativity[^2]."
     }
   },
   "generation": {
-    // Semantic validation
-    "entailment_threshold": 0.9,
-    "max_repair_attempts": 3,
-
     // Length control
     "max_expansion_ratio": 2.5,
     "target_expansion_ratio": 1.0,
@@ -653,13 +634,6 @@ Output: "The physicist Einstein[^1] formulated his theory of relativity[^2]."
 
     // Neutralization
     "skip_neutralization": false,
-
-    // Post-processing
-    "reduce_repetition": true,
-    "repetition_threshold": 3,
-    "split_sentences": true,
-    "max_sentence_length": 60,
-    "correct_grammar": true,
 
     // Document handling
     "use_document_context": true,
@@ -792,13 +766,10 @@ Output: "The physicist Einstein[^1] formulated his theory of relativity[^2]."
 | **IndexError: list index out of range** | Adapter trained on different model | Ensure `metadata.json` specifies the same model used for training |
 | Output matches training data | Memorization | Reduce epochs, lower rank, add more training data |
 | Style too weak | Underfitting | Train longer, increase lora_scale |
-| Facts being changed | Over-styling | Lower lora_scale, increase entailment_threshold |
+| Facts being changed | Over-styling | Lower lora_scale |
 | Style destroyed during repair | Wrong repair method | Ensure repair uses LoRA, not generic LLM |
 | Numbers converted to words | LoRA quirk | Lower lora_scale to 0.3-0.5 |
-| Repetitive phrases | LLM tendency | Enable reduce_repetition, lower threshold |
 | References lost | Not tracked | Ensure reference_tracker is called |
 | No structural guidance | Empty RAG | Verify corpus indexed in ChromaDB |
-| Grammar errors introduced | Over-correction | Adjust grammar_corrector whitelist |
-| Run-on sentences | LLM tendency | Enable split_sentences |
 | Out of memory (training) | Model too large | Set `num_layers: 16` instead of -1, enable `grad_checkpoint: true` |
 | Out of memory (inference) | Model too large | Use 7B model in config.json |
