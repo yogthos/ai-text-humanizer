@@ -240,6 +240,39 @@ class TestStyleTransfer:
         assert score == 1.0
 
     @patch('src.generation.transfer.create_style_generator')
+    def test_init_uses_default_services_when_none_passed(self, mock_generator_class, mock_critic):
+        """Without a services arg, StyleTransfer falls back to the process default."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.services import get_default_services
+
+        config = TransferConfig(verify_semantic_fidelity=False)
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+        )
+        assert transfer.services is get_default_services()
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_init_accepts_injected_services(self, mock_generator_class, mock_critic):
+        """An explicit Services instance is stored on the transfer and used
+        instead of the module-level default — the primary test seam."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.services import Services
+
+        services = Services()
+        config = TransferConfig(verify_semantic_fidelity=False)
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="Test",
+            critic_provider=mock_critic,
+            config=config,
+            services=services,
+        )
+        assert transfer.services is services
+
+    @patch('src.generation.transfer.create_style_generator')
     def test_get_partial_results(self, mock_generator_class, mock_critic):
         """Test getting partial results after interruption."""
         from src.generation.transfer import StyleTransfer, TransferConfig

@@ -10,7 +10,7 @@ Concrete patterns ("DET ADJ NOUN — ADV VERB") do.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set
 from collections import Counter
 
 from ..utils.nlp import get_nlp
@@ -724,13 +724,7 @@ class EnhancedStructuralAnalyzer:
         )
 
 
-# Module singleton
-_enhanced_analyzer: Optional[EnhancedStructuralAnalyzer] = None
-
-
 def get_enhanced_analyzer() -> EnhancedStructuralAnalyzer:
-    """Get the enhanced structural analyzer singleton."""
-    global _enhanced_analyzer
-    if _enhanced_analyzer is None:
-        _enhanced_analyzer = EnhancedStructuralAnalyzer()
-    return _enhanced_analyzer
+    """Return the shared EnhancedStructuralAnalyzer from the default Services container."""
+    from ..services import get_default_services
+    return get_default_services().enhanced_analyzer

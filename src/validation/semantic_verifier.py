@@ -15,15 +15,12 @@ from typing import List, Tuple, Optional, Set
 import re
 
 from ..utils.logging import get_logger
+from ..utils.nlp import get_nlp as _get_nlp
 
 logger = get_logger(__name__)
 
 # Unified POS tag set for content word extraction (used in grounding + coverage)
 CONTENT_POS_TAGS = {'NOUN', 'VERB', 'ADJ', 'ADV', 'PROPN', 'NUM'}
-
-# Lazy-loaded models
-_nli_model = None
-_nlp = None
 
 
 class _SilentCrossEncoder:
@@ -41,53 +38,54 @@ class _SilentCrossEncoder:
         return getattr(self._model, name)
 
 
+def _load_nli_model():
+    """Load the NLI CrossEncoder with full stdout/stderr/tqdm suppression.
+
+    Called once per Services container (the result is cached on
+    `Services._nli_model`). Returns None if sentence-transformers is missing.
+    """
+    try:
+        import sys
+        import os
+        import warnings
+        import logging
+        from io import StringIO
+
+        # Disable tqdm before importing sentence_transformers
+        os.environ["TQDM_DISABLE"] = "1"
+        from sentence_transformers import CrossEncoder
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            transformers_logger = logging.getLogger("transformers")
+            old_level = transformers_logger.level
+            transformers_logger.setLevel(logging.ERROR)
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout = StringIO()
+            sys.stderr = StringIO()
+            try:
+                model = CrossEncoder(
+                    "cross-encoder/nli-deberta-v3-small",
+                    max_length=512,
+                )
+                wrapped = _SilentCrossEncoder(model)
+            finally:
+                sys.stdout, sys.stderr = old_stdout, old_stderr
+                transformers_logger.setLevel(old_level)
+        logger.debug("Loaded NLI model for semantic verification")
+        return wrapped
+    except ImportError:
+        logger.warning("sentence-transformers not available for NLI")
+        return None
+
+
 def _get_nli_model():
-    """Get the NLI model, loading if necessary."""
-    global _nli_model
-    if _nli_model is None:
-        try:
-            import sys
-            import os
-            import warnings
-            import logging
-            from io import StringIO
-
-            # Disable tqdm before importing sentence_transformers
-            os.environ["TQDM_DISABLE"] = "1"
-            from sentence_transformers import CrossEncoder
-
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                transformers_logger = logging.getLogger("transformers")
-                old_level = transformers_logger.level
-                transformers_logger.setLevel(logging.ERROR)
-                old_stdout, old_stderr = sys.stdout, sys.stderr
-                sys.stdout = StringIO()
-                sys.stderr = StringIO()
-                try:
-                    model = CrossEncoder(
-                        "cross-encoder/nli-deberta-v3-small",
-                        max_length=512,
-                    )
-                    # Wrap to always suppress progress bars
-                    _nli_model = _SilentCrossEncoder(model)
-                finally:
-                    sys.stdout, sys.stderr = old_stdout, old_stderr
-                    transformers_logger.setLevel(old_level)
-            logger.debug("Loaded NLI model for semantic verification")
-        except ImportError:
-            logger.warning("sentence-transformers not available for NLI")
-            _nli_model = None
-    return _nli_model
+    """Return the shared NLI model from the default Services container."""
+    from ..services import get_default_services
+    return get_default_services().nli_model
 
 
-def _get_nlp():
-    """Get spaCy model for NLP processing."""
-    global _nlp
-    if _nlp is None:
-        from ..utils.nlp import get_nlp
-        _nlp = get_nlp()
-    return _nlp
+from ..utils.nlp import get_nlp as _get_nlp
 
 
 @dataclass
@@ -601,21 +599,17 @@ class SemanticVerifier:
         return forward, backward
 
 
-# Singleton instance
-_verifier = None
-
-
 def get_semantic_verifier(**kwargs) -> SemanticVerifier:
-    """Get or create the singleton semantic verifier.
+    """Return a SemanticVerifier.
 
-    Args:
-        **kwargs: Passed to SemanticVerifier() on first creation only.
-                  Subsequent calls return the existing instance.
+    With no kwargs, returns the shared verifier owned by the default
+    Services container. With kwargs, returns a new uncached instance
+    (the default container's verifier is not replaced).
     """
-    global _verifier
-    if _verifier is None:
-        _verifier = SemanticVerifier(**kwargs)
-    return _verifier
+    if kwargs:
+        return SemanticVerifier(**kwargs)
+    from ..services import get_default_services
+    return get_default_services().semantic_verifier
 
 
 def verify_semantic_preservation(

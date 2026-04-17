@@ -298,16 +298,17 @@ class GrammarCorrector:
             self._tool = None
 
 
-# Module singleton
-_corrector: Optional[GrammarCorrector] = None
-
-
 def get_grammar_corrector(config: Optional[GrammarCorrectorConfig] = None) -> GrammarCorrector:
-    """Get or create singleton grammar corrector instance."""
-    global _corrector
-    if _corrector is None:
-        _corrector = GrammarCorrector(config)
-    return _corrector
+    """Return a GrammarCorrector.
+
+    With no config, returns the shared corrector owned by the default
+    Services container. With an explicit config, returns a new uncached
+    instance (the default container's corrector is not replaced).
+    """
+    if config is not None:
+        return GrammarCorrector(config)
+    from ..services import get_default_services
+    return get_default_services().grammar_corrector
 
 
 def correct_grammar(text: str) -> str:

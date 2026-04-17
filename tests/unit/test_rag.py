@@ -354,6 +354,32 @@ Science is not only compatible with spirituality; it is a profound source of spi
         assert len(authors) == 2  # Deduplicated
 
 
+class TestCorpusIndexerDependencyInjection:
+    """CorpusIndexer.__init__ should accept an injected StyleAnalyzer rather
+    than constructing one directly. The default should come from the shared
+    Services container so tests can swap it without monkeypatching module
+    internals."""
+
+    def test_injected_style_analyzer_is_used(self):
+        from src.rag.corpus_indexer import CorpusIndexer
+
+        fake = object()
+        indexer = CorpusIndexer(style_analyzer=fake)  # type: ignore[arg-type]
+        assert indexer._analyzer is fake
+
+    def test_default_style_analyzer_comes_from_services_container(self):
+        """Without an explicit style_analyzer, CorpusIndexer falls back to the
+        one in the default Services container. Swapping that container (via
+        default_services) must swap the analyzer CorpusIndexer sees."""
+        from src.rag.corpus_indexer import CorpusIndexer
+        from src.services import Services, default_services
+
+        fake = object()
+        with default_services(Services(style_analyzer=fake)):
+            indexer = CorpusIndexer()
+            assert indexer._analyzer is fake
+
+
 # =============================================================================
 # Tests for EnhancedStructuralAnalyzer
 # =============================================================================
