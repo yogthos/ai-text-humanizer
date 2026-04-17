@@ -15,65 +15,77 @@ from .style_analyzer import StyleAnalyzer, StyleMetrics
 
 logger = get_logger(__name__)
 
-# Lazy-loaded modules
-_chromadb = None
-_sentence_transformer = None
+def _load_chromadb():
+    """Import and return the chromadb module. Called once per Services
+    container (cached on `Services._chromadb`)."""
+    try:
+        import chromadb
+        return chromadb
+    except ImportError:
+        raise ImportError("chromadb required. Install with: pip install chromadb")
+
+
+def _load_embedding_model():
+    """Load the shared SentenceTransformer with stdout/stderr/tqdm suppressed.
+    Called once per Services container (cached on `Services._embedding_model`)."""
+    try:
+        import sys
+        import os
+        import warnings
+        import logging
+        from io import StringIO
+
+        # Disable tqdm before importing sentence_transformers
+        os.environ["TQDM_DISABLE"] = "1"
+        from sentence_transformers import SentenceTransformer
+
+        # Suppress noisy warnings and stdout during model loading
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            st_logger = logging.getLogger("sentence_transformers")
+            tf_logger = logging.getLogger("transformers")
+            old_st_level = st_logger.level
+            old_tf_level = tf_logger.level
+            st_logger.setLevel(logging.ERROR)
+            tf_logger.setLevel(logging.ERROR)
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout = StringIO()
+            sys.stderr = StringIO()
+            try:
+                model = SentenceTransformer("all-MiniLM-L6-v2")
+            finally:
+                sys.stdout, sys.stderr = old_stdout, old_stderr
+                st_logger.setLevel(old_st_level)
+                tf_logger.setLevel(old_tf_level)
+
+        logger.debug("Loaded sentence transformer: all-MiniLM-L6-v2")
+        return model
+    except ImportError:
+        raise ImportError(
+            "sentence-transformers required. Install with: pip install sentence-transformers"
+        )
+
+
+def _default_indexer_path() -> str:
+    """Project-local default ChromaDB path."""
+    return str(Path(__file__).parent.parent.parent / "data" / "rag_index")
+
+
+def _load_default_indexer() -> "CorpusIndexer":
+    """Construct the shared default indexer pointed at the project data dir."""
+    return CorpusIndexer(_default_indexer_path())
 
 
 def get_chromadb():
-    """Lazy-load ChromaDB."""
-    global _chromadb
-    if _chromadb is None:
-        try:
-            import chromadb
-            _chromadb = chromadb
-        except ImportError:
-            raise ImportError("chromadb required. Install with: pip install chromadb")
-    return _chromadb
+    """Return the chromadb module from the default Services container."""
+    from ..services import get_default_services
+    return get_default_services().chromadb
 
 
 def get_embedding_model():
-    """Lazy-load sentence transformer model."""
-    global _sentence_transformer
-    if _sentence_transformer is None:
-        try:
-            import sys
-            import os
-            import warnings
-            import logging
-            from io import StringIO
-
-            # Disable tqdm before importing sentence_transformers
-            os.environ["TQDM_DISABLE"] = "1"
-            from sentence_transformers import SentenceTransformer
-
-            # Suppress noisy warnings and stdout during model loading
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore")
-                # Suppress sentence_transformers and transformers logging
-                st_logger = logging.getLogger("sentence_transformers")
-                tf_logger = logging.getLogger("transformers")
-                old_st_level = st_logger.level
-                old_tf_level = tf_logger.level
-                st_logger.setLevel(logging.ERROR)
-                tf_logger.setLevel(logging.ERROR)
-                # Suppress stdout/stderr (for LOAD REPORT)
-                old_stdout, old_stderr = sys.stdout, sys.stderr
-                sys.stdout = StringIO()
-                sys.stderr = StringIO()
-                try:
-                    _sentence_transformer = SentenceTransformer("all-MiniLM-L6-v2")
-                finally:
-                    sys.stdout, sys.stderr = old_stdout, old_stderr
-                    st_logger.setLevel(old_st_level)
-                    tf_logger.setLevel(old_tf_level)
-
-            logger.debug("Loaded sentence transformer: all-MiniLM-L6-v2")
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers required. Install with: pip install sentence-transformers"
-            )
-    return _sentence_transformer
+    """Return the shared SentenceTransformer from Services."""
+    from ..services import get_default_services
+    return get_default_services().embedding_model
 
 
 @dataclass
@@ -453,27 +465,14 @@ class CorpusIndexer:
         return chunks
 
 
-# Default indexer using project data directory
-_default_indexer = None
-
-
 def get_indexer(persist_dir: Optional[str] = None) -> CorpusIndexer:
-    """Get a corpus indexer.
+    """Return a CorpusIndexer.
 
-    Args:
-        persist_dir: Directory for persistence. If None, uses default.
-
-    Returns:
-        CorpusIndexer instance.
+    With no persist_dir, returns the shared indexer owned by the default
+    Services container (pointed at the project data directory). With an
+    explicit persist_dir, returns a new uncached instance.
     """
-    global _default_indexer
-
     if persist_dir is not None:
         return CorpusIndexer(persist_dir)
-
-    if _default_indexer is None:
-        # Use project's data directory by default
-        default_dir = Path(__file__).parent.parent.parent / "data" / "rag_index"
-        _default_indexer = CorpusIndexer(str(default_dir))
-
-    return _default_indexer
+    from ..services import get_default_services
+    return get_default_services().indexer

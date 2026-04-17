@@ -7,42 +7,43 @@ from .logging import get_logger
 
 logger = get_logger(__name__)
 
-# Lazy-loaded spaCy model
-_nlp = None
+def _load_spacy_nlp():
+    """Load the spaCy model, preferring the large one with word vectors.
+    Called once per Services container (cached on `Services._nlp`).
+
+    Raises:
+        RuntimeError: If spaCy is not installed.
+    """
+    try:
+        import spacy
+        # Prefer large model with word vectors, fall back to smaller models
+        models = ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"]
+        for model_name in models:
+            try:
+                nlp = spacy.load(model_name)
+                logger.info(f"Loaded spaCy model: {model_name}")
+                return nlp
+            except OSError:
+                continue
+        # No model found, download and use large model
+        logger.info("Downloading spaCy model en_core_web_lg...")
+        from spacy.cli import download
+        download("en_core_web_lg")
+        nlp = spacy.load("en_core_web_lg")
+        logger.info("Downloaded and loaded spaCy model: en_core_web_lg")
+        return nlp
+    except ImportError:
+        raise RuntimeError("spaCy is required. Install with: pip install spacy")
 
 
 def get_nlp():
-    """Get the spaCy NLP model, loading it if necessary.
-
-    Returns:
-        spaCy Language model.
+    """Return the shared spaCy model from the default Services container.
 
     Raises:
         RuntimeError: If spaCy model cannot be loaded.
     """
-    global _nlp
-    if _nlp is None:
-        try:
-            import spacy
-            # Prefer large model with word vectors, fall back to smaller models
-            models = ["en_core_web_lg", "en_core_web_md", "en_core_web_sm"]
-            for model_name in models:
-                try:
-                    _nlp = spacy.load(model_name)
-                    logger.info(f"Loaded spaCy model: {model_name}")
-                    break
-                except OSError:
-                    continue
-            else:
-                # No model found, download and use large model
-                logger.info("Downloading spaCy model en_core_web_lg...")
-                from spacy.cli import download
-                download("en_core_web_lg")
-                _nlp = spacy.load("en_core_web_lg")
-                logger.info("Downloaded and loaded spaCy model: en_core_web_lg")
-        except ImportError:
-            raise RuntimeError("spaCy is required. Install with: pip install spacy")
-    return _nlp
+    from ..services import get_default_services
+    return get_default_services().nlp
 
 
 def split_into_sentences(text: str) -> List[str]:

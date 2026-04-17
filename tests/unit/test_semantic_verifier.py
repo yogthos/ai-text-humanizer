@@ -1,7 +1,9 @@
 """Tests for semantic verifier module.
 
 Tests cover:
-- Bug 6: Singleton ignores thresholds
+- Bug 6: Singleton ignores thresholds (now: kwargs yield a new uncached
+  instance; the latent bug where subsequent kwargs were silently ignored
+  no longer applies)
 """
 
 import pytest
@@ -9,31 +11,37 @@ from unittest.mock import patch
 
 
 class TestSemanticVerifierSingleton:
-    """Tests for get_semantic_verifier singleton (Bug 6)."""
+    """Tests for get_semantic_verifier backed by the Services container."""
 
     def setup_method(self):
-        """Reset singleton before each test."""
-        import src.validation.semantic_verifier as sv
-        sv._verifier = None
+        """Swap the default Services container for test isolation."""
+        from src.services import Services, get_default_services, set_default_services
+        self._original_services = get_default_services()
+        set_default_services(Services())
 
-    def test_singleton_with_custom_threshold(self):
-        """Singleton should accept and store custom kwargs."""
+    def teardown_method(self):
+        from src.services import set_default_services
+        set_default_services(self._original_services)
+
+    def test_kwargs_yield_requested_threshold(self):
+        """get_semantic_verifier(**kwargs) returns an instance configured with kwargs."""
         from src.validation.semantic_verifier import get_semantic_verifier
 
         verifier = get_semantic_verifier(grounding_threshold=0.8)
         assert verifier.grounding_threshold == 0.8
 
-    def test_singleton_ignores_subsequent_kwargs(self):
-        """Second call should return existing instance, ignoring new kwargs."""
+    def test_kwargs_yield_new_uncached_instance(self):
+        """Different kwargs produce different instances — no silent reuse."""
         from src.validation.semantic_verifier import get_semantic_verifier
 
         v1 = get_semantic_verifier(grounding_threshold=0.8)
         v2 = get_semantic_verifier(grounding_threshold=0.5)
-        assert v1 is v2
-        assert v2.grounding_threshold == 0.8  # First value wins
+        assert v1 is not v2
+        assert v1.grounding_threshold == 0.8
+        assert v2.grounding_threshold == 0.5
 
-    def test_singleton_returns_same_instance(self):
-        """Multiple calls should return the same instance."""
+    def test_no_kwargs_returns_shared_services_instance(self):
+        """Calls without kwargs return the shared Services verifier."""
         from src.validation.semantic_verifier import get_semantic_verifier
 
         v1 = get_semantic_verifier()
@@ -145,9 +153,14 @@ class TestUnusedEntailmentThreshold:
     The grounding check at line 365 uses grounding_threshold instead."""
 
     def setup_method(self):
-        """Reset singleton."""
-        import src.validation.semantic_verifier as sv
-        sv._verifier = None
+        """Swap default Services for test isolation."""
+        from src.services import Services, get_default_services, set_default_services
+        self._original_services = get_default_services()
+        set_default_services(Services())
+
+    def teardown_method(self):
+        from src.services import set_default_services
+        set_default_services(self._original_services)
 
     def test_entailment_threshold_not_dead_code(self):
         """entailment_threshold should be used in the verifier, not just stored."""

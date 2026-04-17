@@ -174,16 +174,10 @@ class StyleAnalyzer:
         return [self.analyze(text) for text in texts]
 
 
-# Module-level singleton for convenience
-_analyzer = None
-
-
 def get_style_analyzer() -> StyleAnalyzer:
-    """Get the singleton style analyzer."""
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = StyleAnalyzer()
-    return _analyzer
+    """Return the shared StyleAnalyzer from the default Services container."""
+    from ..services import get_default_services
+    return get_default_services().style_analyzer
 
 
 def analyze_style(text: str) -> StyleMetrics:

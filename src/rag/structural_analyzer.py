@@ -276,16 +276,10 @@ class StructuralAnalyzer:
         )
 
 
-# Module singleton
-_analyzer = None
-
-
 def get_structural_analyzer() -> StructuralAnalyzer:
-    """Get the structural analyzer singleton."""
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = StructuralAnalyzer()
-    return _analyzer
+    """Return the shared StructuralAnalyzer from the default Services container."""
+    from ..services import get_default_services
+    return get_default_services().structural_analyzer
 
 
 def extract_rhythm_instruction(text: str) -> str:

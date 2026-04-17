@@ -11,9 +11,12 @@ Pipeline:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Callable, Tuple
+from typing import List, Optional, Callable, Tuple, TYPE_CHECKING
 import re
 import time
+
+if TYPE_CHECKING:
+    from ..services import Services
 
 from .lora_generator import AdapterSpec
 from .base_generator import GenerationConfig
@@ -205,6 +208,7 @@ class StyleTransfer:
         checkpoint: Optional[str] = None,
         adapters: Optional[List[AdapterSpec]] = None,
         fused_models: Optional[List[str]] = None,
+        services: Optional["Services"] = None,
     ):
         """Initialize the fast transfer pipeline.
 
@@ -217,10 +221,17 @@ class StyleTransfer:
             checkpoint: Specific checkpoint file to use (e.g., "0000600_adapters.safetensors").
             adapters: List of AdapterSpec for multiple adapters. If provided, adapter_path is ignored.
             fused_models: List of fused model paths to use directly (no adapter needed).
+            services: Optional Services container for dependency injection. If
+                None, the process-wide default from get_default_services() is used.
         """
         self.config = config or TransferConfig()
         self.author = author_name
         self.verify_fn = verify_fn
+
+        if services is None:
+            from ..services import get_default_services
+            services = get_default_services()
+        self.services = services
 
         # Convert string provider name to actual LLMProvider object if needed
         if isinstance(critic_provider, str):
@@ -807,9 +818,7 @@ class StyleTransfer:
         Returns ratio of input content words found in output.
         Low overlap suggests memorized/hallucinated output.
         """
-        from ..utils.nlp import get_nlp
-
-        nlp = get_nlp()
+        nlp = self.services.nlp
 
         def get_content_words(text: str) -> set:
             """Extract lemmatized content words using spaCy."""

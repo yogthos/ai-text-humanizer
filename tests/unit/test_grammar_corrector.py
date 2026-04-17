@@ -288,29 +288,33 @@ class TestModuleFunctions:
     """Tests for module-level convenience functions."""
 
     def test_get_grammar_corrector_singleton(self):
-        """Test that get_grammar_corrector returns singleton."""
+        """get_grammar_corrector() returns the same corrector across calls,
+        now backed by the default Services container."""
+        from src.services import Services, get_default_services, set_default_services
         from src.vocabulary.grammar_corrector import get_grammar_corrector
 
-        # Reset singleton
-        import src.vocabulary.grammar_corrector as module
-        module._corrector = None
-
-        c1 = get_grammar_corrector()
-        c2 = get_grammar_corrector()
-
-        assert c1 is c2
+        original = get_default_services()
+        try:
+            set_default_services(Services())  # fresh container for isolation
+            c1 = get_grammar_corrector()
+            c2 = get_grammar_corrector()
+            assert c1 is c2
+        finally:
+            set_default_services(original)
 
     def test_correct_grammar_function(self):
         """Test the convenience correct_grammar function."""
+        from src.services import Services, get_default_services, set_default_services
         from src.vocabulary.grammar_corrector import correct_grammar
 
-        # Reset singleton
-        import src.vocabulary.grammar_corrector as module
-        module._corrector = None
-
-        # Just verify it doesn't crash (LanguageTool may not be installed)
-        result = correct_grammar("This is a test.")
-        assert isinstance(result, str)
+        original = get_default_services()
+        try:
+            set_default_services(Services())
+            # Just verify it doesn't crash (LanguageTool may not be installed)
+            result = correct_grammar("This is a test.")
+            assert isinstance(result, str)
+        finally:
+            set_default_services(original)
 
 
 class TestDefaultSkipLists:
