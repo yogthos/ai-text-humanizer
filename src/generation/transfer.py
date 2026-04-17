@@ -18,7 +18,7 @@ import time
 from .lora_generator import AdapterSpec
 from .base_generator import GenerationConfig
 from .factory import create_style_generator
-from ..config import FusedModelConfig, get_adapter_config, get_fused_model_config
+from ..config import ModelConfig, get_adapter_config, get_fused_model_config
 from ..utils.nlp import (
     split_into_paragraphs,
     split_into_sentences,
@@ -57,7 +57,7 @@ logger = get_logger(__name__)
 
 
 def _apply_fused_model_overrides(
-    transfer_config: "TransferConfig", fused_cfg: FusedModelConfig
+    transfer_config: "TransferConfig", fused_cfg: ModelConfig
 ) -> None:
     """Apply per-fused-model overrides to a TransferConfig in place.
 
@@ -94,10 +94,10 @@ def _apply_fused_model_overrides(
 class TransferConfig:
     """Configuration for style transfer."""
 
-    # Generation settings
-    max_tokens: int = 512
-    temperature: Optional[float] = None  # None = use lora config, float = CLI override
-    top_p: float = 0.9
+    # Temperature override from CLI (None = use per-adapter/model config).
+    # Other sampling params (max_tokens, top_p, min_p, repetition_penalty)
+    # live on GenerationConfig and are driven by the model entry in config.json.
+    temperature: Optional[float] = None
 
     # Semantic fidelity validation (single DeepSeek call replaces NLI + repair + grammar + repetition)
     verify_semantic_fidelity: bool = True

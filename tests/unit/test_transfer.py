@@ -26,10 +26,24 @@ class TestTransferConfig:
 
         config = TransferConfig()
 
-        assert config.max_tokens == 512
         assert config.temperature is None  # None means use lora config
-        assert config.top_p == 0.9
         assert config.verify_semantic_fidelity is True
+
+    def test_sampling_params_live_on_generation_config_not_transfer(self):
+        """max_tokens / top_p belong on GenerationConfig. TransferConfig used to
+        carry parallel unused copies — C5 removed them. Regression guard so
+        they can't sneak back in."""
+        from src.generation.transfer import TransferConfig
+
+        config = TransferConfig()
+        assert not hasattr(config, "max_tokens"), (
+            "TransferConfig.max_tokens was unused dead weight; "
+            "sampling params live on GenerationConfig only."
+        )
+        assert not hasattr(config, "top_p"), (
+            "TransferConfig.top_p was unused dead weight; "
+            "sampling params live on GenerationConfig only."
+        )
 
     def test_custom_values(self):
         """Test that custom values are applied."""

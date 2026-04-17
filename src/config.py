@@ -64,25 +64,47 @@ class LLMConfig:
 
 
 @dataclass
-class FusedModelConfig:
-    """Configuration for a fused (LoRA merged into base) model.
+class ModelConfig:
+    """Unified configuration for a generation model (LoRA adapter OR fused model).
 
-    These settings apply when using a standalone model without an adapter.
+    Both kinds of entries share almost every field. LoRA-specific options
+    (scale, backend, quantization, hf_adapter_path) sit at defaults for fused
+    usage. `author` is only meaningful for fused entries.
     """
 
     enabled: bool = True
-    author: str = ""
+
+    # Sampling
     temperature: float = 0.6
     top_p: float = 0.92
     min_p: float = 0.05
     repetition_penalty: float = 1.15
     max_tokens: int = 512
+
+    # Persona / output shaping
     worldview: str = ""
     fiction_markers: List[str] = field(default_factory=list)
     expand_for_texture: Optional[bool] = None
     perspective: Optional[str] = None
     verify_entailment: Optional[bool] = None
     merge_paragraphs: Optional[int] = None
+
+    # LoRA-only
+    scale: float = 1.0
+    checkpoint: Optional[str] = None
+    backend: str = "auto"
+    device: str = "auto"
+    load_in_4bit: bool = True
+    load_in_8bit: bool = False
+    hf_adapter_path: Optional[str] = None
+
+    # Fused-only
+    author: str = ""
+
+
+# Backwards-compat aliases — both old names resolve to the unified class.
+LoRAAdapterConfig = ModelConfig
+FusedModelConfig = ModelConfig
 
 
 @dataclass
@@ -102,10 +124,10 @@ class GenerationConfig:
     use_adapter: bool = True
 
     # Fused model settings (path -> config mapping)
-    models: Dict[str, "FusedModelConfig"] = field(default_factory=dict)
+    models: Dict[str, "ModelConfig"] = field(default_factory=dict)
 
     # LoRA adapter settings (path -> config mapping)
-    lora_adapters: Dict[str, "LoRAAdapterConfig"] = field(default_factory=dict)
+    lora_adapters: Dict[str, "ModelConfig"] = field(default_factory=dict)
 
     # Neutralization settings
     skip_neutralization: bool = (
@@ -129,48 +151,6 @@ class GenerationConfig:
     use_persona: bool = True  # Enable persona-based prompting
     apply_input_perturbation: bool = (
         True  # Apply 8% noise to match training distribution
-    )
-
-
-@dataclass
-class LoRAAdapterConfig:
-    """Configuration for a specific LoRA adapter.
-
-    These settings control the balance between style strength and coherence.
-    Each adapter in lora_adapters can have its own settings.
-    """
-
-    enabled: bool = True  # Whether this adapter is active
-    scale: float = 1.0  # Adapter influence (0.0=base only, 1.0=full, >1.0=amplified)
-    temperature: float = 0.6  # Higher = more creative, lower = more coherent
-    top_p: float = 0.92  # Nucleus sampling threshold
-    min_p: float = 0.05  # Minimum probability filter
-    repetition_penalty: float = 1.15  # Penalty for repeating tokens
-    max_tokens: int = 512  # Maximum tokens to generate
-    worldview: str = ""  # Author worldview prompt file
-    fiction_markers: List[str] = field(
-        default_factory=list
-    )  # Fiction markers to filter from output
-    checkpoint: Optional[str] = None  # Specific checkpoint to use
-    # Backend configuration
-    backend: str = "auto"  # "auto", "mlx", or "pytorch"
-    device: str = "auto"  # Device for PyTorch: "auto", "cuda", "cpu", "mps"
-    load_in_4bit: bool = True  # Use 4-bit quantization (PyTorch with CUDA only)
-    load_in_8bit: bool = False  # Use 8-bit quantization (PyTorch with CUDA only)
-    hf_adapter_path: Optional[str] = (
-        None  # HuggingFace adapter path (if different from local)
-    )
-    expand_for_texture: Optional[bool] = (
-        None  # Per-adapter override for texture expansion (None = use global)
-    )
-    perspective: Optional[str] = (
-        None  # Per-adapter perspective override (None = use global)
-    )
-    verify_entailment: Optional[bool] = (
-        None  # Per-adapter verification override (None = use global/CLI)
-    )
-    merge_paragraphs: Optional[int] = (
-        None  # Merge short paragraphs to reach this minimum word count before LoRA
     )
 
 
@@ -250,7 +230,7 @@ def _parse_llm_provider_config(data: Dict) -> LLMProviderConfig:
     )
 
 
-_KNOWN_ADAPTER_FIELDS = {
+_KNOWN_MODEL_FIELDS = {
     "enabled",
     "scale",
     "temperature",
@@ -270,21 +250,26 @@ _KNOWN_ADAPTER_FIELDS = {
     "perspective",
     "verify_entailment",
     "merge_paragraphs",
+    "author",
 }
 
 
-def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
-    """Parse LoRA adapter configuration from dict."""
+def _parse_model_config(data: Dict) -> ModelConfig:
+    """Parse a model/adapter configuration dict into ModelConfig.
+
+    Handles entries from both `generation.models` (fused) and
+    `generation.lora_adapters` — the shape is identical modulo defaults.
+    """
     unknown_fields = {
         k for k in data.keys()
-        if k not in _KNOWN_ADAPTER_FIELDS and not k.startswith("_")
+        if k not in _KNOWN_MODEL_FIELDS and not k.startswith("_")
     }
     if unknown_fields:
         logger.warning(
-            f"Unknown adapter config fields (ignored): {', '.join(sorted(unknown_fields))}"
+            f"Unknown model config fields (ignored): {', '.join(sorted(unknown_fields))}"
         )
 
-    return LoRAAdapterConfig(
+    return ModelConfig(
         enabled=data.get("enabled", True),
         scale=data.get("scale", 1.0),
         temperature=data.get("temperature", 0.6),
@@ -295,7 +280,6 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         worldview=data.get("worldview", ""),
         fiction_markers=data.get("fiction_markers", []),
         checkpoint=data.get("checkpoint"),
-        # Backend configuration
         backend=data.get("backend", "auto"),
         device=data.get("device", "auto"),
         load_in_4bit=data.get("load_in_4bit", True),
@@ -305,75 +289,31 @@ def _parse_lora_adapter_config(data: Dict) -> LoRAAdapterConfig:
         perspective=data.get("perspective"),
         verify_entailment=data.get("verify_entailment"),
         merge_paragraphs=data.get("merge_paragraphs"),
-    )
-
-
-_KNOWN_MODEL_FIELDS = {
-    "enabled",
-    "author",
-    "temperature",
-    "top_p",
-    "min_p",
-    "repetition_penalty",
-    "max_tokens",
-    "worldview",
-    "fiction_markers",
-    "expand_for_texture",
-    "perspective",
-    "verify_entailment",
-    "merge_paragraphs",
-}
-
-
-def _parse_fused_model_config(data: Dict) -> FusedModelConfig:
-    """Parse fused model configuration from dict."""
-    unknown_fields = {
-        k for k in data.keys()
-        if k not in _KNOWN_MODEL_FIELDS and not k.startswith("_")
-    }
-    if unknown_fields:
-        logger.warning(
-            f"Unknown fused-model config fields (ignored): {', '.join(sorted(unknown_fields))}"
-        )
-    return FusedModelConfig(
-        enabled=data.get("enabled", True),
         author=data.get("author", ""),
-        temperature=data.get("temperature", 0.6),
-        top_p=data.get("top_p", 0.92),
-        min_p=data.get("min_p", 0.05),
-        repetition_penalty=data.get("repetition_penalty", 1.15),
-        max_tokens=data.get("max_tokens", 512),
-        worldview=data.get("worldview", ""),
-        fiction_markers=data.get("fiction_markers", []),
-        expand_for_texture=data.get("expand_for_texture"),
-        perspective=data.get("perspective"),
-        verify_entailment=data.get("verify_entailment"),
-        merge_paragraphs=data.get("merge_paragraphs"),
     )
 
 
-def _parse_fused_models(data: Dict) -> Dict[str, FusedModelConfig]:
-    """Parse models section into typed configs."""
+def _parse_fused_models(data: Dict) -> Dict[str, ModelConfig]:
+    """Parse the `generation.models` section into ModelConfig entries."""
     result = {}
     for path, value in data.items():
         if isinstance(value, dict):
-            result[path] = _parse_fused_model_config(value)
+            result[path] = _parse_model_config(value)
     return result
 
 
-def _parse_lora_adapters(data: Dict) -> Dict[str, LoRAAdapterConfig]:
-    """Parse lora_adapters section into typed configs.
+def _parse_lora_adapters(data: Dict) -> Dict[str, ModelConfig]:
+    """Parse `generation.lora_adapters` into ModelConfig entries.
 
-    Handles both old format (path -> scale) and new format (path -> config dict).
+    Supports the legacy `path -> scale` shorthand alongside full dict form.
     """
     result = {}
     for path, value in data.items():
         if isinstance(value, dict):
-            # New format: full config dict
-            result[path] = _parse_lora_adapter_config(value)
+            result[path] = _parse_model_config(value)
         else:
-            # Old format: just a scale number
-            result[path] = LoRAAdapterConfig(scale=float(value))
+            # Legacy shorthand: just a scale number.
+            result[path] = ModelConfig(scale=float(value))
     return result
 
 
@@ -524,17 +464,17 @@ def create_default_config() -> Dict:
     }
 
 
-def get_adapter_config(adapter_path: Optional[str] = None) -> LoRAAdapterConfig:
+def get_adapter_config(adapter_path: Optional[str] = None) -> ModelConfig:
     """Get LoRA adapter config for a specific adapter path.
 
     Args:
         adapter_path: Path to the adapter directory. If None, returns defaults.
 
     Returns:
-        LoRAAdapterConfig for the adapter, or defaults if not found.
+        ModelConfig for the adapter, or defaults if not found.
     """
     if not adapter_path:
-        return LoRAAdapterConfig()
+        return ModelConfig()
 
     try:
         config = load_config()
@@ -555,10 +495,10 @@ def get_adapter_config(adapter_path: Optional[str] = None) -> LoRAAdapterConfig:
     except Exception as e:
         logger.debug(f"Could not load adapter config: {e}")
 
-    return LoRAAdapterConfig()
+    return ModelConfig()
 
 
-def get_fused_model_config(model_path: Optional[str] = None) -> FusedModelConfig:
+def get_fused_model_config(model_path: Optional[str] = None) -> ModelConfig:
     """Get fused-model config for a specific model path.
 
     Mirrors get_adapter_config for the `generation.models` section.
@@ -567,10 +507,10 @@ def get_fused_model_config(model_path: Optional[str] = None) -> FusedModelConfig
         model_path: Path to the fused model directory. If None, returns defaults.
 
     Returns:
-        FusedModelConfig for the model, or defaults if not found.
+        ModelConfig for the model, or defaults if not found.
     """
     if not model_path:
-        return FusedModelConfig()
+        return ModelConfig()
 
     try:
         config = load_config()
@@ -587,4 +527,4 @@ def get_fused_model_config(model_path: Optional[str] = None) -> FusedModelConfig
     except Exception as e:
         logger.debug(f"Could not load fused model config: {e}")
 
-    return FusedModelConfig()
+    return ModelConfig()
