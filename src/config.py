@@ -78,6 +78,7 @@ class FusedModelConfig:
     repetition_penalty: float = 1.15
     max_tokens: int = 512
     worldview: str = ""
+    fiction_markers: List[str] = field(default_factory=list)
     expand_for_texture: Optional[bool] = None
     perspective: Optional[str] = None
     verify_entailment: Optional[bool] = None
@@ -112,9 +113,6 @@ class GenerationConfig:
     )
 
     # Document handling
-    use_document_context: bool = (
-        False  # Extract document-level context (disabled: extracted but never used)
-    )
     pass_headings_unchanged: bool = True  # Don't transform headings
     min_paragraph_words: int = 10  # Skip paragraphs shorter than this
 
@@ -319,6 +317,7 @@ _KNOWN_MODEL_FIELDS = {
     "repetition_penalty",
     "max_tokens",
     "worldview",
+    "fiction_markers",
     "expand_for_texture",
     "perspective",
     "verify_entailment",
@@ -345,6 +344,7 @@ def _parse_fused_model_config(data: Dict) -> FusedModelConfig:
         repetition_penalty=data.get("repetition_penalty", 1.15),
         max_tokens=data.get("max_tokens", 512),
         worldview=data.get("worldview", ""),
+        fiction_markers=data.get("fiction_markers", []),
         expand_for_texture=data.get("expand_for_texture"),
         perspective=data.get("perspective"),
         verify_entailment=data.get("verify_entailment"),
@@ -453,7 +453,6 @@ def load_config(config_path: str = "config.json") -> Config:
             models=_parse_fused_models(gen.get("models", {})),
             lora_adapters=_parse_lora_adapters(gen.get("lora_adapters", {})),
             skip_neutralization=gen.get("skip_neutralization", False),
-            use_document_context=gen.get("use_document_context", False),
             pass_headings_unchanged=gen.get("pass_headings_unchanged", True),
             min_paragraph_words=gen.get("min_paragraph_words", 10),
             use_structural_rag=gen.get("use_structural_rag", True),

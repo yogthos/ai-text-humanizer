@@ -173,7 +173,135 @@ class MLXGenerator:
         logger.info("Model unloaded")
 
 
-class RTTNeutralizer:
+class BaseRTTNeutralizer:
+    """Shared logic for RTT neutralizers (entity masking + monotone flattening).
+
+    Subclasses implement the translation step: MLX does local English→Mandarin→English,
+    DeepSeek does a single API call with an equivalent prompt. Everything before and
+    after translation — entity preservation and sentence flattening — lives here.
+    """
+
+    # Common English words that look like proper nouns after capitalization at a
+    # sentence boundary. Skipping them prevents mangling ordinary text.
+    _SKIP_WORDS = frozenset({
+        'The', 'A', 'An', 'In', 'On', 'At', 'To', 'For', 'And', 'But', 'Or',
+        'It', 'He', 'She', 'They', 'We', 'I', 'My', 'His', 'Her', 'Their',
+        'This', 'That', 'These', 'Those', 'What', 'When', 'Where', 'Who',
+        'How', 'Why', 'If', 'Then', 'Now', 'Here', 'There', 'So', 'Yet',
+        'From', 'With', 'Into', 'Upon', 'Through', 'About', 'After', 'Before',
+        'During', 'Within', 'Without', 'Between', 'Among', 'Against', 'Beyond',
+        'Such', 'Each', 'Every', 'Some', 'Many', 'Most', 'Other', 'Another',
+        'Both', 'All', 'Any', 'No', 'Not', 'Only', 'Just', 'Even', 'Still',
+        'Already', 'Always', 'Never', 'Perhaps', 'Indeed', 'Thus', 'Hence',
+        'Therefore', 'Moreover', 'Furthermore', 'Meanwhile', 'Otherwise',
+        'Nonetheless', 'Nevertheless', 'However', 'Although', 'Though', 'While',
+        'Because', 'Since', 'Unless', 'Until', 'Whether', 'Whenever', 'Wherever',
+        'One', 'Two', 'Three', 'Four', 'Five', 'First', 'Second', 'Third',
+    })
+
+    def _extract_entities(self, text: str) -> tuple:
+        """Mask proper nouns with __ENT{n}__ placeholders.
+
+        Preserves names like "Jervas Dudley", "New England", "Squire Brewster"
+        through the RTT process so they survive translation.
+
+        Returns:
+            (masked_text, entity_map) where entity_map is {placeholder: original}
+        """
+        import re
+
+        entity_map: dict = {}
+        counter = [0]
+
+        def make_replacer():
+            def replace_entity(match):
+                word = match.group(1).strip()
+                if not word or word in self._SKIP_WORDS:
+                    return match.group(0)
+                if word.startswith('__ENT'):
+                    return match.group(0)
+                placeholder = f"__ENT{counter[0]}__"
+                entity_map[placeholder] = word
+                counter[0] += 1
+                prefix = match.group(0)[:-len(word)] if match.group(0).endswith(word) else ''
+                return prefix + placeholder
+            return replace_entity
+
+        masked = text
+
+        # Multi-word proper nouns (2-3 consecutive capitalized words)
+        masked = re.sub(
+            r'(?:^|(?<=[.!?,;:\s"\'(]))([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=[\s.,;:!?\'")\-]|$)',
+            make_replacer(),
+            masked
+        )
+
+        # Single capitalized words (only mid-sentence, not sentence-initial).
+        masked = re.sub(
+            r'(?<=[,;:\s"\'(])([A-Z][a-z]{2,})(?=[\s.,;:!?\'")\-]|$)',
+            make_replacer(),
+            masked
+        )
+
+        return masked, entity_map
+
+    def _restore_entities(self, text: str, entity_map: dict) -> str:
+        """Restore original entities from __ENT{n}__ placeholders."""
+        result = text
+        for placeholder, original in entity_map.items():
+            result = result.replace(placeholder, original)
+        return result
+
+    def _monotone_flatten(self, text: str) -> str:
+        """Flatten text into uniform short sentences (rule-based, no LLM).
+
+        Creates "The Monotone" — boring, repetitive input that maximizes delta
+        from the stylized output. Breaks at sentence boundaries, semicolons,
+        em-dashes, and conjunctions when sentences exceed 15 words. Targets
+        8-15 words per output sentence.
+        """
+        import re
+
+        # Remove parentheticals
+        text = re.sub(r'\([^)]*\)', '', text)
+        text = re.sub(r'—[^—]*—', '', text)
+
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        result = []
+
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+
+            parts = re.split(r'\s*;\s*', sent)
+
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+
+                words = part.split()
+                if len(words) > 15:
+                    conj_pattern = r'\s*,?\s*\b(and|but|or|yet|so|however|although|while|whereas)\b\s*'
+                    sub_parts = re.split(conj_pattern, part, flags=re.IGNORECASE)
+                    for sub in sub_parts:
+                        sub = sub.strip(' ,')
+                        if sub and len(sub.split()) >= 3 and sub.lower() not in ['and', 'but', 'or', 'yet', 'so', 'however', 'although', 'while', 'whereas']:
+                            if not sub.endswith(('.', '!', '?')):
+                                sub += '.'
+                            sub = sub[0].upper() + sub[1:] if len(sub) > 1 else sub.upper()
+                            result.append(sub)
+                else:
+                    if not part.endswith(('.', '!', '?')):
+                        part += '.'
+                    part = part[0].upper() + part[1:] if len(part) > 1 else part.upper()
+                    result.append(part)
+
+        return ' '.join(result) if result else text
+
+
+class RTTNeutralizer(BaseRTTNeutralizer):
     """Round-Trip Translation neutralizer using local MLX model.
 
     Uses Qwen2.5-3B-Instruct for English → Mandarin → English translation
@@ -270,81 +398,6 @@ class RTTNeutralizer:
         )
 
         return response.strip()
-
-    def _extract_entities(self, text: str) -> tuple:
-        """Extract proper nouns and replace with placeholders.
-
-        Preserves names like "Jervas Dudley", "New England", "Squire Brewster"
-        through the RTT process by replacing them with __ENT0__, __ENT1__, etc.
-
-        Returns:
-            (masked_text, entity_map) where entity_map is {placeholder: original}
-        """
-        import re
-
-        entity_map = {}
-        counter = [0]  # Use list to allow mutation in nested function
-
-        # Common words that shouldn't be treated as proper nouns
-        skip_words = {
-            'The', 'A', 'An', 'In', 'On', 'At', 'To', 'For', 'And', 'But', 'Or',
-            'It', 'He', 'She', 'They', 'We', 'I', 'My', 'His', 'Her', 'Their',
-            'This', 'That', 'These', 'Those', 'What', 'When', 'Where', 'Who',
-            'How', 'Why', 'If', 'Then', 'Now', 'Here', 'There', 'So', 'Yet',
-            'From', 'With', 'Into', 'Upon', 'Through', 'About', 'After', 'Before',
-            'During', 'Within', 'Without', 'Between', 'Among', 'Against', 'Beyond',
-            'Such', 'Each', 'Every', 'Some', 'Many', 'Most', 'Other', 'Another',
-            'Both', 'All', 'Any', 'No', 'Not', 'Only', 'Just', 'Even', 'Still',
-            'Already', 'Always', 'Never', 'Perhaps', 'Indeed', 'Thus', 'Hence',
-            'Therefore', 'Moreover', 'Furthermore', 'Meanwhile', 'Otherwise',
-            'Nonetheless', 'Nevertheless', 'However', 'Although', 'Though', 'While',
-            'Because', 'Since', 'Unless', 'Until', 'Whether', 'Whenever', 'Wherever',
-            'One', 'Two', 'Three', 'Four', 'Five', 'First', 'Second', 'Third',
-        }
-
-        def make_replacer():
-            """Create a replacer function that tracks what it's seen."""
-            def replace_entity(match):
-                word = match.group(1).strip()
-                if not word or word in skip_words:
-                    return match.group(0)  # Keep original including any prefix
-                # Check if already masked
-                if word.startswith('__ENT'):
-                    return match.group(0)
-                placeholder = f"__ENT{counter[0]}__"
-                entity_map[placeholder] = word
-                counter[0] += 1
-                # Preserve any whitespace/punctuation before the word
-                prefix = match.group(0)[:-len(word)] if match.group(0).endswith(word) else ''
-                return prefix + placeholder
-            return replace_entity
-
-        masked = text
-
-        # Pattern 1: Multi-word proper nouns (2-3 consecutive capitalized words)
-        # Matches: "Jervas Dudley", "New England", "Squire Brewster Hyde"
-        masked = re.sub(
-            r'(?:^|(?<=[.!?,;:\s"\'(]))([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=[\s.,;:!?\'")\-]|$)',
-            make_replacer(),
-            masked
-        )
-
-        # Pattern 2: Single capitalized words (but not at sentence start unless clearly a name)
-        # More conservative - only after certain punctuation that suggests mid-sentence
-        masked = re.sub(
-            r'(?<=[,;:\s"\'(])([A-Z][a-z]{2,})(?=[\s.,;:!?\'")\-]|$)',
-            make_replacer(),
-            masked
-        )
-
-        return masked, entity_map
-
-    def _restore_entities(self, text: str, entity_map: dict) -> str:
-        """Restore original entities from placeholders."""
-        result = text
-        for placeholder, original in entity_map.items():
-            result = result.replace(placeholder, original)
-        return result
 
     def neutralize(
         self,
@@ -588,69 +641,7 @@ class RTTNeutralizer:
 
         return combined
 
-    def _monotone_flatten(self, text: str) -> str:
-        """Flatten text into uniform short sentences using rules (fast, no LLM).
-
-        This creates "The Monotone" - boring, repetitive input that maximizes
-        the delta from the stylized output. The model learns its job is to
-        break this monotony.
-
-        Rules applied:
-        - Split on sentence boundaries
-        - Break at conjunctions (and, but, or, yet, so)
-        - Break at semicolons and em-dashes
-        - Remove parentheticals
-        - Target 8-15 words per sentence
-        """
-        import re
-
-        # Remove parentheticals
-        text = re.sub(r'\([^)]*\)', '', text)
-        text = re.sub(r'—[^—]*—', '', text)
-
-        # Split on sentence boundaries
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-
-        result = []
-        for sent in sentences:
-            sent = sent.strip()
-            if not sent:
-                continue
-
-            # Break on semicolons
-            parts = re.split(r'\s*;\s*', sent)
-
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-
-                # Break on conjunctions if sentence is long
-                words = part.split()
-                if len(words) > 15:
-                    # Split at conjunctions
-                    conj_pattern = r'\s*,?\s*\b(and|but|or|yet|so|however|although|while|whereas)\b\s*'
-                    sub_parts = re.split(conj_pattern, part, flags=re.IGNORECASE)
-                    for sub in sub_parts:
-                        sub = sub.strip(' ,')
-                        if sub and len(sub.split()) >= 3 and sub.lower() not in ['and', 'but', 'or', 'yet', 'so', 'however', 'although', 'while', 'whereas']:
-                            # Ensure ends with period
-                            if not sub.endswith(('.', '!', '?')):
-                                sub += '.'
-                            # Capitalize first letter
-                            sub = sub[0].upper() + sub[1:] if len(sub) > 1 else sub.upper()
-                            result.append(sub)
-                else:
-                    # Short enough, keep as is
-                    if not part.endswith(('.', '!', '?')):
-                        part += '.'
-                    part = part[0].upper() + part[1:] if len(part) > 1 else part.upper()
-                    result.append(part)
-
-        return ' '.join(result) if result else text
-
-
-class DeepSeekRTTNeutralizer:
+class DeepSeekRTTNeutralizer(BaseRTTNeutralizer):
     """Round-Trip Translation neutralizer using DeepSeek API.
 
     Faster than local MLX for bulk processing. Supports batching multiple
@@ -666,12 +657,13 @@ class DeepSeekRTTNeutralizer:
             batch_size: Number of texts to process in a single API call.
         """
         import os
-        import requests
+        from ..config import LLMProviderConfig
+        from .deepseek import DeepSeekProvider
 
         # Load config
         config_path = Path(__file__).parent.parent.parent / "config.json"
-        rtt_config = {}
-        deepseek_config = {}
+        rtt_config: dict = {}
+        deepseek_config: dict = {}
         if config_path.exists():
             try:
                 with open(config_path) as f:
@@ -681,21 +673,16 @@ class DeepSeekRTTNeutralizer:
             except Exception as e:
                 logger.warning(f"Failed to load config.json: {e}")
 
-        # Get API key: try config first (with env var expansion), then direct env
-        self.api_key = None
+        # Resolve API key: config ${VAR} or literal, then env var fallback.
+        api_key = ""
         config_api_key = deepseek_config.get("api_key", "")
         if config_api_key.startswith("${") and config_api_key.endswith("}"):
-            # Expand ${VAR} syntax
-            env_var = config_api_key[2:-1]
-            self.api_key = os.environ.get(env_var, "")
+            api_key = os.environ.get(config_api_key[2:-1], "")
         elif config_api_key:
-            self.api_key = config_api_key
-
-        # Fallback to direct env var
-        if not self.api_key:
-            self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-
-        if not self.api_key:
+            api_key = config_api_key
+        if not api_key:
+            api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
             raise ValueError(
                 "DEEPSEEK_API_KEY not found. Set it in config.json or as environment variable."
             )
@@ -704,153 +691,32 @@ class DeepSeekRTTNeutralizer:
         self.max_tokens = rtt_config.get("max_tokens", 8192)
         self.temperature = rtt_config.get("temperature", 0.1)
         self.batch_size = batch_size or rtt_config.get("batch_size", 5)
-        self.timeout = rtt_config.get("timeout", 180)
         self.concurrent_batches = rtt_config.get("concurrent_batches", 4)
 
-        self.base_url = "https://api.deepseek.com/v1/chat/completions"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        # Route HTTP + retry + error handling through the standard DeepSeek provider
+        # so this class owns RTT logic only (entity masking, Chinese detection, monotone
+        # flattening, batch parsing) and stays out of the HTTP business.
+        self._provider = DeepSeekProvider(
+            LLMProviderConfig(
+                api_key=api_key,
+                base_url="https://api.deepseek.com",
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                timeout=rtt_config.get("timeout", 180),
+            )
+        )
 
         logger.debug(f"DeepSeek RTT: model={self.model}, batch_size={self.batch_size}, concurrent={self.concurrent_batches}")
 
-    def _call_api(self, system: str, user: str, max_tokens: int = None) -> str:
-        """Make a single API call to DeepSeek."""
-        import requests
-
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            "temperature": self.temperature,
-            "max_tokens": max_tokens or self.max_tokens,
-        }
-
-        response = requests.post(
-            self.base_url,
-            headers=self.headers,
-            json=payload,
-            timeout=self.timeout
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(f"DeepSeek API error: {response.status_code} - {response.text[:200]}")
-
-        try:
-            data = response.json()
-        except ValueError as e:
-            raise RuntimeError(f"Invalid JSON in DeepSeek RTT response: {e}")
-        return data["choices"][0]["message"]["content"].strip()
-
-    def _extract_entities(self, text: str) -> tuple:
-        """Extract proper nouns and replace with placeholders.
-
-        Same logic as RTTNeutralizer for consistency.
-        """
-        import re
-
-        entity_map = {}
-        counter = [0]
-
-        skip_words = {
-            'The', 'A', 'An', 'In', 'On', 'At', 'To', 'For', 'And', 'But', 'Or',
-            'It', 'He', 'She', 'They', 'We', 'I', 'My', 'His', 'Her', 'Their',
-            'This', 'That', 'These', 'Those', 'What', 'When', 'Where', 'Who',
-            'How', 'Why', 'If', 'Then', 'Now', 'Here', 'There', 'So', 'Yet',
-            'From', 'With', 'Into', 'Upon', 'Through', 'About', 'After', 'Before',
-            'During', 'Within', 'Without', 'Between', 'Among', 'Against', 'Beyond',
-            'Such', 'Each', 'Every', 'Some', 'Many', 'Most', 'Other', 'Another',
-            'Both', 'All', 'Any', 'No', 'Not', 'Only', 'Just', 'Even', 'Still',
-            'Already', 'Always', 'Never', 'Perhaps', 'Indeed', 'Thus', 'Hence',
-            'Therefore', 'Moreover', 'Furthermore', 'Meanwhile', 'Otherwise',
-            'Nonetheless', 'Nevertheless', 'However', 'Although', 'Though', 'While',
-            'Because', 'Since', 'Unless', 'Until', 'Whether', 'Whenever', 'Wherever',
-            'One', 'Two', 'Three', 'Four', 'Five', 'First', 'Second', 'Third',
-        }
-
-        def make_replacer():
-            def replace_entity(match):
-                word = match.group(1).strip()
-                if not word or word in skip_words:
-                    return match.group(0)
-                if word.startswith('__ENT'):
-                    return match.group(0)
-                placeholder = f"__ENT{counter[0]}__"
-                entity_map[placeholder] = word
-                counter[0] += 1
-                prefix = match.group(0)[:-len(word)] if match.group(0).endswith(word) else ''
-                return prefix + placeholder
-            return replace_entity
-
-        masked = text
-
-        # Multi-word proper nouns
-        masked = re.sub(
-            r'(?:^|(?<=[.!?,;:\s"\'(]))([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})(?=[\s.,;:!?\'")\-]|$)',
-            make_replacer(),
-            masked
-        )
-
-        # Single capitalized words
-        masked = re.sub(
-            r'(?<=[,;:\s"\'(])([A-Z][a-z]{2,})(?=[\s.,;:!?\'")\-]|$)',
-            make_replacer(),
-            masked
-        )
-
-        return masked, entity_map
-
-    def _restore_entities(self, text: str, entity_map: dict) -> str:
-        """Restore original entities from placeholders."""
-        result = text
-        for placeholder, original in entity_map.items():
-            result = result.replace(placeholder, original)
-        return result
-
-    def _monotone_flatten(self, text: str) -> str:
-        """Flatten text into uniform short sentences (rule-based, fast)."""
-        import re
-
-        # Remove parentheticals
-        text = re.sub(r'\([^)]*\)', '', text)
-        text = re.sub(r'—[^—]*—', '', text)
-
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        result = []
-
-        for sent in sentences:
-            sent = sent.strip()
-            if not sent:
-                continue
-
-            parts = re.split(r'\s*;\s*', sent)
-
-            for part in parts:
-                part = part.strip()
-                if not part:
-                    continue
-
-                words = part.split()
-                if len(words) > 15:
-                    conj_pattern = r'\s*,?\s*\b(and|but|or|yet|so|however|although|while|whereas)\b\s*'
-                    sub_parts = re.split(conj_pattern, part, flags=re.IGNORECASE)
-                    for sub in sub_parts:
-                        sub = sub.strip(' ,')
-                        if sub and len(sub.split()) >= 3 and sub.lower() not in ['and', 'but', 'or', 'yet', 'so', 'however', 'although', 'while', 'whereas']:
-                            if not sub.endswith(('.', '!', '?')):
-                                sub += '.'
-                            sub = sub[0].upper() + sub[1:] if len(sub) > 1 else sub.upper()
-                            result.append(sub)
-                else:
-                    if not part.endswith(('.', '!', '?')):
-                        part += '.'
-                    part = part[0].upper() + part[1:] if len(part) > 1 else part.upper()
-                    result.append(part)
-
-        return ' '.join(result) if result else text
+    def _call_api(self, system: str, user: str, max_tokens: Optional[int] = None) -> str:
+        """Delegate a single chat completion to the DeepSeek provider."""
+        return self._provider.call(
+            system_prompt=system,
+            user_prompt=user,
+            temperature=self.temperature,
+            max_tokens=max_tokens or self.max_tokens,
+        ).strip()
 
     def neutralize(
         self,

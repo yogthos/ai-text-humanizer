@@ -332,7 +332,6 @@ def transfer_file(
             expand_for_texture=expand_for_texture,
             expand_for_texture_explicit=expand_for_texture_explicit,
             skip_neutralization=gen.skip_neutralization,
-            use_document_context=gen.use_document_context,
             pass_headings_unchanged=gen.pass_headings_unchanged,
             min_paragraph_words=gen.min_paragraph_words,
             use_structural_rag=gen.use_structural_rag,

@@ -166,7 +166,6 @@ The Round-Trip Translation (RTT) process strips style while preserving meaning:
 **Solutions:**
 1. Increase `scale` slightly
 2. Verify constraints are in prompt
-3. Enable `reduce_repetition: true` for post-processing
 
 ## Persona Frames
 

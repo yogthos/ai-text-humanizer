@@ -468,7 +468,6 @@ def run_repl(
             rag_sample_size=gen.rag_sample_size,
             use_persona=gen.use_persona,
             apply_input_perturbation=gen.apply_input_perturbation,
-            use_document_context=False,
             pass_headings_unchanged=False,
             min_paragraph_words=5,
         )
@@ -477,7 +476,6 @@ def run_repl(
             temperature=temperature,
             verify_semantic_fidelity=verify,
             perspective=perspective,
-            use_document_context=False,
             min_paragraph_words=5,
         )
 

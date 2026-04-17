@@ -133,7 +133,6 @@ class TestPromptFiles:
             "rtt_to_mandarin",
             "rtt_to_english",
             "rtt_deepseek",
-            "document_context",
         ]
         prompts = list_prompts()
         for name in required_prompts:
