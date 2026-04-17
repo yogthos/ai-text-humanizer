@@ -499,6 +499,118 @@ class TestLazyLoadCaching:
         _ = s.grammar_corrector
         assert call_count[0] == 1
 
+    def test_chromadb_loader_called_once_when_it_returns_none(self, monkeypatch):
+        """Fix #5: _load_chromadb must return None (not raise) when the
+        dependency is missing, so the Services cache stores the None and
+        subsequent accesses return without re-running the failing import.
+
+        Pre-fix: _load_chromadb raises ImportError, the slot stays _UNSET,
+        every access retries the import. Asymmetric with _load_nli_model."""
+        from src.services import Services
+
+        call_count = [0]
+
+        def fake_loader():
+            call_count[0] += 1
+            return None  # simulate chromadb not installed
+
+        monkeypatch.setattr(
+            "src.rag.corpus_indexer._load_chromadb",
+            fake_loader,
+        )
+
+        s = Services()
+        first = s.chromadb
+        second = s.chromadb
+        third = s.chromadb
+
+        assert first is None and second is None and third is None
+        assert call_count[0] == 1, (
+            f"loader ran {call_count[0]} times — None must be cached; "
+            "raising on every call defeats the cache"
+        )
+
+    def test_embedding_model_loader_called_once_when_it_returns_none(self, monkeypatch):
+        """Fix #5: _load_embedding_model must return None (not raise) when
+        sentence-transformers is missing, matching _load_nli_model."""
+        from src.services import Services
+
+        call_count = [0]
+
+        def fake_loader():
+            call_count[0] += 1
+            return None  # simulate sentence-transformers not installed
+
+        monkeypatch.setattr(
+            "src.rag.corpus_indexer._load_embedding_model",
+            fake_loader,
+        )
+
+        s = Services()
+        _ = s.embedding_model
+        _ = s.embedding_model
+        _ = s.embedding_model
+
+        assert call_count[0] == 1, (
+            f"loader ran {call_count[0]} times — None must be cached; "
+            "raising on every call defeats the cache"
+        )
+
+
+class TestLoaderMissingDependencyContract:
+    """Fix #5: All optional-dependency loaders must return None on missing
+    deps, not raise. The Services cache cannot store a raised exception,
+    so raising defeats the single-import guarantee."""
+
+    def test_load_chromadb_returns_none_when_import_fails(self, monkeypatch):
+        """With `import chromadb` unavailable, _load_chromadb returns None."""
+        import sys
+        from src.rag import corpus_indexer
+
+        # Force ImportError on `import chromadb`
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def blocked_import(name, *args, **kwargs):
+            if name == "chromadb" or name.startswith("chromadb."):
+                raise ImportError("simulated missing chromadb")
+            return real_import(name, *args, **kwargs)
+
+        # Purge any already-imported chromadb so the import actually runs
+        for mod_name in list(sys.modules):
+            if mod_name == "chromadb" or mod_name.startswith("chromadb."):
+                monkeypatch.delitem(sys.modules, mod_name, raising=False)
+
+        monkeypatch.setattr("builtins.__import__", blocked_import)
+
+        result = corpus_indexer._load_chromadb()
+        assert result is None, (
+            "_load_chromadb must return None on missing dep, not raise — "
+            "Services cache uses None as a legitimate cached value"
+        )
+
+    def test_load_embedding_model_returns_none_when_import_fails(self, monkeypatch):
+        """With `sentence_transformers` unavailable, loader returns None."""
+        import sys
+        from src.rag import corpus_indexer
+
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def blocked_import(name, *args, **kwargs):
+            if name == "sentence_transformers" or name.startswith("sentence_transformers."):
+                raise ImportError("simulated missing sentence_transformers")
+            return real_import(name, *args, **kwargs)
+
+        for mod_name in list(sys.modules):
+            if mod_name == "sentence_transformers" or mod_name.startswith("sentence_transformers."):
+                monkeypatch.delitem(sys.modules, mod_name, raising=False)
+
+        monkeypatch.setattr("builtins.__import__", blocked_import)
+
+        result = corpus_indexer._load_embedding_model()
+        assert result is None, (
+            "_load_embedding_model must return None on missing dep, not raise"
+        )
+
 
 class TestLazyLoadThreadSafety:
     """Services is accessed from worker threads in several places (see

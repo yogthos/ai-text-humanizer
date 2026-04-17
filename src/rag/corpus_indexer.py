@@ -16,18 +16,29 @@ from .style_analyzer import StyleAnalyzer, StyleMetrics
 logger = get_logger(__name__)
 
 def _load_chromadb():
-    """Import and return the chromadb module. Called once per Services
-    container (cached on `Services._chromadb`)."""
+    """Import and return the chromadb module.
+
+    Called once per Services container (the result is cached on
+    `Services._chromadb`). Returns None if chromadb is missing — the slot
+    caches None just like any other successful load, so we don't re-attempt
+    the failing import on every access. Callers that need chromadb should
+    check for None and raise their own error with context.
+    """
     try:
         import chromadb
         return chromadb
     except ImportError:
-        raise ImportError("chromadb required. Install with: pip install chromadb")
+        logger.warning("chromadb not available — install with: pip install chromadb")
+        return None
 
 
 def _load_embedding_model():
     """Load the shared SentenceTransformer with stdout/stderr/tqdm suppressed.
-    Called once per Services container (cached on `Services._embedding_model`)."""
+
+    Called once per Services container (cached on `Services._embedding_model`).
+    Returns None if sentence-transformers is missing — the slot caches None
+    so we don't re-attempt the failing import on every access.
+    """
     try:
         import sys
         import os
@@ -61,9 +72,10 @@ def _load_embedding_model():
         logger.debug("Loaded sentence transformer: all-MiniLM-L6-v2")
         return model
     except ImportError:
-        raise ImportError(
-            "sentence-transformers required. Install with: pip install sentence-transformers"
+        logger.warning(
+            "sentence-transformers not available — install with: pip install sentence-transformers"
         )
+        return None
 
 
 def _default_indexer_path() -> str:
@@ -136,6 +148,10 @@ class CorpusIndexer:
         """Get or create ChromaDB client."""
         if self._client is None:
             chromadb = get_chromadb()
+            if chromadb is None:
+                raise ImportError(
+                    "chromadb required. Install with: pip install chromadb"
+                )
             settings = chromadb.Settings(anonymized_telemetry=False)
             if self.persist_dir:
                 os.makedirs(self.persist_dir, exist_ok=True)
@@ -166,6 +182,11 @@ class CorpusIndexer:
         """Lazy-load embedding model."""
         if self._embedding_model is None:
             self._embedding_model = get_embedding_model()
+            if self._embedding_model is None:
+                raise ImportError(
+                    "sentence-transformers required. "
+                    "Install with: pip install sentence-transformers"
+                )
         return self._embedding_model
 
     def _chunk_id(self, author: str, source: str, index: int) -> str:
