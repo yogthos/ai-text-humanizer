@@ -111,7 +111,6 @@
     "_comment5": "Neutralization (skip for better fact preservation)",
     "skip_neutralization": false,
     "_comment7": "Document handling",
-    "use_document_context": false,
     "pass_headings_unchanged": true,
     "min_paragraph_words": 10,
     "_comment8": "RAG settings",

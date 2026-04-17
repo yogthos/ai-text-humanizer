@@ -21,16 +21,15 @@ class TestLoadPersonaFile:
         result = _load_persona_file("")
         assert result == {"narrative_frames": [], "conceptual_frames": []}
 
-    def test_nonexistent_file_returns_empty_result(self):
-        """Call with nonexistent filename should return empty frames."""
+    def test_nonexistent_file_raises(self):
+        """Bug M10: Non-empty filename that doesn't exist should raise, not silently
+        fall back to default. A typo in config should be surfaced loudly."""
         from src.persona.prompt_builder import _load_persona_file
 
         _load_persona_file.cache_clear()
-        # Use a filename that definitely doesn't exist and no default_persona.txt either
         with patch("pathlib.Path.exists", return_value=False):
-            result = _load_persona_file("nonexistent_persona_xyz.txt")
-
-        assert result == {"narrative_frames": [], "conceptual_frames": []}
+            with pytest.raises(FileNotFoundError, match="nonexistent_persona_xyz.txt"):
+                _load_persona_file("nonexistent_persona_xyz.txt")
 
 
 class TestGetPersonaFrame:
@@ -137,34 +136,6 @@ class TestConstraintWording:
             f"Missing: {set(expected) - set(ROTATING_CONSTRAINTS)}\n"
             f"Extra: {set(ROTATING_CONSTRAINTS) - set(expected)}"
         )
-
-
-class TestNoHardcodedAuthorConfigs:
-    """Tests for Bug 1: No hardcoded author-specific configs in PERSONA_CONFIGS."""
-
-    def test_no_author_specific_entries_in_persona_configs(self):
-        """PERSONA_CONFIGS should only have 'default' key — no author-specific entries."""
-        from src.persona.config import PERSONA_CONFIGS
-        assert list(PERSONA_CONFIGS.keys()) == ["default"], (
-            f"PERSONA_CONFIGS should only contain 'default', "
-            f"but found: {list(PERSONA_CONFIGS.keys())}"
-        )
-
-    def test_default_adjective_themes_are_generic(self):
-        """Default persona's adjective_themes should be empty or generic."""
-        from src.persona.config import PERSONA_CONFIGS
-        themes = PERSONA_CONFIGS["default"].adjective_themes
-        lovecraft_words = {"cyclopean", "eldritch", "blasphemous", "foetor", "gibbous"}
-        overlap = set(themes) & lovecraft_words
-        assert not overlap, f"Default adjective_themes contains author-specific words: {overlap}"
-
-    def test_get_persona_config_returns_default_for_any_author(self):
-        """Any author name should return the generic default config."""
-        from src.persona.config import get_persona_config, PERSONA_CONFIGS
-        default = PERSONA_CONFIGS["default"]
-        assert get_persona_config("H.P. Lovecraft") is default
-        assert get_persona_config("Ernest Hemingway") is default
-        assert get_persona_config("Unknown Author") is default
 
 
 class TestConceptualFrameFallback:

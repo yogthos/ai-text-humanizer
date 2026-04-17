@@ -202,7 +202,7 @@ class SemanticVerifier:
 
         # Layer 1: Sentence-level grounding check
         sentence_results, grounded_ratio, hallucination_count = self._check_sentence_grounding(
-            source_sents, output_sents, nli_model
+            source_sents, output_sents
         )
 
         # Layer 2: Content word coverage
@@ -258,7 +258,6 @@ class SemanticVerifier:
         self,
         source_sents: List[str],
         output_sents: List[str],
-        nli_model=None,
     ) -> Tuple[List[SentenceVerification], float, int]:
         """Check if each output sentence is grounded in source using content word overlap.
 
@@ -267,9 +266,6 @@ class SemanticVerifier:
         - Extract lemmatized content words from each sentence
         - Compute bidirectional overlap with best-matching source sentence
         - Flag sentences with low overlap as hallucinations
-
-        Note: nli_model parameter is accepted for API compatibility but unused.
-        This method uses content word overlap exclusively.
         """
         nlp = _get_nlp()
 

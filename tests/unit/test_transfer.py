@@ -272,7 +272,6 @@ class TestDocumentTransfer:
         config = TransferConfig(
             verify_semantic_fidelity=False,
             skip_neutralization=True,
-            use_document_context=False,
             min_paragraph_words=5,
         )
         transfer = StyleTransfer(
@@ -508,19 +507,6 @@ class TestWordCountTracking:
         # target_words should be based on pre-perturbation count, not post-perturbation
         assert target_words == original_word_count, (
             f"target_words={target_words} should be {original_word_count} (pre-perturbation)"
-        )
-
-
-class TestDocumentContextDisabled:
-    """Tests for document_context being disabled by default (Bug 13)."""
-
-    def test_document_context_disabled_by_default(self):
-        """use_document_context should default to False."""
-        from src.generation.transfer import TransferConfig
-
-        config = TransferConfig()
-        assert config.use_document_context is False, (
-            "use_document_context should default to False (extracted but never used)"
         )
 
 

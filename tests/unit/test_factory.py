@@ -40,5 +40,35 @@ class TestFictionMarkerLogging:
         assert mock_generator.fiction_markers == ["marker1"]
 
 
+class TestFictionMarkersFusedModel:
+    """Tests for M8: fused-model path was not threading fiction markers."""
+
+    def test_fused_model_config_has_fiction_markers_field(self):
+        """FusedModelConfig needs a fiction_markers field to match LoRAAdapterConfig."""
+        from src.config import FusedModelConfig
+
+        cfg = FusedModelConfig(fiction_markers=["foo", "bar"])
+        assert cfg.fiction_markers == ["foo", "bar"]
+
+    def test_set_fiction_markers_falls_back_to_fused_config(self):
+        """When adapter config has no markers, _set_fiction_markers should consult
+        the fused-model config. A path pointing at a fused model has no adapter
+        entry, so the adapter lookup returns defaults (empty markers)."""
+        from src.generation.factory import _set_fiction_markers
+        from src.config import LoRAAdapterConfig, FusedModelConfig
+
+        mock_generator = MagicMock()
+        # Explicitly drop any pre-existing attribute so the assertion is meaningful.
+        mock_generator.fiction_markers = []
+
+        with patch('src.config.get_adapter_config',
+                   return_value=LoRAAdapterConfig(fiction_markers=[])):
+            with patch('src.config.get_fused_model_config',
+                       return_value=FusedModelConfig(fiction_markers=["fused_marker"])):
+                _set_fiction_markers(mock_generator, "fused/model/path")
+
+        assert mock_generator.fiction_markers == ["fused_marker"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

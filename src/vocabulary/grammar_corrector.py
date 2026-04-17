@@ -180,14 +180,29 @@ class GrammarCorrector:
 
         result = text
         for match in sorted_matches:
-            # Only apply if there's a replacement suggestion
-            if match.replacements:
-                replacement = match.replacements[0]  # Use first suggestion
-                start = match.offset
-                end = match.offset + match.error_length  # snake_case attribute
-                result = result[:start] + replacement + result[end:]
+            if not match.replacements:
+                continue
+            replacement = match.replacements[0]
+            if not self._is_safe_replacement(replacement, match.error_length):
+                continue
+            start = match.offset
+            end = match.offset + match.error_length
+            result = result[:start] + replacement + result[end:]
 
         return result
+
+    @staticmethod
+    def _is_safe_replacement(replacement: str, error_length: int) -> bool:
+        """Reject empty or suspiciously-long suggestions.
+
+        LanguageTool occasionally returns empty strings or whole-sentence
+        rewrites; applying either silently damages authorial voice.
+        """
+        if not replacement:
+            return False
+        if len(replacement) > max(3 * error_length, 30):
+            return False
+        return True
 
     def correct(self, text: str) -> Tuple[str, GrammarStats]:
         """Apply style-safe grammar correction to text.

@@ -72,12 +72,10 @@ def _load_persona_file(persona_filename: str) -> Dict[str, Any]:
     }
 
     if not filepath.exists():
-        # Try default
-        default_path = prompts_dir / "default_persona.txt"
-        if default_path.exists():
-            filepath = default_path
-        else:
-            return result
+        raise FileNotFoundError(
+            f"Persona file not found: {persona_filename}. "
+            f"Check the 'worldview' setting in config.json — the filename must exist in prompts/."
+        )
 
     content = filepath.read_text(encoding="utf-8")
 

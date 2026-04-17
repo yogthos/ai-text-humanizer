@@ -346,5 +346,79 @@ class TestGrammarCorrectorDefaults:
         )
 
 
+class TestReplacementGuards:
+    """Tests for H12: guard suspicious replacements.
+
+    LanguageTool sometimes suggests replacements that would rewrite entire
+    sentences or replace text with an empty string. Applying these blindly
+    destroys authorial voice, which is the opposite of what this module is for.
+    """
+
+    def test_empty_replacement_rejected(self):
+        """Replacement that is an empty string should be skipped."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        text = "The horror lurks in the shadows."
+
+        mock_match = MagicMock()
+        mock_match.offset = 4
+        mock_match.error_length = 6  # "horror"
+        mock_match.replacements = [""]  # Empty replacement
+
+        result = corrector._apply_corrections(text, [mock_match])
+        assert result == text, "Empty replacement should not delete text"
+
+    def test_suspiciously_long_replacement_rejected(self):
+        """Replacement dramatically longer than the error should be skipped."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        text = "The horror were lurking in the shadows."
+
+        mock_match = MagicMock()
+        mock_match.offset = 11
+        mock_match.error_length = 4  # "were"
+        # LanguageTool occasionally suggests whole-sentence rewrites
+        mock_match.replacements = [
+            "was lurking, its presence an indescribable shadow upon the night"
+        ]
+
+        result = corrector._apply_corrections(text, [mock_match])
+        assert result == text, (
+            f"Suspiciously long replacement should be skipped, got: {result}"
+        )
+
+    def test_normal_replacement_still_applied(self):
+        """Short, sane replacements (e.g., were -> was) should still apply."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        text = "The horror were lurking."
+
+        mock_match = MagicMock()
+        mock_match.offset = 11
+        mock_match.error_length = 4  # "were"
+        mock_match.replacements = ["was"]
+
+        result = corrector._apply_corrections(text, [mock_match])
+        assert result == "The horror was lurking."
+
+    def test_slightly_longer_replacement_applied(self):
+        """Slightly longer replacement (dont -> doesn't) should be allowed."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        text = "She dont know."
+
+        mock_match = MagicMock()
+        mock_match.offset = 4
+        mock_match.error_length = 4  # "dont"
+        mock_match.replacements = ["doesn't"]  # 7 chars — < 3x
+
+        result = corrector._apply_corrections(text, [mock_match])
+        assert result == "She doesn't know."
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

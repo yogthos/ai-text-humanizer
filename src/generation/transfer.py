@@ -12,18 +12,19 @@ Pipeline:
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable, Tuple
+import re
 import time
 
 from .lora_generator import AdapterSpec
 from .base_generator import GenerationConfig
 from .factory import create_style_generator
 from ..config import FusedModelConfig, get_adapter_config, get_fused_model_config
-from .document_context import DocumentContext, extract_document_context
 from ..utils.nlp import (
     split_into_paragraphs,
     split_into_sentences,
     is_heading,
 )
+from ..utils.prompts import load_prompt
 from ..utils.logging import get_logger
 
 # Optional Structural RAG import
@@ -104,9 +105,6 @@ class TransferConfig:
     # Content handling
     pass_headings_unchanged: bool = True  # Don't transform headings
     min_paragraph_words: int = 10  # Skip very short paragraphs
-
-    # Document context settings
-    use_document_context: bool = False  # Extract and use document-level context (disabled: extracted but never used)
 
     # Input format (uses graph-based description matching training format)
 
@@ -316,9 +314,6 @@ class StyleTransfer:
         # Initialize RTT neutralizer (local MLX model)
         self._rtt_neutralizer = None
 
-        # Document context (extracted at transfer time)
-        self.document_context: Optional[DocumentContext] = None
-
         # Structural RAG for rhythm/syntax guidance
         self.structural_rag: Optional[StructuralRAG] = None
         if self.config.use_structural_rag:
@@ -395,8 +390,6 @@ class StyleTransfer:
             Expanded text with added texture, or original text if expansion fails.
         """
         try:
-            from ..utils.prompts import load_prompt
-
             system_prompt = load_prompt("expand_texture")
             user_prompt = text
 
@@ -447,8 +440,6 @@ class StyleTransfer:
             First-person narrative version, or original text if conversion fails.
         """
         try:
-            from ..utils.prompts import load_prompt
-
             system_prompt = load_prompt("narrativize")
             user_prompt = text
 
@@ -500,8 +491,6 @@ class StyleTransfer:
             return self._narrativize(text)
 
         try:
-            from ..utils.prompts import load_prompt
-
             # Build the perspective description
             perspective_descriptions = {
                 "first_person_plural": "first_person_plural (use: we, us, our, ours)",
@@ -840,8 +829,6 @@ class StyleTransfer:
         - ".—" or "—." (em-dash combined with period)
         - Double punctuation
         """
-        import re
-
         # Fix em-dash + punctuation combinations
         text = re.sub(r"—\s*,", ",", text)  # "—," -> ","
         text = re.sub(r",\s*—", ",", text)  # ",—" -> ","
@@ -985,14 +972,6 @@ class StyleTransfer:
                 f"Merged {len(paragraphs)} paragraphs into {len(merged)} blocks (min_words={min_words})"
             )
             paragraphs = merged
-
-        # Extract document context for improved generation and critique
-        if self.config.use_document_context:
-            logger.info("Extracting document context...")
-            self.document_context = extract_document_context(
-                text,
-                llm_provider=self.critic_provider,
-            )
 
         logger.info(f"Transferring {len(paragraphs)} paragraphs")
 

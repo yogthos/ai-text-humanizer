@@ -4,7 +4,6 @@ The primary pipeline uses LoRA adapters for fast, consistent style transfer:
 - LoRAStyleGenerator: Core generation using MLX LoRA adapters
 - PyTorchStyleGenerator: Alternative generation using PyTorch/PEFT
 - StyleTransfer: High-level pipeline with semantic graph validation
-- DocumentContext: Document-level context for improved coherence
 """
 
 from .base_generator import (
@@ -26,11 +25,6 @@ from .transfer import (
     StyleTransfer,
     TransferConfig,
     TransferStats,
-)
-from .document_context import (
-    DocumentContext,
-    DocumentContextExtractor,
-    extract_document_context,
 )
 
 # Conditionally export PyTorch generator
@@ -58,10 +52,6 @@ __all__ = [
     "StyleTransfer",
     "TransferConfig",
     "TransferStats",
-    # Document context
-    "DocumentContext",
-    "DocumentContextExtractor",
-    "extract_document_context",
 ]
 
 # Add PyTorch generator to exports if available

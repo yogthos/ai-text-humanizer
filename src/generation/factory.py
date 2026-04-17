@@ -48,16 +48,25 @@ def detect_best_backend() -> str:
     )
 
 
-def _set_fiction_markers(generator, adapter_path: Optional[str]) -> None:
-    """Load fiction markers from adapter config and set on generator."""
-    if not adapter_path:
+def _set_fiction_markers(generator, model_path: Optional[str]) -> None:
+    """Load fiction markers from adapter or fused-model config and set on generator.
+
+    The same `model_path` may refer to either a LoRA adapter (looked up in
+    `lora_adapters`) or a standalone fused model (looked up in `models`).
+    We try the adapter config first, then fall back to the fused-model config.
+    """
+    if not model_path:
         return
     try:
-        from ..config import get_adapter_config
+        from ..config import get_adapter_config, get_fused_model_config
 
-        adapter_config = get_adapter_config(adapter_path)
+        adapter_config = get_adapter_config(model_path)
         if adapter_config.fiction_markers:
             generator.fiction_markers = adapter_config.fiction_markers
+            return
+        fused_config = get_fused_model_config(model_path)
+        if fused_config.fiction_markers:
+            generator.fiction_markers = fused_config.fiction_markers
     except Exception as e:
         logger.warning(f"Could not load fiction markers: {e}")
 
@@ -113,6 +122,7 @@ def create_style_generator(
                 config=config,
                 adapters=None,
             )
+            _set_fiction_markers(generator, fused_models[0])
             return generator
 
         # Convert adapters if provided as list of dicts or strings
@@ -156,6 +166,7 @@ def create_style_generator(
                 load_in_4bit=load_in_4bit,
                 load_in_8bit=load_in_8bit,
             )
+            _set_fiction_markers(generator, fused_models[0])
             return generator
 
         generator = PyTorchStyleGenerator(
