@@ -5,6 +5,7 @@ This allows the entire pipeline to be self-contained without external services.
 """
 
 import json
+import re
 import time
 from typing import Optional, Callable
 from pathlib import Path
@@ -399,6 +400,45 @@ class RTTNeutralizer(BaseRTTNeutralizer):
 
         return response.strip()
 
+    def _rtt_once(self, text: str, word_count: int) -> Optional[str]:
+        """Single pass through RTT: English → Mandarin → Plain English.
+
+        Step 1 ("Acid Bath") strips Victorian/Lovecraftian syntax via HSK5
+        Mandarin. Step 2 ("Flattener") emits clinical SVO English. Code fences
+        are stripped; Chinese residue marks a failure. Length validation is
+        left to the caller so that long single-sentence chunks (called via
+        _do_neutralize) aren't rejected by the <100-word variance check.
+        """
+        max_mandarin_tokens = min(int(word_count * 2), 512)
+        mandarin = self._generate(
+            system=load_prompt("rtt_to_mandarin"),
+            user=f"Translate to simple Mandarin:\n\n{text}",
+            max_tokens=max_mandarin_tokens,
+        )
+        if not mandarin or len(mandarin) < 10:
+            logger.debug("RTT Step 1 failed: empty Mandarin")
+            return None
+
+        max_english_tokens = min(int(word_count * 1.5) + 20, 400)
+        english = self._generate(
+            system=load_prompt("rtt_to_english"),
+            user=f"Translate to simple English:\n\n{mandarin}",
+            max_tokens=max_english_tokens,
+        )
+        if not english or len(english) < 10:
+            logger.debug("RTT Step 2 failed: empty English")
+            return None
+
+        english = english.strip()
+        english = re.sub(r'^```\w*\n?', '', english)
+        english = re.sub(r'\n?```$', '', english)
+
+        if re.search(r'[\u4e00-\u9fff]', english):
+            logger.debug("RTT Step 2 failed: output contains Chinese")
+            return None
+
+        return english
+
     def neutralize(
         self,
         text: str,
@@ -418,9 +458,6 @@ class RTTNeutralizer(BaseRTTNeutralizer):
         Returns:
             Neutralized text, or None if failed.
         """
-        import re
-
-        # Extract and mask entities before RTT
         masked_text, entity_map = self._extract_entities(text)
         if entity_map:
             logger.debug(f"Masked {len(entity_map)} entities: {list(entity_map.values())[:5]}...")
@@ -436,69 +473,27 @@ class RTTNeutralizer(BaseRTTNeutralizer):
 
         for attempt in range(max_retries):
             try:
-                # Step 1: English → Mandarin ("Acid Bath" - strips Victorian syntax)
-                # HSK5 vocabulary constraint forces simple word choices
-                # Entity placeholders preserved through RTT
-                max_mandarin_tokens = min(int(word_count * 2), 512)
-                rtt_mandarin_prompt = load_prompt("rtt_to_mandarin")
-                mandarin = self._generate(
-                    system=rtt_mandarin_prompt,
-                    user=f"Translate to simple Mandarin:\n\n{masked_text}",
-                    max_tokens=max_mandarin_tokens,
-                )
-
-                if not mandarin or len(mandarin) < 10:
-                    logger.debug(f"RTT Step 1 failed: empty Mandarin (attempt {attempt + 1})")
+                english = self._rtt_once(masked_text, word_count)
+                if english is None:
                     continue
 
-                # Step 2: Mandarin → Plain English ("Flattener" - clinical SVO output)
-                # Controlled English: short sentences, common words, monotonous tone
-                max_english_tokens = min(int(word_count * 1.5) + 20, 400)
-                rtt_english_prompt = load_prompt("rtt_to_english")
-                english = self._generate(
-                    system=rtt_english_prompt,
-                    user=f"Translate to simple English:\n\n{mandarin}",
-                    max_tokens=max_english_tokens,
-                )
-
-                if not english or len(english) < 10:
-                    logger.debug(f"RTT Step 2 failed: empty English (attempt {attempt + 1})")
-                    continue
-
-                # Clean response
-                english = english.strip()
-                english = re.sub(r'^```\w*\n?', '', english)
-                english = re.sub(r'\n?```$', '', english)
-
-                # Check for Chinese characters (translation failed if present)
-                if re.search(r'[\u4e00-\u9fff]', english):
-                    logger.debug(f"RTT Step 2 failed: output contains Chinese (attempt {attempt + 1})")
-                    continue
-
-                # Validate length (lenient for long texts)
+                # Length validation (only applied here — long single-sentence
+                # chunks go via _do_neutralize and skip this check).
                 neutral_words = len(english.split())
                 if neutral_words < 3:
-                    # Too short - generation failed
                     logger.debug(f"RTT too short: {neutral_words} words (attempt {attempt + 1})")
                     continue
 
-                # Length validation: more lenient for long texts
-                # Short texts (<100w): allow 2x variance
-                # Long texts (>100w): allow any reasonable output (truncation ok)
-                if word_count < 100:
-                    max_diff = word_count * 1.0
-                else:
-                    max_diff = word_count * 2.0  # Very lenient for long texts
-
+                max_diff = word_count * 1.0 if word_count < 100 else word_count * 2.0
                 if abs(neutral_words - word_count) > max_diff:
-                    logger.debug(f"RTT length mismatch: {neutral_words} vs {word_count} (attempt {attempt + 1})")
+                    logger.debug(
+                        f"RTT length mismatch: {neutral_words} vs {word_count} (attempt {attempt + 1})"
+                    )
                     continue
 
-                # Step 3 (optional): Monotone flattening for training burstiness
                 if monotone:
                     english = self._monotone_flatten(english)
 
-                # Step 4: Restore original proper nouns
                 if entity_map:
                     english = self._restore_entities(english, entity_map)
 
@@ -516,47 +511,18 @@ class RTTNeutralizer(BaseRTTNeutralizer):
         max_retries: int = 2,
         monotone: bool = False,
     ) -> Optional[str]:
-        """Core RTT neutralization without chunking.
+        """Core RTT neutralization without chunking or length validation.
 
         Called directly for chunks that are >300 words but can't be split further
-        (e.g., single sentences with no period boundaries).
+        (e.g., single sentences with no period boundaries). Entity masking is
+        the caller's responsibility.
         """
-        import re
-
         word_count = len(text.split())
 
         for attempt in range(max_retries):
             try:
-                max_mandarin_tokens = min(int(word_count * 2), 512)
-                rtt_mandarin_prompt = load_prompt("rtt_to_mandarin")
-                mandarin = self._generate(
-                    system=rtt_mandarin_prompt,
-                    user=f"Translate to simple Mandarin:\n\n{text}",
-                    max_tokens=max_mandarin_tokens,
-                )
-
-                if not mandarin or len(mandarin) < 10:
-                    logger.debug(f"RTT Step 1 failed: empty Mandarin (attempt {attempt + 1})")
-                    continue
-
-                max_english_tokens = min(int(word_count * 1.5) + 20, 400)
-                rtt_english_prompt = load_prompt("rtt_to_english")
-                english = self._generate(
-                    system=rtt_english_prompt,
-                    user=f"Translate to simple English:\n\n{mandarin}",
-                    max_tokens=max_english_tokens,
-                )
-
-                if not english or len(english) < 10:
-                    logger.debug(f"RTT Step 2 failed: empty English (attempt {attempt + 1})")
-                    continue
-
-                english = english.strip()
-                english = re.sub(r'^```\w*\n?', '', english)
-                english = re.sub(r'\n?```$', '', english)
-
-                if re.search(r'[\u4e00-\u9fff]', english):
-                    logger.debug(f"RTT Step 2 failed: output contains Chinese (attempt {attempt + 1})")
+                english = self._rtt_once(text, word_count)
+                if english is None:
                     continue
 
                 neutral_words = len(english.split())
@@ -917,8 +883,6 @@ class DeepSeekRTTNeutralizer(BaseRTTNeutralizer):
             retry_counts[idx] = 0
 
         total_items = len(texts)
-        active_workers = [self.concurrent_batches]  # Track active workers
-        workers_lock = threading.Lock()
 
         logger.info(f"Processing {len(texts)} texts with queue-based pipeline "
                    f"(batch_size={self.batch_size}, workers={self.concurrent_batches}, max_retries={max_retries})")
@@ -1004,9 +968,6 @@ class DeepSeekRTTNeutralizer(BaseRTTNeutralizer):
                                 logger.debug(f"[{orig_idx}] Failed after {max_retries} attempts (worker error)")
                         else:
                             work_queue.put((orig_idx, text, retry_counts[orig_idx]))
-
-            with workers_lock:
-                active_workers[0] -= 1
 
         # Start workers
         with ThreadPoolExecutor(max_workers=self.concurrent_batches) as executor:

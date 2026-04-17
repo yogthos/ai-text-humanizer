@@ -57,6 +57,10 @@ def _set_fiction_markers(generator, model_path: Optional[str]) -> None:
     """
     if not model_path:
         return
+    # Narrow catch: get_*_config already log+default on config errors, so the
+    # only exceptions we expect here are ImportError (module broken) or
+    # AttributeError (non-standard generator). Letting anything else surface
+    # keeps real bugs from being silently swallowed.
     try:
         from ..config import get_adapter_config, get_fused_model_config
 
@@ -67,7 +71,7 @@ def _set_fiction_markers(generator, model_path: Optional[str]) -> None:
         fused_config = get_fused_model_config(model_path)
         if fused_config.fiction_markers:
             generator.fiction_markers = fused_config.fiction_markers
-    except Exception as e:
+    except (ImportError, AttributeError) as e:
         logger.warning(f"Could not load fiction markers: {e}")
 
 

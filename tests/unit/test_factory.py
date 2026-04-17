@@ -1,7 +1,10 @@
 """Tests for generator factory module.
 
 Tests cover:
-- Bug 5: Silent exception swallowing in _set_fiction_markers
+- Fiction marker loading: config errors handled internally by get_adapter_config
+  / get_fused_model_config (they catch and return defaults). The factory's own
+  exception handling is narrowed to (ImportError, AttributeError) so that
+  unexpected errors surface instead of being silently swallowed.
 """
 
 import pytest
@@ -9,20 +12,37 @@ from unittest.mock import patch, MagicMock
 
 
 class TestFictionMarkerLogging:
-    """Tests for Bug 5: Fiction marker loading failure should be logged."""
+    """Tests for _set_fiction_markers exception handling."""
 
-    def test_fiction_marker_failure_logged(self):
-        """When get_adapter_config raises, warning should be logged."""
+    def test_fiction_marker_attribute_error_logged(self):
+        """AttributeError when setting fiction_markers should be caught and logged."""
+        from src.generation.factory import _set_fiction_markers
+        from src.config import ModelConfig
+
+        # Generator that raises AttributeError on attribute assignment
+        class RigidGenerator:
+            __slots__ = ()
+
+        generator = RigidGenerator()
+
+        with patch('src.config.get_adapter_config',
+                   return_value=ModelConfig(fiction_markers=["marker1"])):
+            with patch('src.generation.factory.logger') as mock_logger:
+                _set_fiction_markers(generator, "some/adapter/path")
+
+        mock_logger.warning.assert_called_once()
+        assert "fiction markers" in str(mock_logger.warning.call_args).lower()
+
+    def test_fiction_marker_unexpected_errors_propagate(self):
+        """Non-(ImportError, AttributeError) exceptions must surface as real bugs,
+        not be silently swallowed. Config errors are already handled internally."""
         from src.generation.factory import _set_fiction_markers
 
         mock_generator = MagicMock()
 
-        with patch('src.config.get_adapter_config', side_effect=RuntimeError("config error")):
-            with patch('src.generation.factory.logger') as mock_logger:
+        with patch('src.config.get_adapter_config', side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
                 _set_fiction_markers(mock_generator, "some/adapter/path")
-
-        mock_logger.warning.assert_called_once()
-        assert "fiction markers" in str(mock_logger.warning.call_args).lower()
 
     def test_fiction_marker_success_no_warning(self):
         """When get_adapter_config succeeds, no warning should be logged."""

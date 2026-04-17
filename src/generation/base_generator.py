@@ -114,7 +114,7 @@ class GenerationConfig:
 
     @classmethod
     def from_fused_model(cls, fused_config) -> "GenerationConfig":
-        """Create GenerationConfig from a FusedModelConfig.
+        """Create GenerationConfig from a fused ModelConfig.
 
         Fused models don't use a scale (LoRA is already merged), so we pin
         scale=1.0 and copy sampling parameters verbatim.

@@ -75,6 +75,61 @@ class TestNeutralizeChunked:
         assert result is not None
 
 
+class TestRttOnceHelper:
+    """_rtt_once: single pass through Mandarin→English, shared by neutralize()
+    and _do_neutralize() to eliminate the ~60-line duplicated loop body."""
+
+    def _provider(self):
+        from src.llm.mlx_provider import RTTNeutralizer
+        provider = RTTNeutralizer.__new__(RTTNeutralizer)
+        provider._model = None
+        provider._tokenizer = None
+        return provider
+
+    def test_empty_mandarin_returns_none(self):
+        provider = self._provider()
+        provider._generate = MagicMock(side_effect=["", "unused"])
+
+        result = provider._rtt_once("some English text here.", word_count=4)
+        assert result is None
+
+    def test_empty_english_returns_none(self):
+        provider = self._provider()
+        provider._generate = MagicMock(side_effect=["mandarin output", ""])
+
+        result = provider._rtt_once("some English text here.", word_count=4)
+        assert result is None
+
+    def test_chinese_residue_returns_none(self):
+        """If the Mandarin→English step leaks Chinese characters, pass failed."""
+        provider = self._provider()
+        provider._generate = MagicMock(
+            side_effect=["some mandarin", "mixed with 中文 characters here"]
+        )
+
+        result = provider._rtt_once("source text.", word_count=3)
+        assert result is None
+
+    def test_strips_code_fences(self):
+        """Leading/trailing ``` fences should be stripped from the output."""
+        provider = self._provider()
+        provider._generate = MagicMock(
+            side_effect=["some mandarin text", "```\nplain english output\n```"]
+        )
+
+        result = provider._rtt_once("source.", word_count=2)
+        assert result == "plain english output"
+
+    def test_success_returns_cleaned_english(self):
+        provider = self._provider()
+        provider._generate = MagicMock(
+            side_effect=["mandarin translation", "  clean english output  "]
+        )
+
+        result = provider._rtt_once("source here.", word_count=3)
+        assert result == "clean english output"
+
+
 class TestNeutralizerSharedMethodParity:
     """Pin that MLX and DeepSeek neutralizers agree on the pure helper methods.
 
@@ -149,6 +204,26 @@ class TestNeutralizerSharedMethodParity:
         masked, entity_map = mlx_neutralizer._extract_entities("The door opened.")
         assert "__ENT" not in masked
         assert entity_map == {}
+
+
+class TestDeadActiveWorkersRemoved:
+    """Regression guard for the dead `active_workers`/`workers_lock` counter that
+    was written but never read. Removing them lets the ThreadPoolExecutor join
+    naturally and cuts one class of future drift (a reader adding logic that
+    relies on the stale counter)."""
+
+    def test_no_active_workers_counter(self):
+        import inspect
+        from src.llm import mlx_provider
+
+        source = inspect.getsource(mlx_provider)
+        assert "active_workers" not in source, (
+            "active_workers counter was dead code — never read. "
+            "ThreadPoolExecutor.futures already tracks completion."
+        )
+        assert "workers_lock" not in source, (
+            "workers_lock guarded only the dead active_workers counter."
+        )
 
 
 if __name__ == "__main__":

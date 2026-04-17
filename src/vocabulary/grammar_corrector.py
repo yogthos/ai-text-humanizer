@@ -160,25 +160,23 @@ class GrammarCorrector:
 
         return False
 
-    def _apply_corrections(self, text: str, matches: List) -> str:
+    def _apply_corrections(self, text: str, matches: List) -> Tuple[str, int]:
         """Apply corrections from matches to text.
 
-        Applies corrections in reverse order to preserve offsets.
-
-        Args:
-            text: Original text.
-            matches: List of filtered matches to apply.
+        Applies corrections in reverse order to preserve offsets. Skips matches
+        with no replacements or replacements rejected by the safety guard.
 
         Returns:
-            Corrected text.
+            Tuple of (corrected_text, applied_count). applied_count reflects
+            writes actually performed, not the input match count.
         """
         if not matches:
-            return text
+            return text, 0
 
-        # Sort by offset descending to apply from end to start
         sorted_matches = sorted(matches, key=lambda m: m.offset, reverse=True)
 
         result = text
+        applied = 0
         for match in sorted_matches:
             if not match.replacements:
                 continue
@@ -188,8 +186,9 @@ class GrammarCorrector:
             start = match.offset
             end = match.offset + match.error_length
             result = result[:start] + replacement + result[end:]
+            applied += 1
 
-        return result
+        return result, applied
 
     @staticmethod
     def _is_safe_replacement(replacement: str, error_length: int) -> bool:
@@ -242,8 +241,7 @@ class GrammarCorrector:
                 return text, stats
 
             # Apply corrections
-            corrected = self._apply_corrections(text, filtered)
-            stats.corrections_applied = len(filtered)
+            corrected, stats.corrections_applied = self._apply_corrections(text, filtered)
 
             if corrected != text:
                 logger.debug(
