@@ -78,7 +78,9 @@
         "repetition_penalty": 1.05,
         "max_tokens": 1024,
         "worldview": "lovecraft_worldview.txt",
-        "checkpoint": "checkpoint-600"
+        "checkpoint": "checkpoint-600",
+        "_comment_rag": "use_structural_rag: per-adapter override for generation.use_structural_rag (omit to inherit global)",
+        "use_structural_rag": true
       },
       "lora_adapters/lovecraft_14b": {
         "_comment": "Qwen2.5-14B local MLX training",

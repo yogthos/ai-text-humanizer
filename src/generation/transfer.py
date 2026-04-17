@@ -111,6 +111,12 @@ def _apply_fused_model_overrides(
             f"Using fused-model merge_paragraphs={fused_cfg.merge_paragraphs}"
         )
 
+    if fused_cfg.use_structural_rag is not None:
+        transfer_config.use_structural_rag = fused_cfg.use_structural_rag
+        logger.info(
+            f"Using fused-model use_structural_rag={fused_cfg.use_structural_rag}"
+        )
+
 
 @dataclass
 class TransferConfig:
@@ -337,6 +343,12 @@ class StyleTransfer:
                 self.config.merge_paragraphs = adapter_cfg.merge_paragraphs
                 logger.info(
                     f"Using adapter-specific merge_paragraphs={adapter_cfg.merge_paragraphs}"
+                )
+
+            if adapter_cfg.use_structural_rag is not None:
+                self.config.use_structural_rag = adapter_cfg.use_structural_rag
+                logger.info(
+                    f"Using adapter-specific use_structural_rag={adapter_cfg.use_structural_rag}"
                 )
 
             self.generator = create_style_generator(

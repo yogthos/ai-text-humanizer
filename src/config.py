@@ -88,6 +88,7 @@ class ModelConfig:
     perspective: Optional[str] = None
     verify_entailment: Optional[bool] = None
     merge_paragraphs: Optional[int] = None
+    use_structural_rag: Optional[bool] = None
 
     # LoRA-only
     scale: float = 1.0
@@ -250,6 +251,7 @@ _KNOWN_MODEL_FIELDS = {
     "perspective",
     "verify_entailment",
     "merge_paragraphs",
+    "use_structural_rag",
     "author",
 }
 
@@ -289,6 +291,7 @@ def _parse_model_config(data: Dict) -> ModelConfig:
         perspective=data.get("perspective"),
         verify_entailment=data.get("verify_entailment"),
         merge_paragraphs=data.get("merge_paragraphs"),
+        use_structural_rag=data.get("use_structural_rag"),
         author=data.get("author", ""),
     )
 
