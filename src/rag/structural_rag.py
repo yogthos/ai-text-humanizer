@@ -321,15 +321,25 @@ class StructuralRAG:
         return [sent for _, sent in exemplars[:n]]
 
 
-# Cache for structural RAG instances
-_rag_cache: Dict[str, StructuralRAG] = {}
+# Cache key is (author, id(services)) so different Services containers get
+# distinct RAGs — otherwise a test container would inherit the process-wide
+# default's analyzers from an earlier call.
+_rag_cache: Dict[tuple, StructuralRAG] = {}
 
 
 def get_structural_rag(author: str) -> StructuralRAG:
-    """Get or create structural RAG for author."""
-    if author not in _rag_cache:
-        _rag_cache[author] = StructuralRAG(author)
-    return _rag_cache[author]
+    """Get or create structural RAG for author.
+
+    The cache is partitioned by the active Services container so an injected
+    container does not see a StructuralRAG built against the process-wide
+    default (which would bypass DI).
+    """
+    from ..services import get_default_services
+    services = get_default_services()
+    key = (author, id(services))
+    if key not in _rag_cache:
+        _rag_cache[key] = StructuralRAG(author)
+    return _rag_cache[key]
 
 
 def get_structural_guidance(author: str, input_text: str) -> str:

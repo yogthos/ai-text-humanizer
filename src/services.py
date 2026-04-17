@@ -128,7 +128,9 @@ class Services:
             with self._lock:
                 if self._indexer is _UNSET:
                     from .rag.corpus_indexer import _load_default_indexer
-                    self._indexer = _load_default_indexer()
+                    # Pass self so the indexer's StyleAnalyzer comes from
+                    # THIS container, not from the process-wide default.
+                    self._indexer = _load_default_indexer(self)
         return self._indexer
 
     @property
@@ -161,14 +163,30 @@ class Services:
 
 _default_services: Optional[Services] = None
 _default_services_lock = threading.Lock()
+# Per-thread override stack for `default_services()`. Using thread-local
+# state means two threads that each enter `with default_services(...)`
+# concurrently don't race on a shared "restore original" slot.
+_override = threading.local()
+
+
+def _override_stack() -> list:
+    stack = getattr(_override, "stack", None)
+    if stack is None:
+        stack = []
+        _override.stack = stack
+    return stack
 
 
 def get_default_services() -> Services:
-    """Return the process-wide default Services container, creating it lazily.
+    """Return the active Services container for this thread.
 
-    Legacy get_*() helpers delegate here during the migration. Tests that need
-    isolation should use the `default_services()` context manager.
+    If the calling thread is inside a `default_services()` block, return
+    the override on top of its stack. Otherwise return the process-wide
+    default (created lazily).
     """
+    stack = _override_stack()
+    if stack:
+        return stack[-1]
     global _default_services
     if _default_services is None:
         with _default_services_lock:
@@ -178,36 +196,36 @@ def get_default_services() -> Services:
 
 
 def set_default_services(services: Services) -> None:
-    """Swap the default container — primarily a test seam."""
+    """Swap the process-wide default container.
+
+    This is the legacy test seam — it affects every thread that isn't
+    inside its own `default_services()` block. Prefer `default_services()`
+    for per-test isolation.
+    """
     global _default_services
-    _default_services = services
+    with _default_services_lock:
+        _default_services = services
 
 
 @contextlib.contextmanager
 def default_services(services: Optional[Services] = None) -> Iterator[Services]:
-    """Temporarily swap the default Services container for the body of a
-    `with` block, restoring the previous container (even on exception).
+    """Temporarily install a Services container for the calling thread.
 
-    Replaces the try/finally pattern test code was repeating everywhere:
-
-        original = get_default_services()
-        try:
-            set_default_services(Services(...))
-            ...
-        finally:
-            set_default_services(original)
-
-    becomes simply:
-
-        with default_services(Services(...)):
-            ...
+    Each thread has its own stack of overrides, so two threads that each
+    enter `with default_services(...)` concurrently do not race on a
+    shared "restore original" slot. Workers that don't call
+    `default_services()` themselves continue to see the process-wide
+    default set by `set_default_services()`.
 
     With no argument, a fresh empty Services is installed.
     """
-    original = get_default_services()
     replacement = services if services is not None else Services()
-    set_default_services(replacement)
+    stack = _override_stack()
+    stack.append(replacement)
     try:
         yield replacement
     finally:
-        set_default_services(original)
+        popped = stack.pop()
+        assert popped is replacement, (
+            "default_services() stack corrupted — nested exits out of order"
+        )

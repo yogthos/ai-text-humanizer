@@ -608,7 +608,7 @@ class TestNestedSlotAccessNoDeadlock:
         )
         monkeypatch.setattr(
             "src.rag.corpus_indexer._load_default_indexer",
-            lambda: OuterIndexer(),
+            lambda services=None: OuterIndexer(),
         )
 
         # Run in a worker thread with a hard timeout so a deadlock shows
@@ -626,6 +626,86 @@ class TestNestedSlotAccessNoDeadlock:
         assert done.is_set(), "nested slot access deadlocked the container lock"
         assert isinstance(result["indexer"], OuterIndexer)
         assert isinstance(result["indexer"].analyzer, InnerAnalyzer)
+
+
+class TestDefaultServicesContextManagerConcurrency:
+    """Concurrent `with default_services()` blocks on different threads must
+    each isolate their own override without corrupting each other — the
+    classic "two context managers racing replace/restore" bug."""
+
+    def test_per_thread_override_does_not_leak(self):
+        """Two threads each enter default_services() with their own payload.
+        Inside the block each must see its own. After both exit, the process
+        default must equal what it was before any override."""
+        import threading
+        from src.services import (
+            Services,
+            default_services,
+            get_default_services,
+        )
+
+        before = get_default_services()
+
+        seen_a: list = []
+        seen_b: list = []
+        release = threading.Event()
+
+        def worker(marker: str, seen: list):
+            mine = Services(nlp=f"nlp-{marker}")
+            with default_services(mine):
+                # Verify this thread sees its own override.
+                seen.append(get_default_services())
+                # Hold both blocks open simultaneously to surface any
+                # process-wide "original" bookkeeping race.
+                release.wait(timeout=5.0)
+                seen.append(get_default_services())
+
+        t_a = threading.Thread(target=worker, args=("a", seen_a))
+        t_b = threading.Thread(target=worker, args=("b", seen_b))
+        t_a.start()
+        t_b.start()
+        # Give both threads a chance to enter their `with` block.
+        import time as _time
+        _time.sleep(0.1)
+        release.set()
+        t_a.join(timeout=5.0)
+        t_b.join(timeout=5.0)
+
+        assert not t_a.is_alive() and not t_b.is_alive()
+        assert len(seen_a) == 2 and len(seen_b) == 2
+        # Each thread saw its own override on entry AND after the barrier.
+        assert seen_a[0] is seen_a[1]
+        assert seen_b[0] is seen_b[1]
+        assert seen_a[0] is not seen_b[0], (
+            "threads leaked each other's override — default_services() is "
+            "not per-thread isolated"
+        )
+        # Neither thread saw the other's override.
+        assert seen_a[0].nlp == "nlp-a"
+        assert seen_b[0].nlp == "nlp-b"
+        # Original default restored.
+        assert get_default_services() is before
+
+
+class TestNestedInjectionPropagatesToLoaders:
+    """When a caller injects `Services(style_analyzer=fake)` and then accesses
+    `services.indexer`, the CorpusIndexer that gets lazy-loaded must pull
+    the analyzer from THAT container, not from the process-wide default."""
+
+    def test_indexer_loader_uses_injected_style_analyzer(self):
+        from src.services import Services
+
+        class FakeAnalyzer:
+            pass
+
+        fake = FakeAnalyzer()
+        svc = Services(style_analyzer=fake)
+        # Do NOT install svc as the default — the bug manifests when the
+        # injected container is not the global default.
+        assert svc.indexer._analyzer is fake, (
+            "nested DI: indexer loader must read style_analyzer from the "
+            "container being loaded, not from the process-wide default"
+        )
 
 
 class TestDefaultServicesContextManager:

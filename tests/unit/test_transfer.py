@@ -298,6 +298,170 @@ class TestStyleTransfer:
         assert "Para 2" in output
 
 
+class TestStyleTransferNestedDIPropagation:
+    """Fix #3: self.services must propagate through nested collaborators.
+
+    StyleTransfer previously stored self.services but never pushed it onto
+    the default-services stack, so nested calls like get_structural_rag()
+    and get_structural_grafter() resolved against the process-wide default
+    container instead of the injected one. The get_nlp() helper used by
+    split_into_sentences / is_heading / is_sentence_incomplete had the same
+    problem. These tests pin the invariant that an injected Services
+    container reaches every collaborator StyleTransfer constructs.
+    """
+
+    @pytest.fixture
+    def mock_critic(self):
+        critic = MagicMock()
+        critic.provider_name = "mock"
+        return critic
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_structural_rag_uses_injected_services(
+        self, mock_generator_class, mock_critic
+    ):
+        """StructuralRAG collaborator reads analyzers from the injected
+        Services, not the process-wide default."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.services import Services
+        from src.rag import structural_rag as sr_module
+
+        # Clear cache to guarantee a fresh construction against our container
+        sr_module._rag_cache.clear()
+
+        sentinel_analyzer = MagicMock()
+        sentinel_enhanced = MagicMock()
+        sentinel_indexer = MagicMock()
+        # Prevent load_patterns from blowing up on a real ChromaDB call
+        sentinel_indexer.get_random_chunks.return_value = []
+
+        custom_svc = Services(
+            structural_analyzer=sentinel_analyzer,
+            enhanced_analyzer=sentinel_enhanced,
+            indexer=sentinel_indexer,
+        )
+
+        config = TransferConfig(
+            verify_semantic_fidelity=False,
+            use_structural_rag=True,
+            use_structural_grafting=False,
+        )
+
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="DIPropagationTestAuthor",
+            critic_provider=mock_critic,
+            config=config,
+            services=custom_svc,
+        )
+
+        # Regardless of whether structural_rag loaded any patterns, the
+        # load_patterns() path inside StyleTransfer.__init__ must have hit
+        # OUR sentinel indexer. If it hit the process-wide default indexer,
+        # the sentinel's get_random_chunks is never called.
+        assert sentinel_indexer.get_random_chunks.called, (
+            "StructuralRAG must call get_random_chunks on the injected "
+            "services' indexer, not the process-wide default"
+        )
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_structural_grafter_uses_injected_services(
+        self, mock_generator_class, mock_critic
+    ):
+        """StructuralGrafter collaborator reads its indexer from the injected
+        Services, not the process-wide default."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.services import Services
+        from src.rag import structural_grafter as sg_module
+
+        sg_module._grafter_cache.clear()
+
+        sentinel_indexer = MagicMock()
+        custom_svc = Services(indexer=sentinel_indexer)
+
+        config = TransferConfig(
+            verify_semantic_fidelity=False,
+            use_structural_rag=False,
+            use_structural_grafting=True,
+        )
+
+        transfer = StyleTransfer(
+            adapter_path=None,
+            author_name="DIGrafterTestAuthor",
+            critic_provider=mock_critic,
+            config=config,
+            services=custom_svc,
+        )
+
+        assert transfer.structural_grafter is not None
+        assert transfer.structural_grafter.indexer is sentinel_indexer, (
+            "StructuralGrafter.indexer must come from the injected "
+            "Services container, not the process-wide default"
+        )
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_cached_rag_isolated_per_services_container(
+        self, mock_generator_class, mock_critic
+    ):
+        """Two StyleTransfer instances built for the same author but with
+        DIFFERENT Services containers must get DIFFERENT StructuralRAGs.
+        Otherwise the first container's collaborators leak into the second."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.services import Services
+        from src.rag import structural_rag as sr_module
+
+        sr_module._rag_cache.clear()
+
+        indexer_a = MagicMock()
+        indexer_a.get_random_chunks.return_value = []
+        indexer_b = MagicMock()
+        indexer_b.get_random_chunks.return_value = []
+
+        svc_a = Services(
+            structural_analyzer=MagicMock(),
+            enhanced_analyzer=MagicMock(),
+            indexer=indexer_a,
+        )
+        svc_b = Services(
+            structural_analyzer=MagicMock(),
+            enhanced_analyzer=MagicMock(),
+            indexer=indexer_b,
+        )
+
+        config = TransferConfig(
+            verify_semantic_fidelity=False,
+            use_structural_rag=True,
+            use_structural_grafting=False,
+        )
+
+        t_a = StyleTransfer(
+            adapter_path=None,
+            author_name="SharedAuthorForCacheTest",
+            critic_provider=mock_critic,
+            config=config,
+            services=svc_a,
+        )
+        t_b = StyleTransfer(
+            adapter_path=None,
+            author_name="SharedAuthorForCacheTest",
+            critic_provider=mock_critic,
+            config=config,
+            services=svc_b,
+        )
+
+        # The two transfers must see their own container's indexer, not
+        # whichever one was constructed first.
+        if t_a.structural_rag is not None:
+            assert t_a.structural_rag.indexer is indexer_a
+        if t_b.structural_rag is not None:
+            assert t_b.structural_rag.indexer is indexer_b
+        if t_a.structural_rag is not None and t_b.structural_rag is not None:
+            assert t_a.structural_rag is not t_b.structural_rag, (
+                "Per-author StructuralRAG cache must not be shared across "
+                "different Services containers"
+            )
+
+
 # =============================================================================
 # Tests for Document Transfer
 # =============================================================================

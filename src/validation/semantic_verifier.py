@@ -85,9 +85,6 @@ def _get_nli_model():
     return get_default_services().nli_model
 
 
-from ..utils.nlp import get_nlp as _get_nlp
-
-
 @dataclass
 class SentenceVerification:
     """Verification result for a single output sentence."""

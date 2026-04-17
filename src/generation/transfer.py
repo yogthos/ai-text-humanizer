@@ -11,6 +11,7 @@ Pipeline:
 """
 
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import List, Optional, Callable, Tuple, TYPE_CHECKING
 import re
 import time
@@ -57,6 +58,24 @@ except ImportError:
     PERSONA_AVAILABLE = False
 
 logger = get_logger(__name__)
+
+
+def _with_self_services(method):
+    """Run a StyleTransfer method under its own self.services container.
+
+    Nested helpers (split_into_sentences via get_nlp, is_heading, structural
+    analyzers, …) resolve through get_default_services(). Wrapping the
+    public entry points ensures they see the injected container instead of
+    whatever process-wide default another thread or test set up.
+    """
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        from ..services import default_services
+        with default_services(self.services):
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 def _apply_fused_model_overrides(
@@ -334,38 +353,46 @@ class StyleTransfer:
         # Initialize RTT neutralizer (local MLX model)
         self._rtt_neutralizer = None
 
-        # Structural RAG for rhythm/syntax guidance
-        self.structural_rag: Optional[StructuralRAG] = None
-        if self.config.use_structural_rag:
-            if STRUCTURAL_RAG_AVAILABLE:
-                self.structural_rag = get_structural_rag(self.author)
-                loaded = self.structural_rag.load_patterns(
-                    sample_size=self.config.rag_sample_size
-                )
-                if loaded > 0:
-                    logger.info(
-                        f"Structural RAG loaded {loaded} rhythm patterns for {self.author}"
+        # Push self.services onto the thread-local default stack while we
+        # build collaborators so their module-level helpers
+        # (get_structural_analyzer, get_indexer, get_nlp, …) resolve against
+        # THIS container instead of the process-wide default. Without this
+        # wrapper, self.services is stored but never consulted by nested
+        # constructors — DI becomes theatrical.
+        from ..services import default_services
+        with default_services(self.services):
+            # Structural RAG for rhythm/syntax guidance
+            self.structural_rag: Optional[StructuralRAG] = None
+            if self.config.use_structural_rag:
+                if STRUCTURAL_RAG_AVAILABLE:
+                    self.structural_rag = get_structural_rag(self.author)
+                    loaded = self.structural_rag.load_patterns(
+                        sample_size=self.config.rag_sample_size
                     )
+                    if loaded > 0:
+                        logger.info(
+                            f"Structural RAG loaded {loaded} rhythm patterns for {self.author}"
+                        )
+                    else:
+                        logger.warning(f"No structural patterns found for {self.author}")
+                        self.structural_rag = None
                 else:
-                    logger.warning(f"No structural patterns found for {self.author}")
-                    self.structural_rag = None
-            else:
-                logger.warning("Structural RAG not available (missing dependencies)")
-                self.config.use_structural_rag = False
+                    logger.warning("Structural RAG not available (missing dependencies)")
+                    self.config.use_structural_rag = False
 
-        # Structural Grafter for argument skeletons
-        self.structural_grafter: Optional[StructuralGrafter] = None
-        if self.config.use_structural_grafting:
-            if STRUCTURAL_GRAFTER_AVAILABLE:
-                self.structural_grafter = get_structural_grafter(
-                    self.author, critic_provider
-                )
-                logger.info(f"Structural Grafter initialized for {self.author}")
-            else:
-                logger.warning(
-                    "Structural Grafter not available (missing dependencies)"
-                )
-                self.config.use_structural_grafting = False
+            # Structural Grafter for argument skeletons
+            self.structural_grafter: Optional[StructuralGrafter] = None
+            if self.config.use_structural_grafting:
+                if STRUCTURAL_GRAFTER_AVAILABLE:
+                    self.structural_grafter = get_structural_grafter(
+                        self.author, critic_provider
+                    )
+                    logger.info(f"Structural Grafter initialized for {self.author}")
+                else:
+                    logger.warning(
+                        "Structural Grafter not available (missing dependencies)"
+                    )
+                    self.config.use_structural_grafting = False
 
     def _rtt_neutralize(self, text: str, max_retries: int = 2) -> Optional[str]:
         """Round-Trip Translation neutralization via Mandarin pivot.
@@ -549,6 +576,7 @@ class StyleTransfer:
             logger.warning(f"Perspective conversion failed: {e}")
             return text
 
+    @_with_self_services
     def transfer_paragraph(
         self,
         paragraph: str,
@@ -916,6 +944,7 @@ class StyleTransfer:
         # Fallback: add period to entire text
         return text + "."
 
+    @_with_self_services
     def transfer_document(
         self,
         text: str,

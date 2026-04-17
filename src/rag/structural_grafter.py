@@ -119,12 +119,18 @@ class StructuralGrafter:
         )
 
 
-# Cache for grafter instances
+# Cache key is (author, id(services)) so different Services containers get
+# distinct grafters — otherwise an injected container would inherit the
+# process-wide default's indexer from an earlier call.
 _grafter_cache = {}
 
 
 def get_structural_grafter(author: str, llm_provider=None) -> StructuralGrafter:
     """Get or create a structural grafter for an author.
+
+    The cache is partitioned by the active Services container so an injected
+    container does not see a StructuralGrafter built against the process-wide
+    default (which would bypass DI).
 
     Args:
         author: Author name.
@@ -133,7 +139,9 @@ def get_structural_grafter(author: str, llm_provider=None) -> StructuralGrafter:
     Returns:
         StructuralGrafter instance.
     """
-    cache_key = author
+    from ..services import get_default_services
+    services = get_default_services()
+    cache_key = (author, id(services))
     if cache_key not in _grafter_cache:
         _grafter_cache[cache_key] = StructuralGrafter(author, llm_provider)
     elif llm_provider is not None and _grafter_cache[cache_key].llm_provider is None:

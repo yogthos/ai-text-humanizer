@@ -71,9 +71,16 @@ def _default_indexer_path() -> str:
     return str(Path(__file__).parent.parent.parent / "data" / "rag_index")
 
 
-def _load_default_indexer() -> "CorpusIndexer":
-    """Construct the shared default indexer pointed at the project data dir."""
-    return CorpusIndexer(_default_indexer_path())
+def _load_default_indexer(services=None) -> "CorpusIndexer":
+    """Construct the shared default indexer pointed at the project data dir.
+
+    When a Services container is passed, the indexer takes its StyleAnalyzer
+    from THAT container so nested injection propagates. Without it, the
+    indexer falls back to `get_default_services().style_analyzer` inside
+    `CorpusIndexer.__init__`.
+    """
+    style_analyzer = services.style_analyzer if services is not None else None
+    return CorpusIndexer(_default_indexer_path(), style_analyzer=style_analyzer)
 
 
 def get_chromadb():
