@@ -36,7 +36,10 @@ class Services:
     Each lazy-load property is guarded by a per-container lock with
     double-checked locking so concurrent access from worker threads
     (see e.g. ThreadPoolExecutor in `mlx_provider`) runs the loader
-    exactly once.
+    exactly once. The lock is an RLock because some loaders legitimately
+    touch other Services slots during construction — e.g.
+    `CorpusIndexer.__init__` pulls the shared `style_analyzer` — which
+    would re-enter the same lock on the same thread.
     """
 
     def __init__(
@@ -53,7 +56,7 @@ class Services:
         style_analyzer: Any = _UNSET,
         enhanced_analyzer: Any = _UNSET,
     ):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._nlp = nlp
         self._grammar_corrector = grammar_corrector
         self._semantic_verifier = semantic_verifier

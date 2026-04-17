@@ -578,6 +578,56 @@ class TestLazyLoadThreadSafety:
         )
 
 
+class TestNestedSlotAccessNoDeadlock:
+    """A loader may legitimately touch another Services slot during
+    construction — e.g. CorpusIndexer pulls the shared style_analyzer.
+    Both accesses run on the same thread while the container lock is
+    held, so the lock MUST be reentrant."""
+
+    def test_loader_can_access_another_slot(self, monkeypatch):
+        """Simulate the CorpusIndexer pattern: outer slot's loader reads
+        an inner slot from the same Services instance."""
+        import threading
+        from src.services import Services
+
+        s = Services()
+
+        class InnerAnalyzer:
+            pass
+
+        class OuterIndexer:
+            def __init__(self):
+                # Touches another slot while the container lock is held
+                # by the outer slot's loader — would deadlock on a plain
+                # threading.Lock.
+                self.analyzer = s.style_analyzer
+
+        monkeypatch.setattr(
+            "src.rag.style_analyzer.StyleAnalyzer",
+            InnerAnalyzer,
+        )
+        monkeypatch.setattr(
+            "src.rag.corpus_indexer._load_default_indexer",
+            lambda: OuterIndexer(),
+        )
+
+        # Run in a worker thread with a hard timeout so a deadlock shows
+        # up as a timeout rather than hanging the whole suite.
+        done = threading.Event()
+        result = {}
+
+        def go():
+            result["indexer"] = s.indexer
+            done.set()
+
+        t = threading.Thread(target=go, daemon=True)
+        t.start()
+        done.wait(timeout=5.0)
+        assert done.is_set(), "nested slot access deadlocked the container lock"
+        assert isinstance(result["indexer"], OuterIndexer)
+        assert isinstance(result["indexer"].analyzer, InnerAnalyzer)
+
+
 class TestDefaultServicesContextManager:
     """`default_services(services)` swaps the process default, yields it, and
     restores the original on exit — a clean replacement for the try/finally
