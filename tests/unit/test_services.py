@@ -724,6 +724,20 @@ class TestLazyLoadThreadSafety:
         # Force the lazy default to re-init for this test
         monkeypatch.setattr(services_mod, "_default_services", None)
 
+        # Count Services() constructions so we can tell the difference
+        # between "all threads saw the same instance because the FIRST
+        # construction won the race" and "Services() was actually called
+        # only once". Without this, a racy implementation that builds
+        # multiple instances but last-write-wins would still pass.
+        construct_count = [0]
+        real_init = Services.__init__
+
+        def counting_init(self, *args, **kwargs):
+            construct_count[0] += 1
+            real_init(self, *args, **kwargs)
+
+        monkeypatch.setattr(Services, "__init__", counting_init)
+
         barrier = threading.Barrier(8)
         results = [None] * 8
 
@@ -741,6 +755,11 @@ class TestLazyLoadThreadSafety:
         assert isinstance(first, Services)
         assert all(r is first for r in results), (
             "get_default_services() produced more than one container under concurrent access"
+        )
+        assert construct_count[0] == 1, (
+            f"Services() ran {construct_count[0]} times under concurrent access — "
+            "double-checked locking is broken; extra instances were built even "
+            "if only one survived"
         )
 
 

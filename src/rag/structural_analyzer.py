@@ -132,14 +132,9 @@ class StructuralAnalyzer:
         "VERY_LONG": (36, 1000),
     }
 
-    def __init__(self):
-        self._nlp = None
-
     @property
     def nlp(self):
-        if self._nlp is None:
-            self._nlp = get_nlp()
-        return self._nlp
+        return get_nlp()
 
     def categorize_length(self, word_count: int) -> str:
         """Categorize sentence length."""

@@ -290,31 +290,23 @@ class TestModuleFunctions:
     def test_get_grammar_corrector_singleton(self):
         """get_grammar_corrector() returns the same corrector across calls,
         now backed by the default Services container."""
-        from src.services import Services, get_default_services, set_default_services
+        from src.services import default_services
         from src.vocabulary.grammar_corrector import get_grammar_corrector
 
-        original = get_default_services()
-        try:
-            set_default_services(Services())  # fresh container for isolation
+        with default_services():  # fresh container, per-thread isolation
             c1 = get_grammar_corrector()
             c2 = get_grammar_corrector()
             assert c1 is c2
-        finally:
-            set_default_services(original)
 
     def test_correct_grammar_function(self):
         """Test the convenience correct_grammar function."""
-        from src.services import Services, get_default_services, set_default_services
+        from src.services import default_services
         from src.vocabulary.grammar_corrector import correct_grammar
 
-        original = get_default_services()
-        try:
-            set_default_services(Services())
+        with default_services():
             # Just verify it doesn't crash (LanguageTool may not be installed)
             result = correct_grammar("This is a test.")
             assert isinstance(result, str)
-        finally:
-            set_default_services(original)
 
 
 class TestDefaultSkipLists:

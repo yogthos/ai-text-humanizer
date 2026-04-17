@@ -87,16 +87,10 @@ class StyleMetrics:
 class StyleAnalyzer:
     """Analyzes text for style metrics."""
 
-    def __init__(self):
-        """Initialize the analyzer."""
-        self._nlp = None
-
     @property
     def nlp(self):
-        """Lazy-load spaCy model."""
-        if self._nlp is None:
-            self._nlp = get_nlp()
-        return self._nlp
+        """Return the shared spaCy model from the active Services container."""
+        return get_nlp()
 
     def analyze(self, text: str) -> StyleMetrics:
         """Analyze text and return style metrics.

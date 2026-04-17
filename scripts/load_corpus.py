@@ -256,7 +256,7 @@ def load_corpus(
         ChunkStats with loading statistics.
     """
     from src.rag.corpus_indexer import get_indexer
-    from src.rag.style_analyzer import StyleAnalyzer
+    from src.rag.style_analyzer import get_style_analyzer
 
     stats = ChunkStats()
 
@@ -303,9 +303,9 @@ def load_corpus(
         if removed > 0:
             logger.info(f"Removed {removed} near-duplicates, {len(quality_paragraphs)} remaining")
 
-    # Get indexer and analyzer
+    # Get indexer and analyzer from the shared Services container
     indexer = get_indexer()
-    analyzer = StyleAnalyzer()
+    analyzer = get_style_analyzer()
 
     # Clear existing if requested
     if clear_existing:

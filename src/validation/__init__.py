@@ -8,11 +8,13 @@ Core validation for the LoRA pipeline:
 from .semantic_verifier import (
     SemanticVerifier,
     VerificationResult,
+    get_semantic_verifier,
     verify_semantic_preservation,
 )
 
 __all__ = [
     "SemanticVerifier",
     "VerificationResult",
+    "get_semantic_verifier",
     "verify_semantic_preservation",
 ]

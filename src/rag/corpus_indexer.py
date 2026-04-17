@@ -503,14 +503,21 @@ class CorpusIndexer:
         return chunks
 
 
-def get_indexer(persist_dir: Optional[str] = None) -> CorpusIndexer:
+def get_indexer(
+    persist_dir: Optional[str] = None,
+    style_analyzer: Optional[StyleAnalyzer] = None,
+) -> CorpusIndexer:
     """Return a CorpusIndexer.
 
     With no persist_dir, returns the shared indexer owned by the default
     Services container (pointed at the project data directory). With an
     explicit persist_dir, returns a new uncached instance.
+
+    When persist_dir is passed, `style_analyzer` overrides the default
+    analyzer pulled from the active Services container — useful for scripts
+    that want to isolate an indexer from the rest of the process.
     """
     if persist_dir is not None:
-        return CorpusIndexer(persist_dir)
+        return CorpusIndexer(persist_dir, style_analyzer=style_analyzer)
     from ..services import get_default_services
     return get_default_services().indexer
