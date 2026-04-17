@@ -55,6 +55,7 @@ class Services:
         structural_analyzer: Any = _UNSET,
         style_analyzer: Any = _UNSET,
         enhanced_analyzer: Any = _UNSET,
+        sentence_splitter: Any = _UNSET,
     ):
         self._lock = threading.RLock()
         self._nlp = nlp
@@ -67,6 +68,7 @@ class Services:
         self._structural_analyzer = structural_analyzer
         self._style_analyzer = style_analyzer
         self._enhanced_analyzer = enhanced_analyzer
+        self._sentence_splitter = sentence_splitter
 
     @property
     def nlp(self) -> Any:
@@ -159,6 +161,15 @@ class Services:
                     from .rag.enhanced_analyzer import EnhancedStructuralAnalyzer
                     self._enhanced_analyzer = EnhancedStructuralAnalyzer()
         return self._enhanced_analyzer
+
+    @property
+    def sentence_splitter(self) -> Any:
+        if self._sentence_splitter is _UNSET:
+            with self._lock:
+                if self._sentence_splitter is _UNSET:
+                    from .vocabulary.sentence_splitter import SentenceSplitter
+                    self._sentence_splitter = SentenceSplitter()
+        return self._sentence_splitter
 
 
 _default_services: Optional[Services] = None

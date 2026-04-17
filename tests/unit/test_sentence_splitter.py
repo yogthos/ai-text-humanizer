@@ -240,17 +240,17 @@ class TestModuleFunctions:
     """Tests for module-level convenience functions."""
 
     def test_get_sentence_splitter_singleton(self):
-        """Test that get_sentence_splitter returns singleton."""
+        """get_sentence_splitter() returns the shared instance cached on the
+        default Services container — repeat calls yield the same object."""
+        from src.services import default_services
         from src.vocabulary.sentence_splitter import get_sentence_splitter
 
-        # Reset singleton
-        import src.vocabulary.sentence_splitter as module
-        module._splitter = None
+        # Isolate via a fresh Services so prior tests don't affect us
+        with default_services():
+            s1 = get_sentence_splitter()
+            s2 = get_sentence_splitter()
 
-        s1 = get_sentence_splitter()
-        s2 = get_sentence_splitter()
-
-        assert s1 is s2
+            assert s1 is s2
 
     def test_split_sentences_function(self):
         """Test the convenience split_sentences function."""

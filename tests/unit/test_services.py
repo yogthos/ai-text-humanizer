@@ -612,6 +612,60 @@ class TestLoaderMissingDependencyContract:
         )
 
 
+class TestSentenceSplitterMigration:
+    """Fix #7: the sentence splitter lived as a module-global singleton in
+    src/vocabulary/sentence_splitter.py. Pull it onto the Services container
+    so test isolation uses the same mechanism as every other slot."""
+
+    def test_injected_sentence_splitter_is_returned(self):
+        """An explicit splitter on Services is the canonical test seam."""
+        from src.services import Services
+
+        sentinel = object()
+        s = Services(sentence_splitter=sentinel)
+        assert s.sentence_splitter is sentinel
+
+    def test_sentence_splitter_lazy_loads(self, monkeypatch):
+        """With no injection, the first access constructs and caches."""
+        from src.services import Services
+
+        call_count = [0]
+
+        class FakeSplitter:
+            def __init__(self, config=None):
+                call_count[0] += 1
+
+        monkeypatch.setattr(
+            "src.vocabulary.sentence_splitter.SentenceSplitter",
+            FakeSplitter,
+        )
+
+        s = Services()
+        first = s.sentence_splitter
+        second = s.sentence_splitter
+
+        assert first is second
+        assert call_count[0] == 1, (
+            f"SentenceSplitter constructed {call_count[0]} times — "
+            "the slot must cache"
+        )
+
+    def test_get_sentence_splitter_delegates_to_services(self):
+        """get_sentence_splitter() must read from the default Services
+        container so the module-global _splitter is no longer the source
+        of truth."""
+        from src.services import Services, set_default_services, get_default_services
+        from src.vocabulary.sentence_splitter import get_sentence_splitter
+
+        sentinel = object()
+        original = get_default_services()
+        try:
+            set_default_services(Services(sentence_splitter=sentinel))
+            assert get_sentence_splitter() is sentinel
+        finally:
+            set_default_services(original)
+
+
 class TestLazyLoadThreadSafety:
     """Services is accessed from worker threads in several places (see
     mlx_provider.ThreadPoolExecutor usage). The lazy-load slots must be

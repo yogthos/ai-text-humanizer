@@ -226,16 +226,17 @@ class SentenceSplitter:
         return text
 
 
-# Module singleton
-_splitter: SentenceSplitter = None
-
-
 def get_sentence_splitter(config: SentenceSplitterConfig = None) -> SentenceSplitter:
-    """Get or create singleton sentence splitter instance."""
-    global _splitter
-    if _splitter is None:
-        _splitter = SentenceSplitter(config)
-    return _splitter
+    """Return the shared SentenceSplitter from the default Services container.
+
+    When `config` is provided, a fresh uncached instance is returned so
+    callers that need non-default settings are not forced to mutate the
+    shared singleton.
+    """
+    if config is not None:
+        return SentenceSplitter(config)
+    from ..services import get_default_services
+    return get_default_services().sentence_splitter
 
 
 def split_sentences(text: str, max_length: int = 60) -> str:
