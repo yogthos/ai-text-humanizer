@@ -163,9 +163,10 @@ class TestGrammarCorrector:
         corrector = GrammarCorrector()
         text = "This is a test."
 
-        result = corrector._apply_corrections(text, [])
+        result, applied = corrector._apply_corrections(text, [])
 
         assert result == text
+        assert applied == 0
 
     def test_apply_corrections_single_match(self):
         """Test applying a single correction."""
@@ -179,9 +180,10 @@ class TestGrammarCorrector:
         mock_match.error_length = 4  # Length of "were"
         mock_match.replacements = ["was"]
 
-        result = corrector._apply_corrections(text, [mock_match])
+        result, applied = corrector._apply_corrections(text, [mock_match])
 
         assert result == "The horror was lurking."
+        assert applied == 1
 
     def test_apply_corrections_multiple_matches(self):
         """Test applying multiple corrections in correct order."""
@@ -202,9 +204,10 @@ class TestGrammarCorrector:
         match2.error_length = 3
         match2.replacements = ["the"]
 
-        result = corrector._apply_corrections(text, [match1, match2])
+        result, applied = corrector._apply_corrections(text, [match1, match2])
 
         assert result == "She doesn't like the food."
+        assert applied == 2
 
     def test_analyze_empty_when_unavailable(self):
         """Test that analyze returns empty list when unavailable."""
@@ -366,8 +369,9 @@ class TestReplacementGuards:
         mock_match.error_length = 6  # "horror"
         mock_match.replacements = [""]  # Empty replacement
 
-        result = corrector._apply_corrections(text, [mock_match])
+        result, applied = corrector._apply_corrections(text, [mock_match])
         assert result == text, "Empty replacement should not delete text"
+        assert applied == 0
 
     def test_suspiciously_long_replacement_rejected(self):
         """Replacement dramatically longer than the error should be skipped."""
@@ -384,10 +388,11 @@ class TestReplacementGuards:
             "was lurking, its presence an indescribable shadow upon the night"
         ]
 
-        result = corrector._apply_corrections(text, [mock_match])
+        result, applied = corrector._apply_corrections(text, [mock_match])
         assert result == text, (
             f"Suspiciously long replacement should be skipped, got: {result}"
         )
+        assert applied == 0
 
     def test_normal_replacement_still_applied(self):
         """Short, sane replacements (e.g., were -> was) should still apply."""
@@ -401,8 +406,9 @@ class TestReplacementGuards:
         mock_match.error_length = 4  # "were"
         mock_match.replacements = ["was"]
 
-        result = corrector._apply_corrections(text, [mock_match])
+        result, applied = corrector._apply_corrections(text, [mock_match])
         assert result == "The horror was lurking."
+        assert applied == 1
 
     def test_slightly_longer_replacement_applied(self):
         """Slightly longer replacement (dont -> doesn't) should be allowed."""
@@ -416,8 +422,82 @@ class TestReplacementGuards:
         mock_match.error_length = 4  # "dont"
         mock_match.replacements = ["doesn't"]  # 7 chars — < 3x
 
-        result = corrector._apply_corrections(text, [mock_match])
+        result, applied = corrector._apply_corrections(text, [mock_match])
         assert result == "She doesn't know."
+        assert applied == 1
+
+
+class TestCorrectionsAppliedCounterAccuracy:
+    """Review finding: stats.corrections_applied was set to len(filtered),
+    but _apply_corrections skips matches with no replacements and matches
+    rejected by the safety guard. The counter was lying about work done."""
+
+    def _make_match(self, offset, error_length, replacements):
+        m = MagicMock()
+        m.offset = offset
+        m.error_length = error_length
+        m.replacements = replacements
+        m.category = "GRAMMAR"
+        m.rule_id = "RULE"
+        return m
+
+    def test_counter_excludes_empty_replacement_matches(self):
+        """A match with [''] replacements gets skipped but used to be counted."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        corrector._available = True
+
+        safe_match = self._make_match(0, 3, ["was"])  # "The" -> "was" (applied)
+        empty_match = self._make_match(10, 6, [""])  # skipped
+
+        mock_tool = MagicMock()
+        mock_tool.check.return_value = [safe_match, empty_match]
+        corrector._tool = mock_tool
+
+        _, stats = corrector.correct("The horror were lurking.")
+
+        assert stats.corrections_applied == 1, (
+            "Counter should reflect replacements actually written, "
+            f"not the pre-filter match count. Got {stats.corrections_applied}"
+        )
+
+    def test_counter_excludes_missing_replacements(self):
+        """A match with [] replacements gets skipped but used to be counted."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        corrector._available = True
+
+        no_repl_match = self._make_match(0, 5, [])  # skipped: no replacement
+
+        mock_tool = MagicMock()
+        mock_tool.check.return_value = [no_repl_match]
+        corrector._tool = mock_tool
+
+        _, stats = corrector.correct("Some text here for testing.")
+
+        assert stats.corrections_applied == 0
+
+    def test_counter_excludes_unsafe_long_replacements(self):
+        """A match the safety guard rejects gets skipped but used to be counted."""
+        from src.vocabulary.grammar_corrector import GrammarCorrector
+
+        corrector = GrammarCorrector()
+        corrector._available = True
+
+        unsafe_match = self._make_match(
+            0, 3,
+            ["a sprawling whole-sentence rewrite that would rewrite all of this"],
+        )
+
+        mock_tool = MagicMock()
+        mock_tool.check.return_value = [unsafe_match]
+        corrector._tool = mock_tool
+
+        _, stats = corrector.correct("The quick brown fox jumps over.")
+
+        assert stats.corrections_applied == 0
 
 
 if __name__ == "__main__":

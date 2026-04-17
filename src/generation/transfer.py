@@ -251,6 +251,15 @@ class StyleTransfer:
         # models so _get_worldview_filename can locate the config entry.
         self.adapter_path = primary_adapter_path
 
+        # Validate persona file at startup so a typo in config.worldview fails
+        # fast instead of aborting mid-document on the first paragraph.
+        if self.config.use_persona and PERSONA_AVAILABLE:
+            from ..persona.prompt_builder import (
+                _get_worldview_filename,
+                _load_persona_file,
+            )
+            _load_persona_file(_get_worldview_filename(self.adapter_path))
+
         if fused_models:
             fused_cfg = get_fused_model_config(primary_adapter_path)
             gen_config = GenerationConfig.from_fused_model(fused_cfg)

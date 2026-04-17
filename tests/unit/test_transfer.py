@@ -625,6 +625,65 @@ class TestDeadCodeLoraInputWords:
         )
 
 
+class TestPersonaStartupValidation:
+    """A typo in config.worldview should fail fast at StyleTransfer init, not
+    mid-document when the first paragraph tries to load the persona file."""
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_init_raises_on_missing_persona_file(self, mock_generator_class, tmp_path):
+        """StyleTransfer.__init__ should raise FileNotFoundError when worldview
+        points to a missing file and use_persona is True."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.persona.prompt_builder import _load_persona_file
+
+        _load_persona_file.cache_clear()
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(verify_semantic_fidelity=False, use_persona=True)
+
+        # Point the worldview lookup at a filename that doesn't exist.
+        with patch(
+            'src.persona.prompt_builder._get_worldview_filename',
+            return_value='totally_missing_persona_file.txt',
+        ):
+            with pytest.raises(FileNotFoundError, match="totally_missing_persona_file"):
+                StyleTransfer(
+                    adapter_path="lora_adapters/test",
+                    author_name="Test",
+                    critic_provider=mock_critic,
+                    config=config,
+                )
+
+    @patch('src.generation.transfer.create_style_generator')
+    def test_init_skips_persona_validation_when_use_persona_false(
+        self, mock_generator_class, tmp_path
+    ):
+        """When use_persona is False, init should succeed even if the worldview
+        file would be missing — the persona path is never taken."""
+        from src.generation.transfer import StyleTransfer, TransferConfig
+        from src.persona.prompt_builder import _load_persona_file
+
+        _load_persona_file.cache_clear()
+        mock_critic = MagicMock()
+        mock_critic.provider_name = "mock"
+
+        config = TransferConfig(verify_semantic_fidelity=False, use_persona=False)
+
+        with patch(
+            'src.persona.prompt_builder._get_worldview_filename',
+            return_value='totally_missing_persona_file.txt',
+        ):
+            # Should NOT raise — persona is disabled
+            transfer = StyleTransfer(
+                adapter_path="lora_adapters/test",
+                author_name="Test",
+                critic_provider=mock_critic,
+                config=config,
+            )
+            assert transfer.author == "Test"
+
+
 class TestCleanPunctuationAbbreviations:
     """Bug: _clean_punctuation_artifacts breaks abbreviations like U.S. -> U. S."""
 
