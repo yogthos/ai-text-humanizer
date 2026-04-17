@@ -102,16 +102,26 @@ class IndexedChunk:
 class CorpusIndexer:
     """Indexes author corpora into ChromaDB for style retrieval."""
 
-    def __init__(self, persist_dir: Optional[str] = None):
+    def __init__(
+        self,
+        persist_dir: Optional[str] = None,
+        *,
+        style_analyzer: Optional[StyleAnalyzer] = None,
+    ):
         """Initialize the indexer.
 
         Args:
             persist_dir: Directory to persist ChromaDB. If None, uses in-memory.
+            style_analyzer: Injected StyleAnalyzer. Defaults to the one held by
+                the shared Services container (`get_default_services().style_analyzer`).
         """
         self.persist_dir = persist_dir
         self._client = None
         self._collection = None
-        self._analyzer = StyleAnalyzer()
+        if style_analyzer is None:
+            from ..services import get_default_services
+            style_analyzer = get_default_services().style_analyzer
+        self._analyzer = style_analyzer
         self._embedding_model = None
 
     @property

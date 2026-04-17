@@ -448,5 +448,174 @@ class TestEnhancedAnalyzerMigration:
             set_default_services(original)
 
 
+class TestLazyLoadCaching:
+    """Lazy-load slots must cache the result even when the loader legitimately
+    returns None (e.g. optional dependency missing). Using `None` as the
+    'unset' sentinel would re-run the loader forever in that case."""
+
+    def test_nli_model_loader_called_once_when_it_returns_none(self, monkeypatch):
+        from src import services as services_mod
+        from src.services import Services
+
+        call_count = [0]
+
+        def fake_loader():
+            call_count[0] += 1
+            return None  # simulate sentence-transformers not installed
+
+        monkeypatch.setattr(
+            "src.validation.semantic_verifier._load_nli_model",
+            fake_loader,
+        )
+
+        s = Services()
+        first = s.nli_model
+        second = s.nli_model
+        third = s.nli_model
+
+        assert first is None and second is None and third is None
+        assert call_count[0] == 1, (
+            f"loader ran {call_count[0]} times — None must be cached just like "
+            "any other loaded value; using None as 'unset' sentinel is a bug"
+        )
+
+    def test_grammar_corrector_loader_called_once_when_it_returns_none(self, monkeypatch):
+        """Same invariant for any slot — use grammar_corrector as a spot-check."""
+        from src.services import Services
+
+        call_count = [0]
+
+        class FakeGrammarCorrector:
+            def __init__(self):
+                call_count[0] += 1
+
+        monkeypatch.setattr(
+            "src.vocabulary.grammar_corrector.GrammarCorrector",
+            FakeGrammarCorrector,
+        )
+
+        s = Services()
+        _ = s.grammar_corrector
+        _ = s.grammar_corrector
+        assert call_count[0] == 1
+
+
+class TestLazyLoadThreadSafety:
+    """Services is accessed from worker threads in several places (see
+    mlx_provider.ThreadPoolExecutor usage). The lazy-load slots must be
+    safe against double-initialization races — two threads hitting an
+    unloaded slot should result in the loader running exactly once."""
+
+    def test_concurrent_access_runs_loader_once(self, monkeypatch):
+        import threading
+        import time
+        from src.services import Services
+
+        call_count = [0]
+        count_lock = threading.Lock()
+
+        class SlowStyleAnalyzer:
+            def __init__(self):
+                # Small sleep inside the loader widens the race window so a
+                # missing container lock would produce multiple instantiations.
+                time.sleep(0.01)
+                with count_lock:
+                    call_count[0] += 1
+
+        monkeypatch.setattr(
+            "src.rag.style_analyzer.StyleAnalyzer",
+            SlowStyleAnalyzer,
+        )
+
+        s = Services()
+        results = [None] * 8
+        # All threads rendezvous before touching the property so they all
+        # race into the lazy-load path at once.
+        barrier = threading.Barrier(8)
+
+        def worker(idx):
+            barrier.wait()
+            results[idx] = s.style_analyzer
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert call_count[0] == 1, (
+            f"loader ran {call_count[0]} times across 8 threads — "
+            "lazy-load slot is not thread-safe"
+        )
+        # All threads received the same cached instance
+        assert all(r is results[0] for r in results)
+
+    def test_get_default_services_concurrent_calls_create_one_instance(self, monkeypatch):
+        import threading
+        from src import services as services_mod
+        from src.services import Services
+
+        # Force the lazy default to re-init for this test
+        monkeypatch.setattr(services_mod, "_default_services", None)
+
+        barrier = threading.Barrier(8)
+        results = [None] * 8
+
+        def worker(idx):
+            barrier.wait()
+            results[idx] = services_mod.get_default_services()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        first = results[0]
+        assert isinstance(first, Services)
+        assert all(r is first for r in results), (
+            "get_default_services() produced more than one container under concurrent access"
+        )
+
+
+class TestDefaultServicesContextManager:
+    """`default_services(services)` swaps the process default, yields it, and
+    restores the original on exit — a clean replacement for the try/finally
+    pattern test code was repeating everywhere."""
+
+    def test_context_manager_swaps_and_restores(self):
+        from src.services import (
+            Services,
+            default_services,
+            get_default_services,
+        )
+
+        before = get_default_services()
+        with default_services() as fresh:
+            assert isinstance(fresh, Services)
+            assert get_default_services() is fresh
+            assert fresh is not before
+        assert get_default_services() is before
+
+    def test_context_manager_restores_on_exception(self):
+        from src.services import default_services, get_default_services
+
+        before = get_default_services()
+        with pytest.raises(RuntimeError):
+            with default_services():
+                raise RuntimeError("boom")
+        assert get_default_services() is before, (
+            "default services must be restored even when the block raised"
+        )
+
+    def test_context_manager_accepts_explicit_services(self):
+        from src.services import Services, default_services, get_default_services
+
+        custom = Services(nlp="fake-nlp")
+        with default_services(custom) as yielded:
+            assert yielded is custom
+            assert get_default_services() is custom
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

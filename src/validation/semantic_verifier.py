@@ -15,6 +15,7 @@ from typing import List, Tuple, Optional, Set
 import re
 
 from ..utils.logging import get_logger
+from ..utils.nlp import get_nlp as _get_nlp
 
 logger = get_logger(__name__)
 

@@ -13,15 +13,12 @@ from unittest.mock import patch
 class TestSemanticVerifierSingleton:
     """Tests for get_semantic_verifier backed by the Services container."""
 
-    def setup_method(self):
-        """Swap the default Services container for test isolation."""
-        from src.services import Services, get_default_services, set_default_services
-        self._original_services = get_default_services()
-        set_default_services(Services())
-
-    def teardown_method(self):
-        from src.services import set_default_services
-        set_default_services(self._original_services)
+    @pytest.fixture(autouse=True)
+    def _isolated_services(self):
+        """Each test gets a fresh default Services container, restored after."""
+        from src.services import default_services
+        with default_services():
+            yield
 
     def test_kwargs_yield_requested_threshold(self):
         """get_semantic_verifier(**kwargs) returns an instance configured with kwargs."""
@@ -152,15 +149,12 @@ class TestUnusedEntailmentThreshold:
     """Bug: SemanticVerifier stores entailment_threshold but never uses it.
     The grounding check at line 365 uses grounding_threshold instead."""
 
-    def setup_method(self):
-        """Swap default Services for test isolation."""
-        from src.services import Services, get_default_services, set_default_services
-        self._original_services = get_default_services()
-        set_default_services(Services())
-
-    def teardown_method(self):
-        from src.services import set_default_services
-        set_default_services(self._original_services)
+    @pytest.fixture(autouse=True)
+    def _isolated_services(self):
+        """Each test gets a fresh default Services container, restored after."""
+        from src.services import default_services
+        with default_services():
+            yield
 
     def test_entailment_threshold_not_dead_code(self):
         """entailment_threshold should be used in the verifier, not just stored."""
