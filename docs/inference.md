@@ -72,7 +72,7 @@ Generation parameters are in `config.json` under `lora_adapters`:
     "worldview": "russell_worldview.txt",
     "use_structural_rag": true,
     "logit_bias": {
-        ";": 1.0,
+        ";": -2.0,
         "—": 1.5
     }
 }
@@ -93,19 +93,38 @@ Most generation-wide settings can be overridden per-adapter. Omit the field to i
 
 ### `logit_bias` — per-character logit bias
 
-Map of character/string → float. At every sampling step the value is added to that token's logit. Positive values encourage the token; negative values suppress. Typical range: −5.0 to +5.0.
+Map of character/string → float. At every sampling step the value is added to that token's logit.
+
+- **Positive** → token more likely (encourages use)
+- **Negative** → token less likely (suppresses use)
+- **Zero or omitted** → no effect
+
+Magnitude controls strength. Each unit roughly shifts relative probability by a factor of `e`:
+
+| Bias | Effect on token frequency |
+|---|---|
+| `+2.0` | ~7× more likely |
+| `+1.5` | ~4× more likely |
+| `+1.0` | ~3× more likely |
+| `-1.0` | ~⅓ as often |
+| `-1.5` | ~¼ as often |
+| `-2.0` | ~⅐ as often ("every paragraph" → "every few paragraphs") |
+| `-3.0` | Rare |
+| `-5.0` | Almost never |
 
 ```json
 "logit_bias": {
-    ";": 1.0,
-    "—": 1.5,
-    "…": -2.0
+    "—": 1.5,      // encourage em-dashes
+    ";": -2.0,     // allow semicolons occasionally, not every paragraph
+    "…": -3.0      // suppress ellipses heavily
 }
 ```
 
+Typical range: −5.0 to +5.0. Start around ±1.5–2.0 and tune.
+
 Resolution handles BPE quirks: each key is tokenized as both the bare string and with a leading space; if either variant is a single token, both token IDs get the bias. Keys that split into >1 token are skipped with a warning (biasing partial multi-token sequences produces artifacts).
 
-Use this to nudge characteristic author punctuation (em-dash, semicolon) without fighting `repetition_penalty`. The two work independently: rep penalty divides logits, logit_bias adds.
+Use this to **shape punctuation** — boost what the model underuses, suppress what it overuses — without fighting `repetition_penalty`. The two work independently: rep penalty divides logits, logit_bias adds.
 
 ### Tuning Tips
 
@@ -113,6 +132,7 @@ Use this to nudge characteristic author punctuation (em-dash, semicolon) without
 - **Incoherent output**: Decrease `temperature` (try 0.4-0.5)
 - **Repeating phrases**: Increase `repetition_penalty` (try 1.2-1.3)
 - **Punctuation flattened** (no em-dashes/semicolons after first use): Add a positive `logit_bias` for those characters instead of raising repetition_penalty
+- **Punctuation overused** (e.g., `;` in every paragraph): Add a negative `logit_bias` (start around `-2.0`); suppression is context-aware — strong semicolon positions still fire, weak ones get filtered
 - **Output too short**: This is by design (LoRA trained on ~1.21x ratio).
   Enable `expand_for_texture: true` to pre-expand content before LoRA.
 - **Mechanical/robotic**: Enable `apply_input_perturbation: true` to match training distribution

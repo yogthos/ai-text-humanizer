@@ -659,9 +659,9 @@ Several of these settings can be overridden per-adapter (or per-fused-model) by 
 | `verify_entailment` | NLI fidelity check |
 | `merge_paragraphs` | Merge N paragraphs before LoRA |
 | `use_structural_rag` | Pull rhythm patterns from corpus |
-| `logit_bias` | Map of character/string → additive logit bias (e.g., `{";": 1.0, "—": 1.5}`) |
+| `logit_bias` | Map of character/string → additive logit bias. Positive encourages the token (`"—": 1.5`), negative suppresses it (`";": -2.0`). Typical range −5 to +5 |
 
-`logit_bias` resolves each key to token IDs via the tokenizer (both bare and leading-space BPE variants) and adds the value to those logits at every sampling step. Use it to nudge characteristic punctuation without raising `repetition_penalty` (which flattens repetition globally).
+`logit_bias` resolves each key to token IDs via the tokenizer (both bare and leading-space BPE variants) and adds the value to those logits at every sampling step. Each unit of bias shifts the token's relative probability by roughly a factor of *e* — `+1.0` ≈ 3× more likely, `-2.0` ≈ ⅐ as often. Use it to shape characteristic punctuation (boost what's underused, suppress what's overused) without raising `repetition_penalty` (which flattens repetition globally and indiscriminately).
 
 ---
 

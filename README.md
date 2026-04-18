@@ -177,7 +177,7 @@ Key settings in `config.json`:
         "scale": 2.0,
         "temperature": 0.7,
         "worldview": "russell_worldview.txt",
-        "logit_bias": { ";": 1.0, "—": 1.5 }
+        "logit_bias": { ";": -2.0, "—": 1.5 }
       }
     }
   }
@@ -191,7 +191,7 @@ Key settings in `config.json`:
 | `worldview` | Persona prompt file in `prompts/` (must match training frames exactly) |
 | `apply_input_perturbation` | Add 8% noise to match training distribution |
 | `expand_for_texture` | Pre-expand content for longer output |
-| `logit_bias` | Per-character additive bias (e.g., nudge em-dashes/semicolons without raising rep_penalty) |
+| `logit_bias` | Per-character additive bias. Positive = encourage (e.g. `"—": 1.5`), negative = suppress (e.g. `";": -2.0`). Typical range −5 to +5; start around ±1.5–2.0 and tune |
 | `use_structural_rag` | Per-adapter override for the global RAG flag |
 
 ## Troubleshooting
