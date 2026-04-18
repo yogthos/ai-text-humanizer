@@ -176,7 +176,8 @@ Key settings in `config.json`:
         "enabled": true,
         "scale": 2.0,
         "temperature": 0.7,
-        "worldview": "russell_worldview.txt"
+        "worldview": "russell_worldview.txt",
+        "logit_bias": { ";": 1.0, "—": 1.5 }
       }
     }
   }
@@ -190,6 +191,8 @@ Key settings in `config.json`:
 | `worldview` | Persona prompt file in `prompts/` (must match training frames exactly) |
 | `apply_input_perturbation` | Add 8% noise to match training distribution |
 | `expand_for_texture` | Pre-expand content for longer output |
+| `logit_bias` | Per-character additive bias (e.g., nudge em-dashes/semicolons without raising rep_penalty) |
+| `use_structural_rag` | Per-adapter override for the global RAG flag |
 
 ## Troubleshooting
 
