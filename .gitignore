@@ -54,6 +54,12 @@ atlas_cache/
 lora_adapters/
 models/
 
+# Agent instruction files (local-only)
+CLAUDE.md
+AGENTS.md
+.claude/
+.wolf/
+
 # Logs
 logs/*.md
 !logs/.gitkeep
