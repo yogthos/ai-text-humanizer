@@ -6,8 +6,8 @@ shared between MLX and PyTorch backends.
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Dict, Optional, List
 
 from ..utils.logging import get_logger
 
@@ -85,6 +85,7 @@ class GenerationConfig:
     repetition_penalty: float = 1.15
     scale: float = 1.0  # LoRA adapter scale
     skip_cleaning: bool = False  # If True, return raw output without cleaning
+    logit_bias: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, adapter_path: Optional[str] = None) -> "GenerationConfig":
@@ -107,6 +108,7 @@ class GenerationConfig:
                 min_p=adapter_config.min_p,
                 repetition_penalty=adapter_config.repetition_penalty,
                 scale=adapter_config.scale,
+                logit_bias=dict(adapter_config.logit_bias),
             )
         except Exception as e:
             logger.warning(f"Could not load config, using defaults: {e}")
@@ -126,6 +128,7 @@ class GenerationConfig:
             min_p=fused_config.min_p,
             repetition_penalty=fused_config.repetition_penalty,
             scale=1.0,
+            logit_bias=dict(fused_config.logit_bias),
         )
 
 
