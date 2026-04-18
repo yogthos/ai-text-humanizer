@@ -650,6 +650,19 @@ Output: "The physicist Einstein[^1] formulated his theory of relativity[^2]."
 }
 ```
 
+Several of these settings can be overridden per-adapter (or per-fused-model) by setting them on the adapter entry. Omit to inherit the global value. Overridable fields:
+
+| Field | Purpose |
+|---|---|
+| `expand_for_texture` | Pre-expand via critic before RTT |
+| `perspective` | Output POV |
+| `verify_entailment` | NLI fidelity check |
+| `merge_paragraphs` | Merge N paragraphs before LoRA |
+| `use_structural_rag` | Pull rhythm patterns from corpus |
+| `logit_bias` | Map of character/string → additive logit bias (e.g., `{";": 1.0, "—": 1.5}`) |
+
+`logit_bias` resolves each key to token IDs via the tokenizer (both bare and leading-space BPE variants) and adds the value to those logits at every sampling step. Use it to nudge characteristic punctuation without raising `repetition_penalty` (which flattens repetition globally).
+
 ---
 
 ## Module Reference

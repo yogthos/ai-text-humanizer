@@ -69,15 +69,50 @@ Generation parameters are in `config.json` under `lora_adapters`:
     "repetition_penalty": 1.15,
     "scale": 2.0,
     "max_tokens": 512,
-    "worldview": "russell_worldview.txt"
+    "worldview": "russell_worldview.txt",
+    "use_structural_rag": true,
+    "logit_bias": {
+        ";": 1.0,
+        "—": 1.5
+    }
 }
 ```
+
+### Per-adapter overrides
+
+Most generation-wide settings can be overridden per-adapter. Omit the field to inherit the global `generation.*` value.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `expand_for_texture` | bool | Pre-expand via critic before RTT |
+| `perspective` | string | Output POV (`preserve`, `first_person_singular`, …) |
+| `verify_entailment` | bool | Run NLI semantic fidelity check |
+| `merge_paragraphs` | int | Merge N paragraphs before LoRA |
+| `use_structural_rag` | bool | Pull rhythm patterns from corpus |
+| `logit_bias` | object | Additive bias per character/string (see below) |
+
+### `logit_bias` — per-character logit bias
+
+Map of character/string → float. At every sampling step the value is added to that token's logit. Positive values encourage the token; negative values suppress. Typical range: −5.0 to +5.0.
+
+```json
+"logit_bias": {
+    ";": 1.0,
+    "—": 1.5,
+    "…": -2.0
+}
+```
+
+Resolution handles BPE quirks: each key is tokenized as both the bare string and with a leading space; if either variant is a single token, both token IDs get the bias. Keys that split into >1 token are skipped with a warning (biasing partial multi-token sequences produces artifacts).
+
+Use this to nudge characteristic author punctuation (em-dash, semicolon) without fighting `repetition_penalty`. The two work independently: rep penalty divides logits, logit_bias adds.
 
 ### Tuning Tips
 
 - **Style too weak**: Increase `scale` (try 3.0-4.0)
 - **Incoherent output**: Decrease `temperature` (try 0.4-0.5)
 - **Repeating phrases**: Increase `repetition_penalty` (try 1.2-1.3)
+- **Punctuation flattened** (no em-dashes/semicolons after first use): Add a positive `logit_bias` for those characters instead of raising repetition_penalty
 - **Output too short**: This is by design (LoRA trained on ~1.21x ratio).
   Enable `expand_for_texture: true` to pre-expand content before LoRA.
 - **Mechanical/robotic**: Enable `apply_input_perturbation: true` to match training distribution

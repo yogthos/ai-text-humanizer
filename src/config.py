@@ -89,6 +89,11 @@ class ModelConfig:
     verify_entailment: Optional[bool] = None
     merge_paragraphs: Optional[int] = None
     use_structural_rag: Optional[bool] = None
+    # Additive logit bias per character/string. Keys are strings (e.g. ";",
+    # "—"), values are floats added to that token's logit at every sampling
+    # step. Positive values encourage the token; negative values suppress.
+    # Typical range: -5.0 to +5.0.
+    logit_bias: Dict[str, float] = field(default_factory=dict)
 
     # LoRA-only
     scale: float = 1.0
@@ -252,6 +257,7 @@ _KNOWN_MODEL_FIELDS = {
     "verify_entailment",
     "merge_paragraphs",
     "use_structural_rag",
+    "logit_bias",
     "author",
 }
 
@@ -292,6 +298,7 @@ def _parse_model_config(data: Dict) -> ModelConfig:
         verify_entailment=data.get("verify_entailment"),
         merge_paragraphs=data.get("merge_paragraphs"),
         use_structural_rag=data.get("use_structural_rag"),
+        logit_bias=data.get("logit_bias", {}),
         author=data.get("author", ""),
     )
 

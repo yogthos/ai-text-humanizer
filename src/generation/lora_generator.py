@@ -14,7 +14,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List
+from typing import Dict, Optional, List
 
 from ..utils.logging import get_logger
 from ..utils.prompts import format_prompt
@@ -160,6 +160,10 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         # Lazy load model
         self._model = None
         self._tokenizer = None
+
+        # Built lazily on first generate() call: sentinel None = not-yet-built,
+        # callable = the processor, False = empty bias map (nothing to apply).
+        self._logit_bias_processor = None
 
         # Load metadata from first adapter if available
         if self.adapters:
@@ -382,6 +386,70 @@ class LoRAStyleGenerator(BaseStyleGenerator):
         except Exception as e:
             logger.warning(f"Could not apply LoRA scale: {e}")
 
+    def _build_logit_bias_processor(self):
+        """Build a logits processor that adds per-token bias every step.
+
+        Reads self.config.logit_bias (Dict[str, float]) and resolves each key
+        to token IDs via the tokenizer. Handles BPE quirks by trying both the
+        bare string and a leading-space variant — most subword tokenizers
+        encode ";" and " ;" to different token IDs and the model may emit
+        either. Strings that encode to more than one token are skipped with
+        a warning (biasing a partial multi-token sequence causes artifacts).
+
+        Returns a callable (tokens, logits) -> logits, or None if the bias
+        map is empty or no keys resolved cleanly.
+        """
+        import mlx.core as mx
+
+        bias_map = self.config.logit_bias
+        if not bias_map:
+            return None
+
+        resolved: Dict[int, float] = {}
+        for s, bias in bias_map.items():
+            if not isinstance(bias, (int, float)):
+                logger.warning(f"logit_bias: non-numeric value for {s!r}, skipped")
+                continue
+            added = False
+            for variant in (s, " " + s):
+                try:
+                    ids = self._tokenizer.encode(variant, add_special_tokens=False)
+                except Exception as e:
+                    logger.warning(f"logit_bias: encode failed for {variant!r}: {e}")
+                    continue
+                if len(ids) == 1:
+                    resolved[ids[0]] = float(bias)
+                    added = True
+            if not added:
+                logger.warning(
+                    f"logit_bias: {s!r} did not resolve to any single-token "
+                    f"variant (bare or leading-space) — skipped"
+                )
+
+        if not resolved:
+            return None
+
+        vocab_size = self._model.args.vocab_size if hasattr(self._model, "args") else None
+        if vocab_size is None:
+            max_id = max(resolved.keys())
+            vocab_size = max_id + 1
+
+        import numpy as np
+        bias_np = np.zeros(vocab_size, dtype=np.float32)
+        for tok_id, bias in resolved.items():
+            bias_np[tok_id] = bias
+        bias_vec = mx.array(bias_np)
+
+        logger.info(
+            f"logit_bias: applied to {len(resolved)} token IDs "
+            f"({', '.join(f'{s!r}={v:+.2f}' for s, v in bias_map.items())})"
+        )
+
+        def processor(tokens, logits):
+            return logits + bias_vec
+
+        return processor
+
     def generate(
         self,
         content: str,
@@ -508,6 +576,16 @@ class LoRAStyleGenerator(BaseStyleGenerator):
             context_size=50,
         )
 
+        # Build logit-bias processor on first call, reuse on subsequent calls.
+        # Sentinel None = not-yet-built; False = built-but-empty (no bias map).
+        if self._logit_bias_processor is None:
+            built = self._build_logit_bias_processor()
+            self._logit_bias_processor = built if built is not None else False
+
+        logits_processors = [rep_penalty]
+        if self._logit_bias_processor:
+            logits_processors.append(self._logit_bias_processor)
+
         # Use provided max_tokens, or auto-calculated limit, or config default
         # Prefer tighter auto-calculated limit to prevent repetition
         if max_tokens:
@@ -528,7 +606,7 @@ class LoRAStyleGenerator(BaseStyleGenerator):
             prompt=prompt,
             max_tokens=tokens_limit,
             sampler=sampler,
-            logits_processors=[rep_penalty],
+            logits_processors=logits_processors,
         )
 
         response = response.strip()
