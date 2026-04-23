@@ -153,19 +153,63 @@ def _build_pipeline(args: argparse.Namespace):
     return transfer, author, fused_models, adapters
 
 
+WARMUP_TEXT = (
+    "The universe is vast and old, and we are but brief flickers of awareness "
+    "adrift upon its indifferent tides."
+)
+
+
 def _build_app(args: argparse.Namespace):
+    from contextlib import asynccontextmanager
+
     from fastapi import FastAPI, HTTPException
 
     transfer, author, fused_models, adapters = _build_pipeline(args)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Force the lazy generator to materialize its weights and run through
+        # the full pipeline once, so the first real /restyle request doesn't
+        # pay the 30–60s model-load + CUDA-graph-compile cost.
+        if args.skip_warmup:
+            print("Skipping warmup (--skip-warmup).", file=sys.stderr)
+            app.state.ready = True
+        else:
+            print("Warming up pipeline (first load compiles CUDA graphs)...", file=sys.stderr)
+            try:
+                styled, _ = transfer.transfer_paragraph(WARMUP_TEXT)
+                print(
+                    f"Warmup complete. Sample output: {styled[:80]!r}",
+                    file=sys.stderr,
+                )
+                app.state.ready = True
+            except Exception as e:
+                # Log and keep the server up so /ready can signal failure and
+                # /info still responds — easier to debug than a crashed process.
+                print(f"Warmup failed: {type(e).__name__}: {e}", file=sys.stderr)
+                app.state.ready = False
+                app.state.warmup_error = f"{type(e).__name__}: {e}"
+        yield
+
     app = FastAPI(
         title="Text Style Transfer",
         description=f"Restyle paragraphs in the voice of {author}.",
+        lifespan=lifespan,
     )
 
     @app.get("/health")
     def health():
+        # Liveness: the process is up. Does not imply the model is ready.
         return {"status": "ok"}
+
+    @app.get("/ready")
+    def ready():
+        # Readiness: warmup has completed successfully. Use this for load
+        # balancers / autoscalers so traffic only hits warm pods.
+        if getattr(app.state, "ready", False):
+            return {"status": "ready"}
+        detail = getattr(app.state, "warmup_error", "warming up")
+        raise HTTPException(status_code=503, detail=detail)
 
     @app.get("/info")
     def info():
@@ -179,6 +223,7 @@ def _build_app(args: argparse.Namespace):
             "verify_entailment": transfer.config.verify_semantic_fidelity,
             "expand_for_texture": transfer.config.expand_for_texture,
             "perspective": transfer.config.perspective,
+            "ready": getattr(app.state, "ready", False),
         }
 
     @app.post("/restyle", response_model=RestyleResponse)
@@ -227,6 +272,12 @@ def _make_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--log-level", default="info")
+    p.add_argument(
+        "--skip-warmup",
+        action="store_true",
+        help="Skip the startup warmup pass. First real request will then pay "
+        "the model-load + CUDA-graph-compile cost (~30-60s).",
+    )
     return p
 
 
