@@ -309,6 +309,10 @@ class StyleTransfer:
                 adapter_path=None,
                 config=gen_config,
                 fused_models=fused_models,
+                backend=fused_cfg.backend,
+                device=fused_cfg.device,
+                load_in_4bit=fused_cfg.load_in_4bit,
+                load_in_8bit=fused_cfg.load_in_8bit,
             )
         else:
             gen_config = GenerationConfig.from_config(primary_adapter_path)
