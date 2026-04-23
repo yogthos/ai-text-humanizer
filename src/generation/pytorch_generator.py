@@ -124,6 +124,27 @@ class PyTorchStyleGenerator(BaseStyleGenerator):
                 return "cpu"
         return device
 
+    @staticmethod
+    def _is_awq_model(model_path: str) -> bool:
+        """Detect AWQ/GPTQ pre-quantized models by inspecting config.json.
+
+        AWQ's Triton kernels require fp16 activations; loading in bf16 causes
+        a dtype mismatch in the first matmul. Returns True when the path points
+        to an already-quantized model that needs fp16.
+        """
+        import json
+        candidate = Path(model_path) / "config.json"
+        if not candidate.exists():
+            return False
+        try:
+            with open(candidate) as f:
+                cfg = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return False
+        quant = cfg.get("quantization_config") or {}
+        method = (quant.get("quant_method") or "").lower()
+        return method in {"awq", "gptq"}
+
     def _get_effective_adapter_path(self) -> Optional[str]:
         """Get the effective adapter path including checkpoint subfolder."""
         if not self.adapter_path:
@@ -174,10 +195,18 @@ class PyTorchStyleGenerator(BaseStyleGenerator):
             trust_remote_code=True,
         )
 
-        # Load base model
+        # Load base model. AWQ's Triton kernels require fp16 (they assert
+        # matching dtypes between activations and dequantized weights); bf16
+        # activations crash at first matmul. Detect pre-quantized AWQ/GPTQ
+        # models by reading their config.json and override the dtype.
+        dtype = torch.bfloat16 if self.device != "cpu" else torch.float32
+        if self._is_awq_model(self.base_model_name):
+            logger.info("Detected AWQ-quantized model; using float16 for kernel compatibility")
+            dtype = torch.float16
+
         model_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": torch.bfloat16 if self.device != "cpu" else torch.float32,
+            "torch_dtype": dtype,
         }
 
         if quantization_config:
