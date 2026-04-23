@@ -160,22 +160,13 @@ WARMUP_TEXT = (
 
 
 def _build_app(args: argparse.Namespace):
-    import secrets
     import time
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI, HTTPException
 
     transfer, author, fused_models, adapters = _build_pipeline(args)
-    api_token = args.api_token or os.environ.get("API_TOKEN") or ""
     started_at = time.time()
-
-    def _check_token(token: Optional[str]) -> None:
-        """Constant-time token comparison. No-op when no token is configured."""
-        if not api_token:
-            return
-        if not token or not secrets.compare_digest(token, api_token):
-            raise HTTPException(status_code=401, detail="invalid or missing token")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -239,11 +230,13 @@ def _build_app(args: argparse.Namespace):
 
     @app.get("/api/status")
     def api_status(token: Optional[str] = None):
-        """Token-gated status endpoint (matches GET /api/status?token=...)."""
-        _check_token(token)
+        """Open status endpoint. ``token`` is accepted for URL compatibility
+        with external monitors that always send ?token=..., but ignored."""
+        del token
         warmup_error = getattr(app.state, "warmup_error", None)
         return {
-            "status": "ready" if getattr(app.state, "ready", False) else "starting",
+            "status": "ok",
+            "ready": getattr(app.state, "ready", False),
             "author": author,
             "fused_models": fused_models,
             "adapters": [
@@ -305,12 +298,6 @@ def _make_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the startup warmup pass. First real request will then pay "
         "the model-load + CUDA-graph-compile cost (~30-60s).",
-    )
-    p.add_argument(
-        "--api-token",
-        default=None,
-        help="Token required for /api/status?token=... (or set via API_TOKEN "
-        "env var). When unset, /api/status is open.",
     )
     return p
 
