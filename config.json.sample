@@ -9,10 +9,11 @@
       "deepseek": {
         "api_key": "${DEEPSEEK_API_KEY}",
         "base_url": "https://api.deepseek.com",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-flash",
         "max_tokens": 4096,
         "temperature": 0.7,
-        "timeout": 120
+        "timeout": 120,
+        "thinking": false
       },
       "ollama": {
         "base_url": "http://localhost:11434",

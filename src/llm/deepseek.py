@@ -91,6 +91,11 @@ class DeepSeekProvider(LLMProvider):
         if logit_bias:
             payload["logit_bias"] = logit_bias
 
+        # deepseek-v4-* models default to thinking mode, which emits
+        # reasoning_content before content and can exhaust a small max_tokens
+        # budget (yielding an empty-content error). Toggle explicitly.
+        payload["thinking"] = {"type": "enabled" if self.config.thinking else "disabled"}
+
         try:
             response = requests.post(
                 url,

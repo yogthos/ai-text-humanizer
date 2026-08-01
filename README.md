@@ -202,6 +202,7 @@ Key settings in `config.json`:
 | Output unchanged | Adapter not loading — check `metadata.json` points to local model |
 | Content hallucinated | Lower `scale`, check semantic verification is enabled |
 | OOM at inference | Model path points to HF repo (70GB) not local quantized model |
+| "Empty content in DeepSeek response" | `deepseek-v4-flash` runs in thinking mode by default; the reasoning chain can exhaust a small `max_tokens` budget before any content is emitted. Set `thinking: false` on the provider in config.json. Note: thinking mode also ignores `temperature`/`top_p` |
 | Thinking tokens in output | Chat template override missing — see [docs/inference.md](docs/inference.md) |
 | Multi-turn conversation | `<|im_end|>` not in stop tokens — see [docs/inference.md](docs/inference.md) |
 

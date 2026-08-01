@@ -21,6 +21,7 @@ class LLMProviderConfig:
     max_tokens: int = 4096
     temperature: float = 0.7
     timeout: int = 120
+    thinking: bool = False  # DeepSeek thinking mode; OFF avoids reasoning eating max_tokens
 
 
 @dataclass
@@ -233,6 +234,7 @@ def _parse_llm_provider_config(data: Dict) -> LLMProviderConfig:
         max_tokens=data.get("max_tokens", 4096),
         temperature=data.get("temperature", 0.7),
         timeout=data.get("timeout", 120),
+        thinking=data.get("thinking", False),
     )
 
 
