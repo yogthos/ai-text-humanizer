@@ -141,5 +141,41 @@ class TestFictionMarkerAllHallucinated:
         )
 
 
+class TestEmptyTextAfterCleaning:
+    """Bug: `if doc.sents` is always True (generator), so `list(doc.sents)[0]`
+    raises IndexError when cleaning has stripped the response to nothing."""
+
+    @staticmethod
+    def _generator():
+        from src.generation.base_generator import BaseStyleGenerator
+
+        class TestGenerator(BaseStyleGenerator):
+            def generate(self, content, author, max_tokens=None, target_words=None,
+                         structural_guidance=None, raw_prompt=False, temperature=None):
+                return "test"
+            def unload(self):
+                pass
+
+        gen = TestGenerator()
+        gen.fiction_markers = []
+        return gen
+
+    @pytest.mark.parametrize("text", ["", "   ", "\n\n"])
+    def test_atmospheric_fix_handles_empty_text(self, text):
+        """Empty or whitespace-only text must return unchanged, not raise."""
+        gen = self._generator()
+        assert gen._fix_broken_atmospheric_phrases(text) == text
+
+    def test_clean_response_all_thinking_block(self):
+        """A response that is entirely a <think> block cleans to empty, not IndexError."""
+        gen = self._generator()
+        assert gen._clean_response("<think>reasoning, no answer</think>") == ""
+
+    def test_clean_response_all_non_ascii_garbage(self):
+        """A response of only non-ASCII garbage cleans to empty, not IndexError."""
+        gen = self._generator()
+        assert gen._clean_response("这是一段完全无用的输出") == ""
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

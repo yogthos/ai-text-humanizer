@@ -342,6 +342,9 @@ class BaseStyleGenerator(ABC):
         Returns:
             Text with broken prepositional phrases removed.
         """
+        if not text.strip():
+            return text
+
         try:
             from ..utils.nlp import get_nlp
             nlp = get_nlp()
@@ -352,12 +355,14 @@ class BaseStyleGenerator(ABC):
         # Process the text
         doc = nlp(text)
 
-        # Check if text starts with a prepositional phrase ending in "of"
-        first_sent = list(doc.sents)[0] if doc.sents else None
-        if not first_sent:
+        # Check if text starts with a prepositional phrase ending in "of".
+        # doc.sents is a generator, so it must be materialized before checking
+        # for emptiness - a bare truthiness test on it is always True.
+        sents = list(doc.sents)
+        if not sents:
             return text
 
-        tokens = list(first_sent)
+        tokens = list(sents[0])
         if len(tokens) < 4:
             return text
 
