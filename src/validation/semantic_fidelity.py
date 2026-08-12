@@ -70,7 +70,11 @@ def validate_semantic_fidelity(
         if changes and isinstance(changes, list):
             for change in changes:
                 if isinstance(change, dict):
-                    logger.info(f"Semantic fix: {change.get('issue', '?')}")
+                    issue = change.get("issue", "?")
+                    kind = change.get("type")
+                    logger.info(
+                        f"Semantic fix [{kind}]: {issue}" if kind else f"Semantic fix: {issue}"
+                    )
 
         return FidelityResult(
             original=original,

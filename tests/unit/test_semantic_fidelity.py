@@ -272,6 +272,102 @@ class TestSemanticFidelityPrompt:
         assert "INTENTIONAL" in prompt
         assert "smallest" in prompt.lower()
 
+    def test_prompt_checks_for_invented_content(self):
+        """Prompt must audit restyled -> original, not just original -> restyled."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        assert "invent" in prompt
+        assert "addition" in prompt
+        # The reverse direction must be named explicitly
+        assert "restyled" in prompt and "not supported by the original" in prompt
+
+    def test_prompt_separates_ornament_from_assertion(self):
+        """Flourish is only allowed when it asserts nothing checkable."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        assert "ornament" in prompt
+        assert "assert" in prompt
+        assert "true or false" in prompt
+
+    def test_prompt_covers_meaning_dimensions(self):
+        """Prompt must enumerate the ways styling silently shifts meaning."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        for dimension in [
+            "hedge",
+            "quantifier",
+            "causal",
+            "certainty",
+            "negation",
+            "attribution",
+        ]:
+            assert dimension in prompt, f"missing meaning dimension: {dimension}"
+
+    def test_prompt_forbids_reverting_to_original_wording(self):
+        """Fixing meaning must not become paraphrasing back to the source."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        assert "toward the original's wording" in prompt
+
+    def test_prompt_requires_final_reread(self):
+        """Prompt should end with a re-read of the result against the original."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        assert "final check" in prompt
+
+    def test_prompt_requests_change_type(self):
+        """Each change should be classified so the categories get enumerated."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity")
+        assert '"type"' in prompt
+
+
+class TestChangeLogging:
+    """Change classification should surface in logs."""
+
+    def test_logs_change_type_when_present(self, caplog):
+        from src.validation.semantic_fidelity import validate_semantic_fidelity
+
+        mock_provider = MagicMock()
+        mock_provider.call.return_value = json.dumps({
+            "changes": [{"type": "added", "issue": "invented a storm", "fix": "cut clause"}],
+            "result": "text",
+        })
+
+        with caplog.at_level("INFO"):
+            validate_semantic_fidelity(
+                original="text",
+                restyled="text and a storm",
+                critic_provider=mock_provider,
+            )
+
+        assert "added" in caplog.text
+        assert "invented a storm" in caplog.text
+
+    def test_logs_without_type(self, caplog):
+        from src.validation.semantic_fidelity import validate_semantic_fidelity
+
+        mock_provider = MagicMock()
+        mock_provider.call.return_value = json.dumps({
+            "changes": [{"issue": "dropped a claim", "fix": "restored"}],
+            "result": "text",
+        })
+
+        with caplog.at_level("INFO"):
+            validate_semantic_fidelity(
+                original="text",
+                restyled="text",
+                critic_provider=mock_provider,
+            )
+
+        assert "dropped a claim" in caplog.text
+
 
 class TestTransferPipelineIntegration:
     """Tests for semantic fidelity integration in the transfer pipeline."""
