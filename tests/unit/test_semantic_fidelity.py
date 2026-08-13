@@ -246,11 +246,74 @@ class TestValidateSemanticFidelity:
         assert result.corrected == "corrected text with A and B"
 
 
+    def test_rejects_placeholder_result(self):
+        """A critic that echoes the schema placeholder must not wipe the paragraph."""
+        from src.validation.semantic_fidelity import validate_semantic_fidelity
+
+        restyled = " ".join(["word"] * 90)
+        mock_provider = MagicMock()
+        mock_provider.call.return_value = json.dumps({
+            "changes": [],
+            "result": "restyled text unchanged",
+        })
+
+        result = validate_semantic_fidelity(
+            original="original " * 90,
+            restyled=restyled,
+            critic_provider=mock_provider,
+        )
+
+        assert result.corrected == restyled
+        assert result.was_modified is False
+
+    def test_rejects_truncated_result(self):
+        """A result far shorter than the input is malformed, not a valid edit."""
+        from src.validation.semantic_fidelity import validate_semantic_fidelity
+
+        restyled = " ".join(["word"] * 100)
+        mock_provider = MagicMock()
+        mock_provider.call.return_value = json.dumps({
+            "changes": [{"type": "missing", "issue": "x", "fix": "y"}],
+            "result": " ".join(["word"] * 20),
+        })
+
+        result = validate_semantic_fidelity(
+            original="original",
+            restyled=restyled,
+            critic_provider=mock_provider,
+        )
+
+        assert result.corrected == restyled
+
+    def test_accepts_legitimate_large_cut(self):
+        """Cutting a hallucinated sentence is legitimate and must survive."""
+        from src.validation.semantic_fidelity import validate_semantic_fidelity
+
+        restyled = " ".join(["word"] * 100)
+        kept = " ".join(["word"] * 65)
+        mock_provider = MagicMock()
+        mock_provider.call.return_value = json.dumps({
+            "changes": [{"type": "contradiction", "issue": "hallucination", "fix": "cut"}],
+            "result": kept,
+        })
+
+        result = validate_semantic_fidelity(
+            original="original",
+            restyled=restyled,
+            critic_provider=mock_provider,
+        )
+
+        assert result.corrected == kept
+
+
 class TestSemanticFidelityPrompt:
-    """Tests for the semantic fidelity prompt file."""
+    """Tests for the semantic fidelity prompt file.
+
+    The prompt is the whole behaviour of this check, so these assert the
+    properties an A/B run showed to matter, not incidental wording.
+    """
 
     def test_prompt_file_exists(self):
-        """The prompt file should exist in prompts/."""
         from src.utils.prompts import load_prompt
 
         prompt = load_prompt("semantic_fidelity")
@@ -263,69 +326,80 @@ class TestSemanticFidelityPrompt:
         prompt = load_prompt("semantic_fidelity")
         assert '"changes"' in prompt
         assert '"result"' in prompt
+        assert '"type"' in prompt
 
-    def test_prompt_emphasizes_conservatism(self):
-        """Prompt should emphasize minimal changes."""
+    def test_prompt_has_no_literal_placeholder_result(self):
+        """A bracketed placeholder gets echoed verbatim and wipes the paragraph."""
         from src.utils.prompts import load_prompt
 
         prompt = load_prompt("semantic_fidelity")
-        assert "INTENTIONAL" in prompt
-        assert "smallest" in prompt.lower()
+        assert "<restyled text unchanged>" not in prompt
+        assert "word for word" in prompt
 
-    def test_prompt_checks_for_invented_content(self):
-        """Prompt must audit restyled -> original, not just original -> restyled."""
+    def test_prompt_judges_at_paragraph_level(self):
+        """Restyling moves claims between sentences; the check must allow that."""
         from src.utils.prompts import load_prompt
 
         prompt = load_prompt("semantic_fidelity").lower()
-        assert "invent" in prompt
-        assert "addition" in prompt
-        # The reverse direction must be named explicitly
-        assert "restyled" in prompt and "not supported by the original" in prompt
+        assert "sentence-by-sentence correspondence" in prompt
+        assert "whole paragraph" in prompt
 
-    def test_prompt_separates_ornament_from_assertion(self):
-        """Flourish is only allowed when it asserts nothing checkable."""
+    def test_prompt_puts_structure_first(self):
         from src.utils.prompts import load_prompt
 
         prompt = load_prompt("semantic_fidelity").lower()
-        assert "ornament" in prompt
-        assert "assert" in prompt
-        assert "true or false" in prompt
-
-    def test_prompt_covers_meaning_dimensions(self):
-        """Prompt must enumerate the ways styling silently shifts meaning."""
-        from src.utils.prompts import load_prompt
-
-        prompt = load_prompt("semantic_fidelity").lower()
-        for dimension in [
-            "hedge",
-            "quantifier",
-            "causal",
-            "certainty",
-            "negation",
-            "attribution",
-        ]:
-            assert dimension in prompt, f"missing meaning dimension: {dimension}"
-
-    def test_prompt_forbids_reverting_to_original_wording(self):
-        """Fixing meaning must not become paraphrasing back to the source."""
-        from src.utils.prompts import load_prompt
-
-        prompt = load_prompt("semantic_fidelity").lower()
+        assert "structure outranks everything" in prompt
         assert "toward the original's wording" in prompt
+        assert "smallest" in prompt
+
+    def test_prompt_requires_in_place_repair(self):
+        """Missing info gets folded into an existing sentence, never appended."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity")
+        assert '"host"' in prompt
+        assert "NEVER adds a sentence" in prompt
+
+    def test_prompt_permits_consistent_additions(self):
+        """Flourish that sits comfortably with the original must survive."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        assert "added material is allowed" in prompt
+        assert "imagery" in prompt
+
+    def test_prompt_requires_both_walks(self):
+        """Walk 1 catches drops and distortions, Walk 2 catches invented specifics."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity")
+        assert '"coverage"' in prompt
+        assert '"specifics"' in prompt
+        assert "faithful" in prompt
+        assert "in_original" in prompt
+
+    def test_prompt_blocks_invented_attribution_and_counterparty(self):
+        """The two specifics an A/B run showed slip through most easily."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity")
+        assert "ATTRIBUTION" in prompt
+        assert "COUNTERPARTY" in prompt
+        assert "never more specific than it" in prompt
+
+    def test_prompt_protects_deliberate_fragments(self):
+        """Stylistic fragments are not grammar errors."""
+        from src.utils.prompts import load_prompt
+
+        prompt = load_prompt("semantic_fidelity").lower()
+        assert "fragments" in prompt
+        assert "style, not errors" in prompt
 
     def test_prompt_requires_final_reread(self):
-        """Prompt should end with a re-read of the result against the original."""
         from src.utils.prompts import load_prompt
 
         prompt = load_prompt("semantic_fidelity").lower()
         assert "final check" in prompt
-
-    def test_prompt_requests_change_type(self):
-        """Each change should be classified so the categories get enumerated."""
-        from src.utils.prompts import load_prompt
-
-        prompt = load_prompt("semantic_fidelity")
-        assert '"type"' in prompt
 
 
 class TestChangeLogging:
@@ -334,16 +408,17 @@ class TestChangeLogging:
     def test_logs_change_type_when_present(self, caplog):
         from src.validation.semantic_fidelity import validate_semantic_fidelity
 
+        restyled = " ".join(["word"] * 40) + " and a storm"
         mock_provider = MagicMock()
         mock_provider.call.return_value = json.dumps({
             "changes": [{"type": "added", "issue": "invented a storm", "fix": "cut clause"}],
-            "result": "text",
+            "result": " ".join(["word"] * 40),
         })
 
         with caplog.at_level("INFO"):
             validate_semantic_fidelity(
-                original="text",
-                restyled="text and a storm",
+                original=" ".join(["word"] * 40),
+                restyled=restyled,
                 critic_provider=mock_provider,
             )
 
@@ -353,16 +428,17 @@ class TestChangeLogging:
     def test_logs_without_type(self, caplog):
         from src.validation.semantic_fidelity import validate_semantic_fidelity
 
+        text = " ".join(["word"] * 40)
         mock_provider = MagicMock()
         mock_provider.call.return_value = json.dumps({
             "changes": [{"issue": "dropped a claim", "fix": "restored"}],
-            "result": "text",
+            "result": text,
         })
 
         with caplog.at_level("INFO"):
             validate_semantic_fidelity(
-                original="text",
-                restyled="text",
+                original=text,
+                restyled=text,
                 critic_provider=mock_provider,
             )
 
@@ -385,6 +461,24 @@ class TestTransferPipelineIntegration:
 
         config = TransferConfig(verify_semantic_fidelity=False)
         assert config.verify_semantic_fidelity is False
+
+    def test_cli_no_verify_survives_adapter_config(self):
+        """--no-verify must not be clobbered by an adapter's verify_entailment=true."""
+        from src.generation.transfer import TransferConfig
+
+        config = TransferConfig(
+            verify_semantic_fidelity=False,
+            verify_semantic_fidelity_explicit=True,
+        )
+        assert config.verify_semantic_fidelity is False
+        assert config.verify_semantic_fidelity_explicit is True
+
+    def test_verify_explicit_defaults_false(self):
+        """Without the CLI flag, config-driven verification still applies."""
+        from src.generation.transfer import TransferConfig
+
+        assert TransferConfig().verify_semantic_fidelity_explicit is False
+
 
 
 if __name__ == "__main__":

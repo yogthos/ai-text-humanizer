@@ -15,6 +15,10 @@ from ..utils.prompts import load_prompt
 
 logger = get_logger(__name__)
 
+# Below this fraction of the restyled word count, a result is malformed rather
+# than edited — cutting a hallucinated sentence lands well above it.
+MIN_RESULT_WORD_RATIO = 0.5
+
 
 @dataclass
 class FidelityResult:
@@ -65,7 +69,18 @@ def validate_semantic_fidelity(
 
         if not isinstance(corrected, str) or not corrected.strip():
             corrected = restyled
+            changes = []
             logger.warning("Semantic fidelity returned empty/null result, keeping original restyled text")
+        elif len(corrected.split()) < len(restyled.split()) * MIN_RESULT_WORD_RATIO:
+            # The critic echoed the schema placeholder, summarised what it did, or
+            # truncated the paragraph. Legitimate repairs never shrink it this far.
+            logger.warning(
+                f"Semantic fidelity result too short "
+                f"({len(corrected.split())} vs {len(restyled.split())} words), "
+                "discarding and keeping restyled text"
+            )
+            corrected = restyled
+            changes = []
 
         if changes and isinstance(changes, list):
             for change in changes:

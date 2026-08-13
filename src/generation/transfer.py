@@ -99,7 +99,10 @@ def _apply_fused_model_overrides(
         transfer_config.perspective = fused_cfg.perspective
         logger.info(f"Using fused-model perspective={fused_cfg.perspective}")
 
-    if fused_cfg.verify_entailment is not None:
+    if (
+        fused_cfg.verify_entailment is not None
+        and not transfer_config.verify_semantic_fidelity_explicit
+    ):
         transfer_config.verify_semantic_fidelity = fused_cfg.verify_entailment
         logger.info(
             f"Using fused-model verify_semantic_fidelity={fused_cfg.verify_entailment}"
@@ -146,6 +149,9 @@ class TransferConfig:
     )
     expand_for_texture_explicit: bool = (
         False  # True when set by CLI flag (takes priority over adapter config)
+    )
+    verify_semantic_fidelity_explicit: bool = (
+        False  # True when set by --no-verify (takes priority over adapter config)
     )
 
     # Paragraph merging — merge short paragraphs to reach minimum word count
@@ -337,7 +343,10 @@ class StyleTransfer:
                     f"Using adapter-specific perspective={adapter_cfg.perspective}"
                 )
 
-            if adapter_cfg.verify_entailment is not None:
+            if (
+                adapter_cfg.verify_entailment is not None
+                and not self.config.verify_semantic_fidelity_explicit
+            ):
                 self.config.verify_semantic_fidelity = adapter_cfg.verify_entailment
                 logger.info(
                     f"Using adapter-specific verify_semantic_fidelity={adapter_cfg.verify_entailment}"

@@ -411,6 +411,34 @@ class TestTransferAppliesFusedModelSettings:
         # CLI wins
         assert cfg.expand_for_texture is False
 
+    def test_fused_model_cli_no_verify_takes_priority(self):
+        """--no-verify must survive a model config that sets verify_entailment=true."""
+        from src.config import FusedModelConfig
+        from src.generation.transfer import TransferConfig, _apply_fused_model_overrides
+
+        cfg = TransferConfig()
+        cfg.verify_semantic_fidelity = False
+        cfg.verify_semantic_fidelity_explicit = True  # Set by --no-verify
+
+        fused_cfg = FusedModelConfig(verify_entailment=True)
+        _apply_fused_model_overrides(cfg, fused_cfg)
+
+        assert cfg.verify_semantic_fidelity is False
+
+    def test_fused_model_verify_applies_when_not_explicit(self):
+        """Without the CLI flag, the model config still drives verification."""
+        from src.config import FusedModelConfig
+        from src.generation.transfer import TransferConfig, _apply_fused_model_overrides
+
+        cfg = TransferConfig()
+        cfg.verify_semantic_fidelity = True
+        cfg.verify_semantic_fidelity_explicit = False
+
+        fused_cfg = FusedModelConfig(verify_entailment=False)
+        _apply_fused_model_overrides(cfg, fused_cfg)
+
+        assert cfg.verify_semantic_fidelity is False
+
 
 class TestResolveTransferTargets:
     """Priority 5: _resolve_transfer_targets unifies CLI + config resolution.

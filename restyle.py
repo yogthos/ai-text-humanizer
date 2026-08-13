@@ -257,6 +257,7 @@ def transfer_file(
     temperature: float | None = None,
     perspective: str | None = None,
     verify: bool = True,
+    verify_explicit: bool = False,
     verbose: bool = False,
     expand: bool = False,
     no_expand: bool = False,
@@ -273,6 +274,8 @@ def transfer_file(
         temperature: Generation temperature.
         perspective: Output perspective (None uses config default).
         verify: Whether to verify entailment.
+        verify_explicit: True when --no-verify was passed, so adapter/model
+            config cannot re-enable verification.
         verbose: Whether to print verbose output.
         expand: Enable texture expansion (CLI flag).
         no_expand: Disable texture expansion (CLI flag).
@@ -326,6 +329,7 @@ def transfer_file(
         config = TransferConfig(
             temperature=temperature,
             verify_semantic_fidelity=verify,
+            verify_semantic_fidelity_explicit=verify_explicit,
             perspective=effective_perspective,
             max_expansion_ratio=gen.max_expansion_ratio,
             target_expansion_ratio=gen.target_expansion_ratio,
@@ -344,6 +348,7 @@ def transfer_file(
         config = TransferConfig(
             temperature=temperature,
             verify_semantic_fidelity=verify,
+            verify_semantic_fidelity_explicit=verify_explicit,
             perspective=effective_perspective,
             use_structural_rag=True,
             expand_for_texture=expand_for_texture,
@@ -810,6 +815,7 @@ def main():
         temperature=args.temperature,
         perspective=args.perspective,
         verify=not args.no_verify,
+        verify_explicit=args.no_verify,
         verbose=args.verbose,
         expand=args.expand,
         no_expand=args.no_expand,
